@@ -122,8 +122,7 @@ Harness gotchas:
 
 Reproducing a bug under the user's real config (most real bugs only showed up there): a child with
 `child.restart({ '--cmd', 'set rtp^=~/.config/nvim packpath^=~/.local/share/nvim/site', '-u',
-vim.fn.expand('~/.config/nvim/init.lua') })`, then `set termguicolors` and a `Normal` background (diffchar
-raises E420 without one). `child.get_screenshot()` errors with their colorscheme; read the screen with
+vim.fn.expand('~/.config/nvim/init.lua') })`, then `set termguicolors`. `child.get_screenshot()` errors with their colorscheme; read the screen with
 `vim.fn.screenstring(row, col)` and highlights with `vim.fn.screenattr`. Throwaway scripts go in `/tmp`.
 
 Bugs the user hit come as reports from `nvim/lua/errlog/` (see its `AGENTS.md`): keys, windows, repo state

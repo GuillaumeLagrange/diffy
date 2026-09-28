@@ -21,7 +21,7 @@ function M.confirm(session, lines, cb)
   vim.bo[buf].modifiable = false
   session_mod.register_buffer(session, 'prompt', buf)
 
-  local win = vim.api.nvim_open_win(buf, true, {
+  local win = vim.api.nvim_open_win(buf, false, {
     relative = 'editor',
     width = width,
     height = height,
@@ -31,6 +31,10 @@ function M.confirm(session, lines, cb)
     border = 'rounded',
     zindex = 200,
   })
+  -- copied from a diff window: bound, its cursor would drag the diff's along
+  vim.wo[win].scrollbind = false
+  vim.wo[win].cursorbind = false
+  vim.api.nvim_set_current_win(win)
 
   local done = false
   local function finish(accepted)

@@ -151,12 +151,14 @@ T['hovering a commented line previews it over the other diff window with its ran
   MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
   MiniTest.expect.equality(ui.rows_with(child, 'right', 'DiffyThreadRange'), {})
 
-  -- K enters the thread; q leaves it and returns to the diff
+  -- K enters the thread; q leaves it and returns to the diff, on the same
+  -- commented line, where the hover shows it again
   child.type_keys('5G', 'K')
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
   child.type_keys('q')
-  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
+  MiniTest.expect.equality(ui.thread_float(child).focused, false)
   MiniTest.expect.equality(child.api.nvim_get_current_win(), w.right)
+  MiniTest.expect.equality(child.api.nvim_win_get_cursor(w.right)[1], 5)
 
   child.cmd('Diffy close')
 end
@@ -253,6 +255,76 @@ T['replying keeps the thread in view above the reply box, then goes back into it
   ui.wait_ready_raw(child)
   float = ui.thread_float(child)
   MiniTest.expect.equality({ float.focused, float.text[#float.text] }, { true, 'second point' })
+  child.type_keys('q')
+
+  child.cmd('Diffy close')
+end
+
+T['leaving a comment box or the thread float puts the diff cursor back where it was'] = function()
+  open_default()
+  local w = ui.wins(child)
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('12G', 'l')
+  local function cursor()
+    return { child.api.nvim_get_current_win() == w.right, child.api.nvim_win_get_cursor(w.right) }
+  end
+
+  arm_ready_raw('compose')
+  child.type_keys('gc')
+  ui.wait_ready_raw(child)
+  child.type_keys('<Esc>', 'q')
+  MiniTest.expect.equality(cursor(), { true, { 12, 1 } })
+
+  arm_ready_raw('compose')
+  child.type_keys('gc')
+  ui.wait_ready_raw(child)
+  child.type_keys('first point<CR>more<CR>and more', '<Esc>')
+  arm_ready_raw('review')
+  child.type_keys('<C-s>')
+  ui.wait_ready_raw(child)
+  MiniTest.expect.equality(cursor(), { true, { 12, 1 } })
+
+  child.type_keys('K', 'G', 'q')
+  MiniTest.expect.equality(cursor(), { true, { 12, 1 } })
+
+  child.cmd('Diffy close')
+end
+
+T['e and dd in the thread float act on the draft under the cursor'] = function()
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'first point')
+  child.api.nvim_set_current_win(w.right)
+  child.fn.win_execute(w.right, 'call cursor(5, 1)')
+  child.type_keys('K')
+  arm_ready_raw('compose')
+  child.type_keys('r')
+  ui.wait_ready_raw(child)
+  child.type_keys('second point', '<Esc>')
+  arm_ready_raw('review')
+  child.type_keys('<C-s>')
+  ui.wait_ready_raw(child)
+
+  child.type_keys('gg')
+  arm_ready_raw('compose')
+  child.type_keys('e')
+  ui.wait_ready_raw(child)
+  MiniTest.expect.equality(child.api.nvim_buf_get_lines(0, 0, -1, false), { 'first point' })
+  child.type_keys('<Esc>', 'A, edited', '<Esc>')
+  arm_ready_raw('review')
+  child.type_keys('<C-s>')
+  ui.wait_ready_raw(child)
+
+  -- back into the thread, on the edited card
+  local float = ui.thread_float(child)
+  MiniTest.expect.equality({ float.focused, float.text[2], float.text[4] }, { true, 'first point, edited', 'second point' })
+  MiniTest.expect.equality(child.api.nvim_win_get_cursor(0)[1], 1)
+
+  child.type_keys('dd')
+  child.fn.win_execute(w.right, 'call cursor(5, 1)')
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('K')
+  MiniTest.expect.equality(ui.thread_float(child).text, { 'You  just now  draft', 'second point' })
   child.type_keys('q')
 
   child.cmd('Diffy close')
@@ -586,6 +658,8 @@ T['screenshot: gc + <C-s> shows sign, summary and mirrored blank lines'] = funct
   open_default()
   local w = ui.wins(child)
   write_comment(w.right, 5, 'needs a null check')
+  -- off the thread: no hover preview over the mirrored blank line
+  child.type_keys('1G')
   MiniTest.expect.reference_screenshot(child.get_screenshot())
 
   child.cmd('Diffy close')

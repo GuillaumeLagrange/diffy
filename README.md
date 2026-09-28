@@ -138,11 +138,12 @@ diffy), `pending` (in your unsubmitted GitHub review), `sent` (exported to the a
 also says `outdated` or `✓ resolved`. Bodies render as markdown; suggestion blocks are labelled, empty
 ones as "remove these lines". A preview taller than half the window is cut, with a hint to press `K`.
 
-In the thread float, the footer lists the keys that apply: `r` reply, `e` edit your draft, `dd` delete
-your draft, `x` resolve/unresolve, `]t`/`[t` switch thread, `q` close. A reply is written in a box under
-the thread, which stays in view; saving or cancelling goes back into the thread. In the compose float,
-`<C-g>s` inserts a GitHub suggestion block with the commented lines. `gP` shows the PR description and
-its conversation the same way.
+In the thread float, the footer lists the keys that apply: `r` reply, `e` edit the draft under the cursor,
+`dd` delete the draft under the cursor, `x` resolve/unresolve, `]t`/`[t` switch thread, `q` close. A
+reply or an edit is written in a box under the thread, which stays in view; saving or cancelling goes
+back into the thread. Leaving a comment box or the thread for the diff puts the cursor back where it
+was. In the compose float, `<C-g>s` inserts a GitHub suggestion block with the commented lines. `gP`
+shows the PR description and its conversation the same way.
 
 The thread lists use [snacks.nvim](https://github.com/folke/snacks.nvim)'s picker when it's installed:
 fuzzy search over every comment; the preview shows the code the thread is on (its lines numbered and

@@ -19,9 +19,10 @@ document, being retired; don't cite it (or this file) from code or tests.
 ```
 plugin/diffy.lua        :Diffy command + completion, nothing else at startup
 lua/diffy/
-  init.lua              setup/config, :Diffy dispatch, M.start (open a session) / M.build (render pipeline)
+  init.lua              setup/config, :Diffy dispatch, M.start (open a session) / M.build (render pipeline),
+                        M.debug_state (sessions + recent commands for the user config's errlog reports)
   session.lua           one session per tab: registry, augroup, namespaces, keymap tracking, layout, teardown
-  git/run.lua           every git/gh subprocess (vim.system), error notify, DiffyReady
+  git/run.lua           every git/gh subprocess (vim.system), error notify, DiffyReady, M.recent (last 50)
   git/parse.lua         pure parsers for git's -z formats (log, name-status, numstat, status v2, ls-files -u)
   git/repo.lua          root, merge-base, base resolution, status, default range, diff args
   selection.lua         log selection -> (left rev, right rev); the real-file rule
@@ -125,10 +126,13 @@ vim.fn.expand('~/.config/nvim/init.lua') })`, then `set termguicolors` and a `No
 raises E420 without one). `child.get_screenshot()` errors with their colorscheme; read the screen with
 `vim.fn.screenstring(row, col)` and highlights with `vim.fn.screenattr`. Throwaway scripts go in `/tmp`.
 
+Bugs the user hit come as reports from `nvim/lua/errlog/` (see its `AGENTS.md`): keys, windows, repo state
+and `debug_state()` at the time of the error.
+
 Seeing what the user sees (colours, avatars, floats): a headless compositor running kitty › zellij › nvim
 with the real config and `--listen`, screenshotted with `grim`:
 
-- `WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 setsid -f sway -c conf`, where `conf` holds
+- `WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 NVIM_ERRLOG=0 setsid -f sway -c conf`, where `conf` holds
   `output HEADLESS-1 resolution 1500x800` and `exec kitty -o background_opacity=1 zellij --config
   z.kdl -s NAME -n layout.kdl`. `z.kdl` is the user's zellij config plus `show_startup_tips false` (the tip
   popup covers the pane); the layout's pane runs `nvim --listen SOCK`. Unset `ZELLIJ*` first, or zellij

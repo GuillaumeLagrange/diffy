@@ -383,4 +383,56 @@ function M.command(fargs)
   M.open(fargs)
 end
 
+--- Plain-data snapshot of every session and the recent git/gh commands, for
+--- error reports (the user config's errlog). Fields of a half-built session
+--- may be nil.
+function M.debug_state()
+  local cur_tab = vim.api.nvim_get_current_tabpage()
+  local sessions = {}
+  for _, s in pairs(session.sessions) do
+    local selected = {}
+    if s.sel and s.entries then
+      for i = s.sel.top, s.sel.bottom do
+        local e = s.entries[i]
+        if e then
+          selected[#selected + 1] = { kind = e.kind, rev = e.rev, subject = e.subject }
+        end
+      end
+    end
+    local bufs = {}
+    for name, buf in pairs(s.bufs or {}) do
+      bufs[name] = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or '<wiped>'
+    end
+    local review = s.review
+    if type(review) == 'table' then
+      review = {
+        backend = review.backend and review.backend.name,
+        branch = review.branch,
+        threads = review.threads and #review.threads,
+      }
+    end
+    sessions[#sessions + 1] = {
+      id = s.id,
+      current = s.tab == cur_tab,
+      root = s.root,
+      range = s.range,
+      sel = s.sel,
+      selected = selected,
+      entries = s.entries and #s.entries,
+      current_path = s.current_path,
+      current_file_line = s.current_file_line,
+      hidden_side = s.hidden_side,
+      panel_hidden = s.panel_hidden,
+      conflict_active = s.conflict_active,
+      conflict_path = s.conflict_path,
+      checkout_sha = s.checkout_sha,
+      gen = s.gen,
+      wins = s.wins,
+      bufs = bufs,
+      review = review,
+    }
+  end
+  return { sessions = sessions, commands = require('diffy.git.run').recent }
+end
+
 return M

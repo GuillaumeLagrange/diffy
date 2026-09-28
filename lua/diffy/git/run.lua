@@ -3,6 +3,12 @@
 -- result via `opts.on_exit`, scheduled onto the main loop.
 local M = {}
 
+local RECENT_MAX = 50
+--- The last `RECENT_MAX` commands, oldest first, for error reports
+--- (`diffy.debug_state`). `code` stays nil while running; `dropped` is set
+--- when the result was discarded as stale.
+M.recent = {}
+
 --- Run `git <args>` asynchronously.
 --- @param opts { cwd: string, on_exit?: fun(res: vim.SystemCompleted), notify_on_error?: boolean, session?: table, gen?: integer }
 --- @return vim.SystemObj
@@ -25,9 +31,19 @@ end
 function M.run(cmd, opts)
   opts = opts or {}
   local session, gen = opts.session, opts.gen
+  local entry = { cmd = cmd, cwd = opts.cwd, session = session and session.id, gen = gen, at = os.date('%H:%M:%S') }
+  local started = vim.uv.hrtime()
+  table.insert(M.recent, entry)
+  if #M.recent > RECENT_MAX then
+    table.remove(M.recent, 1)
+  end
   return vim.system(cmd, { cwd = opts.cwd, text = true }, function(res)
+    entry.code = res.code
+    entry.ms = math.floor((vim.uv.hrtime() - started) / 1e6)
+    entry.stderr = res.code ~= 0 and (res.stderr or ''):sub(1, 2000) or nil
     vim.schedule(function()
       if session and (session.closed or (gen ~= nil and session.gen ~= gen)) then
+        entry.dropped = true
         return
       end
       if res.code ~= 0 and opts.notify_on_error ~= false then

@@ -29,17 +29,20 @@ lua/diffy/
   git/parse.lua         pure parsers for git's -z formats (log, name-status, numstat, status v2, ls-files -u)
   git/repo.lua          root, merge-base, base resolution, status, default range, diff args
   selection.lua         log selection -> (left rev, right rev); the real-file rule
-  panels/log.lua        commits view: entries per view kind, selection keys
-  panels/tree.lua       files view: tree rows, staging keys, file navigation
-  diffpair.lua          the two diff windows: buffers, diff mode, winbars, shared keys
-  navigation.lua        BufWinEnter on the right window: swap the pair when you jump to another file
-  checkout.lua          X full checkout, .git/diffy/checkout.json, restore
+  panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), selection keys
+  panels/commitmsg.lua  full commit message float beside the column while the log cursor rests on a commit
+  panels/tree.lua       files view: tree rows (Unstaged/Staged sections for the working tree), staging keys, file navigation
+  diffpair.lua          the two diff windows: buffers, diff mode, winbars, b:diffy_title, shared keys
+  navigation.lua        BufWinEnter on the diff windows, reacted to on the next tick: swap the pair when you
+                        jump to another file; a left-window jump is moved to the right window
+  checkout.lua          X checkout mode (the selected commit stays checked out as you move), checkout.json, restore
   conflict.lua          :Diffy conflicts and the 4-window conflict view
   prompt.lua            key-driven yes/no and pick-one floats (vim.fn.confirm can't be driven in tests)
   highlight.lua         highlight groups (default links, card backgrounds) and width-fitting helpers
-  avatar.lua            GitHub avatars over the terminal (kitty graphics): detect, fetch, place, clear
+  avatar.lua            images over the terminal (kitty graphics): avatars, body badges; detect, fetch, place, clear
   review/model.lua      thread data, excerpt relocation, line tracking, GitHub anchor validity/position
   review/ui.lua         signs, summaries, comment cards (thread float, gP), compose float, thread jumps
+  review/render.lua     comment body -> card lines: HTML to markdown, link table (gx), <details> folds, badges
   review/threads.lua    the threads view (:Diffy threads): grouped rows, preview pane, jump keys
   review/store.lua      JSON in .git/diffy/<branch>/
   review/local.lua      local backend + review.md export
@@ -67,7 +70,7 @@ Conventions the code relies on:
   dropping one link drops the chain.
 - **DiffyReady.** `run.ready({ session, event })` fires `User DiffyReady` when something finished drawing.
   Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `choose`, `conflict`,
-  `checkout`, `restore`, `pr`, `close`. Tests wait on these; never sleep.
+  `checkout`, `restore`, `pr`, `close`, `commitmsg`. Tests wait on these; never sleep.
 - **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `branch`, `author`,
   `place(session, thread) -> {win, start_line, end_line} | nil` (in the open file), `view_place` (the same
   for any file of the current pair, or of a given pair: the threads view uses it to pick a selection that

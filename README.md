@@ -208,6 +208,7 @@ All set with `default = true`, so a colorscheme or your config can override any 
 
 ## Tests
 
-From this directory: `make test` (the whole suite, about 45 s), `make test FILE=tests/test_staging.lua`.
+From this directory: `make test` (the whole suite, one nvim per test file in parallel, about 10 s; `JOBS=N`
+caps the parallelism), `make test FILE=tests/test_staging.lua`.
 `make test-gh` runs the GitHub tests against the real sandbox repository, opening and closing a throwaway
 PR per test.

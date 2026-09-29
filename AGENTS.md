@@ -9,8 +9,8 @@ document, being retired; don't cite it (or this file) from code or tests.
 
 - `~/.config/nvim` is an out-of-store symlink to `~/dotfiles/nvim`: edits are live, no Home Manager rebuild.
   `nvim/plugin/diffy.lua` prepends `nvim/diffy` to the runtimepath and sets the user's `<leader>dv*` maps.
-- Run tests from `nvim/diffy/`: `make test` (~45 s, offline), `make test FILE=tests/test_x.lua`,
-  `make test-gh` (live GitHub, opt-in).
+- Run tests from `nvim/diffy/`: `make test` (~10 s, offline, test files in parallel, `JOBS=N`
+  to cap), `make test FILE=tests/test_x.lua`, `make test-gh` (live GitHub, opt-in).
 - Comments state the non-obvious why, invariants and gotchas; no narration of how the code came to be.
 - A change that affects behaviour updates `README.md`.
 
@@ -93,6 +93,8 @@ Rules for every test:
 6. Boundaries and transitions over happy-path repeats. Regression tests come from real bugs.
 7. Deterministic: wait on `DiffyReady` or `vim.wait` on an observable condition; no network outside
    `make test-gh`. Git, fugitive and nvim are never mocked; the only fake is the `gh` transport.
+   Test files run concurrently (one nvim each): anything outside `vim.fn.tempname()`, like the fixed
+   `/tmp/diffy-*-fixture` screenshot dirs, needs a path no other file uses.
 8. The leak check (`tests/helpers/leak.lua`, `post_case` of every UI file) fails a case that leaves a diffy
    augroup, `diffy://` buffer, diffy keymap, extmark, extra tab/window, changed option outside the tab, or a
    listed `[No Name]`/fugitive buffer.

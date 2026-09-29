@@ -121,7 +121,7 @@ end
 
 --- Commit subjects of log rows `texts` (default: every drawn log row),
 --- stripped of the current-row marker, padding and 7-char sha;
---- 'Unstaged'/'Staged' pass through.
+--- 'Working tree' passes through.
 function M.log_subjects(child, texts)
   local out = {}
   for i, t in ipairs(texts or M.layout(child).log) do

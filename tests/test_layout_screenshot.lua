@@ -24,7 +24,7 @@ local T = MiniTest.new_set({
       repo.dir = fixed_dir
       repo:commit('base', { ['f.txt'] = Repo.lines(20), ['g.txt'] = Repo.lines(5, 'g') })
       repo:commit('edit', { ['f.txt'] = Repo.edit(10, 'changed') })
-      -- an uncommitted worktree edit, so the default `Unstaged` selection
+      -- an uncommitted worktree edit, so the default working tree selection
       -- has something real to show.
       vim.fn.writefile(Repo.edit(3, 'uncommitted')(vim.fn.readfile(repo.dir .. '/f.txt')), repo.dir .. '/f.txt')
       child.fn.chdir(repo.dir)

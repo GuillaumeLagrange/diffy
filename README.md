@@ -40,8 +40,8 @@ require('diffy').setup({
 
 | Command | Shows | Selected at start |
 |---|---|---|
-| `:Diffy` | Unstaged, Staged, commits `@{u}..HEAD` (or the last 20) | Unstaged |
-| `:Diffy branch [base]` | Unstaged, Staged, commits since the merge-base with `base` | all commits |
+| `:Diffy` | Working tree, commits `@{u}..HEAD` (or the last 20) | Working tree |
+| `:Diffy branch [base]` | Working tree, commits since the merge-base with `base` | all commits |
 | `:Diffy A..B`, `:Diffy A...B` | the commits of the range | all |
 | `:Diffy pr` | the commits of the current branch's pull request | all |
 | `:Diffy file [path]` | commits touching the file (default: current buffer), across renames | newest |

@@ -1,5 +1,5 @@
--- The log panel: builds the entry list (Unstaged,
--- Staged, commits), renders it, and owns the contiguous-selection keys.
+-- The log panel: builds the entry list (the working tree, then commits),
+-- renders it, and owns the contiguous-selection keys.
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
@@ -51,10 +51,7 @@ local function worktree_prefix(spec)
   if spec.kind == 'range' or spec.kind == 'file' or spec.kind == 'pr' then
     return {}
   end
-  return {
-    { kind = 'unstaged', label = 'Unstaged', rev = 'WORKTREE' },
-    { kind = 'staged', label = 'Staged', rev = 'INDEX' },
-  }
+  return { { kind = 'worktree', label = 'Working tree', rev = 'WORKTREE' } }
 end
 
 local function prefixed(prefix, commits)
@@ -151,7 +148,7 @@ function M.build_entries(root, spec, cb, session)
     end, session)
   elseif spec.kind == 'pr' then
     -- `spec.base` is already the PR's resolved base (`repo.base_ref` of its
-    -- `baseRefName`), and there is no Unstaged/Staged prefix (readiness
+    -- `baseRefName`), and there is no working tree entry (readiness
     -- guarantees a clean tree at the PR head).
     merge_base_entries(root, spec.base, prefix, cb, session)
   elseif spec.kind == 'file' then
@@ -178,8 +175,8 @@ function M.build_entries(root, spec, cb, session)
   end
 end
 
---- Default selection for `spec` over `entries`: `Unstaged`
---- alone for `:Diffy`, all commits (excluding Unstaged/Staged) for
+--- Default selection for `spec` over `entries`: the working tree
+--- alone for `:Diffy`, all commits (excluding the working tree) for
 --- `:Diffy branch`, everything for an explicit range.
 function M.default_selection(entries, spec)
   if #entries == 0 then
@@ -197,7 +194,7 @@ function M.default_selection(entries, spec)
   end
   local first_commit = 1
   if spec.kind == 'branch' then
-    first_commit = 3 -- past Unstaged/Staged
+    first_commit = 2 -- past the working tree
   end
   local top = selection.first_selectable(entries)
   local bottom = selection.last_selectable(entries)
@@ -220,7 +217,7 @@ local MARK = '▌'
 local function entry_line(entry, selected, width)
   local head = (selected and MARK or ' ') .. ' '
   if entry.kind ~= 'commit' then
-    local label = entry.kind == 'unstaged' and 'Unstaged' or 'Staged'
+    local label = entry.label
     local text = head .. hl.truncate(label, width - 2)
     return text, { { #head, #text, 'DiffyLabel' } }
   end

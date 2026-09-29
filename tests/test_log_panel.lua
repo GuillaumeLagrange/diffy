@@ -39,10 +39,10 @@ local function open_branch()
   ui.wait_ready(child)
 end
 
-local all_entries = { 'Unstaged', 'Staged', 'Shift', 'Add', 'Delete', 'Rename', 'Merge branch \'main\' into feat', 'C1' }
+local all_entries = { 'Working tree', 'Shift', 'Add', 'Delete', 'Rename', 'Merge branch \'main\' into feat', 'C1' }
 local c1_tree = { 'M f.txt' .. (' '):rep(27) .. '+1 -1' }
 
-T[':Diffy branch lists Unstaged, Staged and the branch commits, with only the merge dimmed'] = function()
+T[':Diffy branch lists the working tree and the branch commits, with only the merge dimmed'] = function()
   open_branch()
 
   MiniTest.expect.equality(subjects(), all_entries)
@@ -53,7 +53,7 @@ end
 
 T[']r from the commit before the merge lands on the commit after it, skipping it'] = function()
   open_branch()
-  ui.select_log_row(child, 6)
+  ui.select_log_row(child, 5)
   MiniTest.expect.equality(selected(), { 'Rename' })
 
   child.api.nvim_set_current_win(ui.wins(child).right)
@@ -89,7 +89,7 @@ end
 
 T['rapid J J J ends up showing the last selection, even if an earlier one\'s git calls resolve later'] = function()
   open_branch()
-  ui.select_log_row(child, 4) -- Add
+  ui.select_log_row(child, 3) -- Add
 
   -- J visits Delete, Rename, then (skipping the merge) C1. Hold back every
   -- diff call naming Delete's commit until released below, so its render

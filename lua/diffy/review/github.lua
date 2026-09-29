@@ -595,7 +595,8 @@ end
 
 --- Where `thread` shows in the session's current pair/file, or `nil`.
 function M.place(session, thread)
-  return place_at(session.review, thread, session.pair.left, session.pair.right, session.current_path)
+  local pair = session.file_pair or session.pair
+  return place_at(session.review, thread, pair.left, pair.right, session.current_path)
 end
 
 --- Where `thread` shows in `pair` (default: the current one), whichever

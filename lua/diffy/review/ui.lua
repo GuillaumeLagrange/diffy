@@ -1169,7 +1169,8 @@ function M.compose(session, mode)
 
   local buf = vim.api.nvim_win_get_buf(win)
   local excerpt = vim.api.nvim_buf_get_lines(buf, start_line - 1, end_line, false)
-  local rev = side == 'left' and session.pair.left or session.pair.right
+  local pair = session.file_pair or session.pair
+  local rev = side == 'left' and pair.left or pair.right
   local anchor = {
     path = session.current_path,
     side = side == 'left' and 'old' or 'new',
@@ -1181,7 +1182,7 @@ function M.compose(session, mode)
   local function pin(r)
     return r == 'HEAD' and session.head_sha or r
   end
-  local pinned_left, pinned_right = pin(session.pair.left), pin(session.pair.right)
+  local pinned_left, pinned_right = pin(pair.left), pin(pair.right)
 
   local suggestion = review.backend.capabilities.suggestions and excerpt or nil
   M.open_compose(session, win, start_line, end_line, function(body)
@@ -1731,12 +1732,23 @@ function M.goto_thread(session, thread, revealed)
   if thread.resolved and review.hide_resolved then
     review.hide_resolved, redraw = false, true
   end
-  if session.current_path ~= thread.anchor.path then
-    if not require('diffy.panels.tree').open_path(session, thread.anchor.path) then
-      vim.notify(('diffy: %s has no changes in this selection'):format(thread.anchor.path), vim.log.levels.WARN)
+  local tree = require('diffy.panels.tree')
+  local path = thread.anchor.path
+  local function shows(pair)
+    return review.backend.view_place(session, thread, pair) ~= nil
+  end
+  -- the working tree's sections can list the path twice: open the row showing the thread
+  local reopen = session.current_path ~= path or not shows(session.file_pair or session.pair)
+  if reopen and tree.open_path(session, path, shows) then
+    redraw = false
+  elseif session.current_path ~= path then
+    if not tree.open_path(session, path) then
+      vim.notify(('diffy: %s has no changes in this selection'):format(path), vim.log.levels.WARN)
       return
     end
-  elseif redraw then
+    redraw = false
+  end
+  if redraw then
     M.decorate(session)
   end
   local place = thread._place

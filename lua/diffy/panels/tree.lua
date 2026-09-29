@@ -1,7 +1,9 @@
 -- The file tree panel: the diff between the current selection's
 -- (left, right) as a nested directory tree (collapsible on
 -- `za`, chains of single-child dirs flattened into one row), with rename
--- pairs, +n/-m counts and the staging keys (`s`/`u`/`-`/`S`/`U`).
+-- pairs, +n/-m counts and the staging keys (`s`/`u`/`-`/`S`/`U`). The
+-- working tree alone shows as two sections, Unstaged and Staged, each file
+-- row carrying its section's pair.
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
@@ -10,9 +12,9 @@ local hl = require('diffy.highlight')
 
 local M = {}
 
-local function diff_cmd(session, format_flag)
+local function diff_cmd(session, pair, format_flag)
   local args = { 'diff', '-z', '-M', format_flag }
-  vim.list_extend(args, repo.diff_args(session.pair.left, session.pair.right))
+  vim.list_extend(args, repo.diff_args(pair.left, pair.right))
   if session.follow_pathspec then
     table.insert(args, '--')
     vim.list_extend(args, session.follow_pathspec)
@@ -62,11 +64,11 @@ local function drop_unmerged_duplicates(entries)
   return deduped
 end
 
---- name-status + numstat for the current selection, merged by path, plus
---- untracked files (only when the selection is exactly Unstaged).
-local function build_diff_entries(session, gen, cb)
-  local ns_args = diff_cmd(session, '--name-status')
-  local num_args = diff_cmd(session, '--numstat')
+--- name-status + numstat for `pair`, merged by path, plus untracked files
+--- for the unstaged pair (index -> worktree).
+local function build_diff_entries(session, pair, gen, cb)
+  local ns_args = diff_cmd(session, pair, '--name-status')
+  local num_args = diff_cmd(session, pair, '--numstat')
 
   run.git(ns_args, {
     cwd = session.root,
@@ -87,7 +89,7 @@ local function build_diff_entries(session, gen, cb)
             return
           end
           local entries = merge_counts(ns_list, numstat)
-          if session.pair.left == 'INDEX' and session.pair.right == 'WORKTREE' then
+          if pair.left == 'INDEX' and pair.right == 'WORKTREE' then
             for _, s in ipairs(session.status_entries or {}) do
               if s.kind == 'untracked' then
                 table.insert(entries, { status = '?', path = s.path })
@@ -185,10 +187,33 @@ local function layout(node, path, chain, base, depth, rows)
   end
 end
 
---- Group a flat, path-sorted entry list into display rows.
-local function group_rows(entries)
+--- Group a flat, path-sorted entry list into display rows, `depth` deep,
+--- file rows tagged with `pair` (a section's pair, or nil).
+local function group_rows(entries, depth, pair, rows)
+  rows = rows or {}
+  local first = #rows + 1
+  layout(build_tree(entries), '', '', '', depth or 0, rows)
+  for i = first, #rows do
+    rows[i].pair = rows[i].kind == 'file' and pair or nil
+  end
+  return rows
+end
+
+--- The two sections' rows: a header (`Unstaged (n)`/`Staged (n)`) then its
+--- files one level deeper. Both headers stay even when one section is
+--- empty; with no changes at all there are no rows.
+local function section_rows(unstaged, staged)
   local rows = {}
-  layout(build_tree(entries), '', '', '', 0, rows)
+  if #unstaged == 0 and #staged == 0 then
+    return rows
+  end
+  for _, s in ipairs({
+    { label = 'Unstaged', pair = selection.UNSTAGED, entries = unstaged },
+    { label = 'Staged', pair = selection.STAGED, entries = staged },
+  }) do
+    table.insert(rows, { kind = 'section', label = s.label, count = #s.entries, pair = s.pair, depth = 0 })
+    group_rows(s.entries, 1, s.pair, rows)
+  end
   return rows
 end
 
@@ -210,6 +235,10 @@ local function row_line(row, width)
   if row.kind == 'dir' then
     local text = hl.truncate(indent .. row.name .. '/', width)
     return text, { { #indent, #text, 'DiffyDirectory' } }
+  end
+  if row.kind == 'section' then
+    local text = hl.truncate(('%s (%d)'):format(row.label, row.count), width)
+    return text, { { 0, #text, 'DiffyLabel' } }
   end
   local e = row.entry
   local counts = ''
@@ -264,24 +293,13 @@ local function clean_ctx(session)
   }
 end
 
---- True when the current selection is exactly `Unstaged` (left=index,
---- right=worktree) or exactly `Staged` (left=HEAD, right=index) - the only
---- two selections staging keys operate on.
-local function staging_pane(session)
-  if session.pair.left == 'INDEX' and session.pair.right == 'WORKTREE' then
-    return 'unstaged'
-  elseif session.pair.left == 'HEAD' and session.pair.right == 'INDEX' then
-    return 'staged'
+--- Staging keys only work on the working tree selected alone.
+local function require_split(session)
+  if not (session.pair and session.pair.split) then
+    vim.notify('diffy: staging needs the Working tree selection alone', vim.log.levels.WARN)
+    return false
   end
-  return nil
-end
-
-local function require_staging_pane(session)
-  local pane = staging_pane(session)
-  if not pane then
-    vim.notify('diffy: staging needs the Unstaged or Staged selection', vim.log.levels.WARN)
-  end
-  return pane
+  return true
 end
 
 --- Both paths of a rename/copy row, or the single path of any other row.
@@ -293,10 +311,15 @@ local function row_paths(row)
   return { e.path }
 end
 
+--- The row under the tree cursor and its line number.
+local function cursor_row(session)
+  local lnum = vim.api.nvim_win_get_cursor(session.wins.tree)[1]
+  return (session.tree_rows or {})[lnum], lnum
+end
+
 --- The file row under the tree cursor and its line number, or nil.
 local function row_at_cursor(session)
-  local lnum = vim.api.nvim_win_get_cursor(session.wins.tree)[1]
-  local row = session.tree_rows[lnum]
+  local row, lnum = cursor_row(session)
   if row and row.kind == 'file' then
     return row, lnum
   end
@@ -316,48 +339,88 @@ local function git_refresh(session, args)
   })
 end
 
-local function git_paths(session, verb, paths)
+--- Paths of every file row of the section headed at `lnum`.
+local function section_paths(session, lnum)
+  local paths = {}
+  for i = lnum + 1, #session.tree_rows do
+    local row = session.tree_rows[i]
+    if row.kind == 'section' then
+      break
+    end
+    if row.kind == 'file' then
+      vim.list_extend(paths, row_paths(row))
+    end
+  end
+  return paths
+end
+
+--- `git <verb> -- <paths>` for the row at the cursor: its file, or every
+--- file of its section on a header. `to` is the section the file lands in,
+--- where the cursor follows it after the re-render.
+local function stage_at_cursor(session, verb, to)
+  local row, lnum = cursor_row(session)
+  local paths
+  if row and row.kind == 'file' then
+    paths = row_paths(row)
+    session.tree_keep = { path = row.entry.path, pair = to, lnum = lnum }
+  elseif row and row.kind == 'section' then
+    paths = section_paths(session, lnum)
+    session.tree_keep = { section = row.pair, lnum = lnum }
+  end
+  if verb == 'add' then
+    -- `git add` fails on a path with nothing to stage and missing from the
+    -- worktree (a staged deletion or rename source)
+    local unstaged = {}
+    for _, r in ipairs(session.tree_rows) do
+      if r.kind == 'file' and r.pair == selection.UNSTAGED then
+        for _, p in ipairs(row_paths(r)) do
+          unstaged[p] = true
+        end
+      end
+    end
+    paths = vim.tbl_filter(function(p)
+      return unstaged[p]
+    end, paths or {})
+  end
+  if not paths or #paths == 0 then
+    session.tree_keep = nil
+    return
+  end
   local args = { verb, '--' }
   vim.list_extend(args, paths)
   git_refresh(session, args)
 end
 
---- `s`: stage the file (or both paths of a rename pair) at the cursor, or
---- mark a conflicted ('U') row resolved (warns if markers remain).
+--- `s`: stage the file (or both paths of a rename pair) or section at the
+--- cursor, or mark a conflicted ('U') row resolved (warns if markers remain).
 function M.stage(session)
   local row = row_at_cursor(session)
   if row and row.entry.status == 'U' then
     require('diffy.conflict').resolve(session, row.entry.path)
     return
   end
-  if not require_staging_pane(session) then
-    return
+  if require_split(session) then
+    stage_at_cursor(session, 'add', selection.STAGED)
   end
-  if not row then
-    return
-  end
-  git_paths(session, 'add', row_paths(row))
 end
 
---- `u`: unstage the file (or both paths of a rename pair) at the cursor.
+--- `u`: unstage the file (or both paths of a rename pair) or section at the cursor.
 function M.unstage(session)
-  if not require_staging_pane(session) then
-    return
+  if require_split(session) then
+    stage_at_cursor(session, 'reset', selection.UNSTAGED)
   end
-  local row = row_at_cursor(session)
-  if not row then
-    return
-  end
-  git_paths(session, 'reset', row_paths(row))
 end
 
---- `-`: stage from the `Unstaged` pane, unstage from the `Staged` pane.
+--- `-`: stage in the Unstaged section, unstage in the Staged section.
 function M.toggle(session)
-  local pane = require_staging_pane(session)
-  if not pane then
+  if not require_split(session) then
     return
   end
-  if pane == 'unstaged' then
+  local row = cursor_row(session)
+  if not (row and row.pair) then
+    return
+  end
+  if row.pair == selection.UNSTAGED then
     M.stage(session)
   else
     M.unstage(session)
@@ -366,18 +429,16 @@ end
 
 --- `S`: stage every change (tracked and untracked).
 function M.stage_all(session)
-  if not require_staging_pane(session) then
-    return
+  if require_split(session) then
+    git_refresh(session, { 'add', '-A' })
   end
-  git_refresh(session, { 'add', '-A' })
 end
 
 --- `U`: unstage every staged change.
 function M.unstage_all(session)
-  if not require_staging_pane(session) then
-    return
+  if require_split(session) then
+    git_refresh(session, { 'reset' })
   end
-  git_refresh(session, { 'reset' })
 end
 
 --- Open the diff pair for tree row `row` (a `{kind='file', entry=...}`),
@@ -389,6 +450,7 @@ function M.open_row(session, row, opts)
   local e = row.entry
   if e.status == 'U' then
     session.current_path = e.path
+    session.file_pair = row.pair or session.pair
     M.mark_current(session)
     -- the conflict layout is built from both diff windows
     require('diffy.diffpair').restore(session)
@@ -399,21 +461,23 @@ function M.open_row(session, row, opts)
     require('diffy.conflict').leave(session)
   end
   local diffpair = require('diffy.diffpair')
-  local ctx = clean_ctx(session)
+  local pair = row.pair or session.pair
 
   local left_spec, right_spec
   if e.status ~= 'A' and e.status ~= '?' then
-    left_spec = { rev = session.pair.left, path = e.old_path or e.path }
+    left_spec = { rev = pair.left, path = e.old_path or e.path }
   end
   if e.status ~= 'D' then
-    local right_rev = session.pair.right
-    if selection.right_is_real(session.pair, e.path, ctx) then
+    local right_rev = pair.right
+    if not row.pair and selection.right_is_real(session.pair, e.path, clean_ctx(session)) then
       right_rev = 'WORKTREE'
     end
     right_spec = { rev = right_rev, path = e.path }
   end
 
   session.current_path = e.path
+  -- the pair of the file shown, which is not `session.pair` in a section
+  session.file_pair = pair
   M.mark_current(session)
   diffpair.show(session, left_spec, right_spec)
 end
@@ -435,18 +499,42 @@ function M.has_path(session, path)
 end
 
 --- Locate the tree row for `path` and open its diff pair, updating the
---- tracked current-file line and cursor position.
---- Returns `true` if `path` is in the current file list, `false` otherwise.
-function M.open_path(session, path)
+--- tracked current-file line and cursor position. In the working tree's
+--- sections a path can have two rows: `accept(pair)`, if given, picks one;
+--- otherwise the section shown last wins (a jump back with `<C-t>` returns
+--- to the pair it left), then the first.
+--- Returns `true` if a row was opened, `false` otherwise.
+function M.open_path(session, path, accept)
+  local first
   for i, row in ipairs(session.tree_rows or {}) do
     if row.kind == 'file' and row.entry.path == path then
-      session.current_file_line = i
-      set_tree_cursor(session, i)
-      M.open_row(session, row)
-      return true
+      local pair = row.pair or session.pair
+      if accept then
+        if accept(pair) then
+          first = i
+          break
+        end
+      elseif pair == session.file_pair then
+        first = i
+        break
+      else
+        first = first or i
+      end
     end
   end
-  return false
+  if not first then
+    return false
+  end
+  session.current_file_line = first
+  set_tree_cursor(session, first)
+  M.open_row(session, session.tree_rows[first])
+  return true
+end
+
+local function is_current(session, row)
+  return row.kind == 'file'
+    and row.entry.path == session.current_path
+    and (not row.pair or row.pair == session.file_pair)
 end
 
 --- Highlight the row of the file shown in the diff pair.
@@ -458,7 +546,7 @@ function M.mark_current(session)
   local ns = require('diffy.session').namespace(session, 'tree_current')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for i, row in ipairs(session.tree_rows or {}) do
-    if row.kind == 'file' and row.entry.path == session.current_path and row.name_col then
+    if is_current(session, row) and row.name_col then
       vim.api.nvim_buf_set_extmark(buf, ns, i - 1, 0, { line_hl_group = 'DiffyCurrentFile' })
       vim.api.nvim_buf_set_extmark(buf, ns, i - 1, row.name_col[1], {
         end_col = row.name_col[2],
@@ -518,6 +606,52 @@ local function file_rows(session)
   return out
 end
 
+--- The rows for the current selection: two sections for the working tree
+--- alone, one tree otherwise. `cb(rows | nil, err)`.
+local function build_rows(session, gen, cb)
+  if not session.pair.split then
+    build_diff_entries(session, session.pair, gen, function(entries, err)
+      cb(entries and group_rows(entries), err)
+    end)
+    return
+  end
+  build_diff_entries(session, selection.UNSTAGED, gen, function(unstaged, err)
+    if not unstaged then
+      cb(nil, err)
+      return
+    end
+    build_diff_entries(session, selection.STAGED, gen, function(staged, staged_err)
+      cb(staged and section_rows(unstaged, staged), staged_err)
+    end)
+  end)
+end
+
+--- Where the cursor goes after a staging key (`session.tree_keep`): the same
+--- file in the section it moved to, else anywhere, the same section header,
+--- else the nearest row.
+local function restore_cursor(session)
+  local keep = session.tree_keep
+  session.tree_keep = nil
+  if not keep then
+    return
+  end
+  local rows = session.tree_rows
+  local found, anywhere
+  for i, row in ipairs(rows) do
+    if keep.path and row.kind == 'file' and row.entry.path == keep.path then
+      anywhere = anywhere or i
+      if row.pair == keep.pair then
+        found = i
+        break
+      end
+    elseif keep.section and row.kind == 'section' and row.pair == keep.section then
+      found = i
+      break
+    end
+  end
+  set_tree_cursor(session, found or anywhere or math.max(1, math.min(keep.lnum, #rows)))
+end
+
 --- (Re)build and render the tree for the current selection, then open the
 --- pair for whichever file was showing before (if still present) or the
 --- first file, so the diff windows never sit on a stale render. `cb`, if
@@ -526,25 +660,31 @@ end
 function M.render(session, cb)
   session.gen = (session.gen or 0) + 1
   local gen = session.gen
-  build_diff_entries(session, gen, function(entries, err)
-    if not entries then
+  build_rows(session, gen, function(rows, err)
+    if not rows then
       vim.notify('diffy: ' .. tostring(err), vim.log.levels.ERROR)
       if cb then
         cb()
       end
       return
     end
-    session.tree_rows = group_rows(entries)
+    session.tree_rows = rows
     M.redraw(session)
+    restore_cursor(session)
 
     local files = file_rows(session)
-    local target = files[1]
+    local target, same_path
     for _, i in ipairs(files) do
-      if session.tree_rows[i].entry.path == session.current_path then
-        target = i
-        break
+      local row = session.tree_rows[i]
+      if row.entry.path == session.current_path then
+        same_path = same_path or i
+        if not row.pair or row.pair == session.file_pair then
+          target = i
+          break
+        end
       end
     end
+    target = target or same_path or files[1]
 
     if target then
       session.current_file_line = target

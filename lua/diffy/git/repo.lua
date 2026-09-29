@@ -170,8 +170,8 @@ function M.default_range(root, on_exit, session)
 end
 
 --- Args to append to `git diff [flags]` for the pair `(left, right)`, where
---- each is `'INDEX'`, `'WORKTREE'`, `'HEAD'`, or a commit sha. Unstaged and
---- Staged collapse to a plain/`--cached` diff with no explicit revs.
+--- each is `'INDEX'`, `'WORKTREE'`, `'HEAD'`, or a commit sha. The unstaged
+--- and staged sections collapse to a plain/`--cached` diff with no explicit revs.
 function M.diff_args(left, right)
   if right == 'WORKTREE' then
     if left == 'INDEX' then

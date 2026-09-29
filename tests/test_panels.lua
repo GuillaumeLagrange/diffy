@@ -69,7 +69,7 @@ T['the panel toggle hides the column (diff spans the width, ]f still works) and 
 
   -- tree keys still open files after the re-show
   child.api.nvim_set_current_win(w.tree)
-  child.fn.win_execute(w.tree, 'call cursor(1, 1)')
+  child.fn.win_execute(w.tree, 'call cursor(2, 1)') -- past the Unstaged header
   ui.arm_ready(child, 'open_row')
   child.type_keys('<CR>')
   ui.wait_ready(child)
@@ -118,15 +118,16 @@ T['a long path under nested dirs renders as one row fitting the panel, status an
   local width = child.api.nvim_win_get_width(ui.wins(child).tree)
   local lines = ui.layout(child).tree
 
-  -- header, the long file (relative to its own chain), the sibling
-  MiniTest.expect.equality(#lines, 3)
-  MiniTest.expect.equality(lines[1], 'nvim/diffy/lua/diffy/')
-  local row = lines[2]
+  -- the section header, the dir header, the long file (relative to its own
+  -- chain), the sibling, the empty Staged section
+  MiniTest.expect.equality(#lines, 5)
+  MiniTest.expect.equality(lines[2], '  nvim/diffy/lua/diffy/')
+  local row = lines[3]
   -- truncated from the left with '…', keeping the file name, status and counts
-  MiniTest.expect.equality(row:match('^  M \226\128\166') ~= nil, true)
+  MiniTest.expect.equality(row:match('^    M \226\128\166') ~= nil, true)
   MiniTest.expect.equality(row:match('long_file_name%.lua +%+1 %-1$') ~= nil, true)
   MiniTest.expect.equality(row:find('a_rather', 1, true), nil)
-  MiniTest.expect.equality(lines[3]:match('^  M other%.lua +%+1 %-1$') ~= nil, true)
+  MiniTest.expect.equality(lines[4]:match('^    M other%.lua +%+1 %-1$') ~= nil, true)
   for _, l in ipairs(lines) do
     MiniTest.expect.equality(child.fn.strdisplaywidth(l) <= width, true)
   end

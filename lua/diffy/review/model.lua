@@ -20,7 +20,7 @@ local function hunk_header(line)
   return line:match('^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@')
 end
 
---- `session.pair`'s rev sentinels ('WORKTREE'/'INDEX'/'HEAD'/sha) -> an
+--- A pair's rev sentinels ('WORKTREE'/'INDEX'/'HEAD'/sha) -> an
 --- Anchor's `commit` value ('worktree'/'index'/sha). `HEAD` resolves to the
 --- concrete sha so an Anchor stays valid after new commits.
 function M.rev_to_commit(rev, head_sha)
@@ -36,8 +36,13 @@ end
 
 --- Which window ('left'/'right') currently shows `anchor`'s side of `pair`,
 --- or nil. The local backend does no cross-commit tracking: a thread only
---- shows in the exact view it was written in.
+--- shows in the exact view it was written in. A `split` pair (the working
+--- tree's two sections) shows what either section shows.
 function M.pair_side(pair, head_sha, anchor)
+  if pair.split then
+    local sel = require('diffy.selection')
+    return M.pair_side(sel.UNSTAGED, head_sha, anchor) or M.pair_side(sel.STAGED, head_sha, anchor)
+  end
   if anchor.side == 'old' and M.rev_to_commit(pair.left, head_sha) == anchor.commit then
     return 'left'
   end

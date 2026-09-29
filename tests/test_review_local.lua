@@ -726,7 +726,7 @@ T[':Diffy threads lists every thread in a float, `file` those of the file in the
   MiniTest.expect.equality(groups[1].count, 2)
   press_on_row('f.txt:5', '<CR>', 'thread')
   MiniTest.expect.equality(ui.threads_view(child), vim.NIL)
-  MiniTest.expect.equality(ui.log_subjects(child, ui.rows_with(child, 'log', 'DiffySelection')), { 'Unstaged' })
+  MiniTest.expect.equality(ui.log_subjects(child, ui.rows_with(child, 'log', 'DiffySelection')), { 'Working tree' })
   local float = ui.thread_float(child)
   MiniTest.expect.equality(float.focused, true)
   MiniTest.expect.equality(table.concat(float.text, '\n'):find('about f', 1, true) ~= nil, true)
@@ -877,14 +877,15 @@ T['review submit writes review.md for worktree, index and commit views, marks se
   write_comment(w.right, 3, 'worktree comment')
 
   ui.git(repo.dir, { 'add', '-A' })
-  ui.select_log_row(child, 2)
+  -- re-selecting refreshes: f.txt is now only in the Staged section, index on the right
+  ui.select_log_row(child, 1)
   write_comment(w.right, 3, 'staged comment')
 
   -- the tip commit alone, with a staged edit on top: a blob view, not the worktree
-  ui.select_log_row(child, 3)
+  ui.select_log_row(child, 2)
   write_comment(w.right, 15, 'commit comment')
 
-  -- back to `Unstaged`, for a predictable header range label
+  -- back to the working tree, for a predictable header range label
   ui.select_log_row(child, 1)
   local branch = ui.git(repo.dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
 
@@ -908,7 +909,8 @@ T['review submit writes review.md for worktree, index and commit views, marks se
   MiniTest.expect.equality(text:find('commit index', 1, true) ~= nil, true)
   -- worktree/index/sha, like the per-comment `commit` field, not a 7-char
   -- truncation ("worktre")
-  MiniTest.expect.equality(text:find('range: index..worktree', 1, true) ~= nil, true)
+  local head7 = ui.git(repo.dir, { 'rev-parse', '--short=7', 'HEAD' })
+  MiniTest.expect.equality(text:find('range: ' .. head7 .. '..worktree', 1, true) ~= nil, true)
 
   local reg = child.fn.getreg('+')
   MiniTest.expect.equality(reg:find(review_md, 1, true) ~= nil, true)

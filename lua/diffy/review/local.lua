@@ -125,7 +125,7 @@ end
 --- on the next `save`); marks the thread `_detached` (session-only) on
 --- failure.
 function M.place(session, thread)
-  local side = model.pair_side(session.pair, session.head_sha, thread.anchor)
+  local side = model.pair_side(session.file_pair or session.pair, session.head_sha, thread.anchor)
   local win = side and session.wins[side]
   if not win or not vim.api.nvim_win_is_valid(win) then
     return nil

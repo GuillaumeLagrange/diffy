@@ -3,17 +3,22 @@
 -- panels/log.lua; no git calls, no buffer/window access.
 --
 -- An entry is one of:
---   { kind = 'unstaged', rev = 'WORKTREE' }
---   { kind = 'staged',   rev = 'INDEX' }
+--   { kind = 'worktree', rev = 'WORKTREE' }
 --   { kind = 'commit', sha, parents, subject, merge, rev = sha }
 local M = {}
 
+-- The two sections of a lone working tree selection; file rows carry one of
+-- these tables as `row.pair` (compared by identity).
+M.UNSTAGED = { left = 'INDEX', right = 'WORKTREE' }
+M.STAGED = { left = 'HEAD', right = 'INDEX' }
+
 --- Inclusive range `top_idx..bottom_idx` of `entries` (1 = newest row) ->
---- `{ left, right, top, bottom, top_idx, bottom_idx }`, with `left`/`right`
---- revs for `repo.diff_args`. Right is the top entry's rev; left is the
---- bottom entry's parent (Unstaged -> INDEX, Staged -> HEAD, commit ->
---- `sha^`), or the merge-base `entries.base` when the range reaches the
---- oldest commit of a branch/PR view and its top contains the base.
+--- `{ left, right, top, bottom, top_idx, bottom_idx, split }`, with `left`/
+--- `right` revs for `repo.diff_args`. Right is the top entry's rev; left is
+--- the bottom entry's parent (working tree -> HEAD, commit -> `sha^`), or the
+--- merge-base `entries.base` when the range reaches the oldest commit of a
+--- branch/PR view and its top contains the base. The working tree alone is
+--- `split`: the tree shows it as the UNSTAGED and STAGED sections.
 function M.resolve(entries, top_idx, bottom_idx)
   assert(top_idx <= bottom_idx, 'selection.resolve: top_idx must be <= bottom_idx')
   local top = entries[top_idx]
@@ -21,9 +26,7 @@ function M.resolve(entries, top_idx, bottom_idx)
 
   local right = top.rev
   local left
-  if bottom.kind == 'unstaged' then
-    left = 'INDEX'
-  elseif bottom.kind == 'staged' then
+  if bottom.kind == 'worktree' then
     left = 'HEAD'
   else
     left = bottom.sha .. '^'
@@ -34,7 +37,15 @@ function M.resolve(entries, top_idx, bottom_idx)
     end
   end
 
-  return { left = left, right = right, top = top, bottom = bottom, top_idx = top_idx, bottom_idx = bottom_idx }
+  return {
+    left = left,
+    right = right,
+    top = top,
+    bottom = bottom,
+    top_idx = top_idx,
+    bottom_idx = bottom_idx,
+    split = bottom.kind == 'worktree' or nil,
+  }
 end
 
 -- merge commits are never selectable as a range endpoint
@@ -63,13 +74,13 @@ end
 
 --- Whether the right side of the pair for `path` should be the real
 --- worktree file (editable) rather than a read-only blob: the top of the
---- selection is Unstaged, or it is HEAD (or the full-checkout commit passed
+--- selection is the working tree, or it is HEAD (or the full-checkout commit passed
 --- as `ctx.checkout_sha`) and `path` has no uncommitted changes.
 --- @param sel table  result of `M.resolve`
 --- @param path string
 --- @param ctx { head_sha: string, checkout_sha: string|nil, is_clean: fun(path: string): boolean }
 function M.right_is_real(sel, path, ctx)
-  if sel.top.kind == 'unstaged' then
+  if sel.top.kind == 'worktree' then
     return true
   end
   if sel.top.kind ~= 'commit' then

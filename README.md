@@ -3,9 +3,10 @@
 A diff viewer for Neovim built on git and fugitive, with a review layer: comment on diffs, then either
 hand the comments to an LLM agent or push them as a GitHub pull request review.
 
-Each `:Diffy` session lives in its own tab: a panel column (changed files on top, commits below) and a
-side-by-side diff in native diff mode. Closing the tab in any way (`:tabclose`, `:q` in a diffy window,
-`:Diffy close`, quitting nvim) cleans everything up.
+Each `:Diffy` session lives in its own tab: a column of views on the left (changed files on top, commits
+below; `column` in `setup` picks which) and a side-by-side diff in native diff mode. A view that isn't in
+the column (the review threads, by default) opens in a float over the diff. Closing the tab in any way
+(`:tabclose`, `:q` in a diffy window, `:Diffy close`, quitting nvim) cleans everything up.
 
 ## Requirements
 
@@ -17,18 +18,20 @@ side-by-side diff in native diff mode. Closing the tab in any way (`:tabclose`, 
 
 ## Install
 
-Put the `diffy` directory on the runtimepath, e.g. `vim.opt.rtp:prepend('/path/to/diffy')` (in this dotfiles
-repo, `nvim/plugin/diffy.lua` does it). `setup` is optional:
+Put this repository on the runtimepath, e.g. `vim.opt.rtp:prepend('/path/to/diffy')`. `setup` is optional:
 
 ```lua
 require('diffy').setup({
-  panel_width = 40,               -- width of the files/commits column
+  panel_width = 40,               -- width of the left column
+  -- views stacked in the left column, top to bottom: 'tree' (files), 'log' (commits),
+  -- 'threads' (review threads, compact). The others open in a float.
+  column = { 'tree', 'log' },
   keymaps = {
     toggle_panel = '<leader>e',   -- hide/show the panel column, in every diffy window
     focus_panel = '<leader>E',    -- go to the file tree, showing the column first if hidden
   },
-  -- copied to `+` by `:Diffy review export`; %s is the absolute path of review.md
-  review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed.',
+  -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
+  review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
   avatars = true,                 -- GitHub avatars in comment headers, when the terminal can draw them
 })
 ```
@@ -44,13 +47,34 @@ require('diffy').setup({
 | `:Diffy file [path]` | commits touching the file (default: current buffer), across renames | newest |
 | `:Diffy conflicts` | conflicted files, in the conflict view | first file |
 | `:Diffy panel` | hide/show the panel column | |
-| `:Diffy threads [file\|selection] [author=… state=… review=…]` | every review thread; `selection`: those the selected range shows; `file`: those of the file in the diff (`state`: open, resolved, outdated, detached). See Review | |
-| `:Diffy review export\|clear` | local review, see below | |
-| `:Diffy review push\|pull\|submit [comment\|approve\|request_changes]` | GitHub review, see below | |
+| `:Diffy threads [file] [author=… state=… review=…]` | the threads view: every review thread, grouped; `file`: those of the file in the diff (`state`: open, resolved, outdated, detached). See Review | |
+| `:Diffy review submit\|clear` | local review, see below | |
+| `:Diffy review submit [comment\|approve\|request_changes]\|push\|pull` | GitHub review, see below | |
 | `:Diffy restore` | go back to your branch after an interrupted full checkout | |
+| `:Diffy feedback` | describe what bothers you in the current session, see below | |
 | `:Diffy close` | close the session | |
 
+`<Tab>` completes subcommands and their arguments: the review subcommands and events the current session
+offers, `:Diffy threads` filters, paths for `file`, branches for `branch`.
+
 `:Diffy branch` without an argument uses the PR base of the current branch, then `origin`'s default branch.
+Either is taken through the base branch's upstream (usually `origin/main`: the remote's tip as of your last
+fetch, not a local `main` that may be behind), else the local branch, else the one remote-tracking branch
+of that name. `:Diffy pr` resolves the PR's base the same way. An explicit `base` is used as given.
+
+`:Diffy feedback` opens a box to describe something you don't like in the current session; `<C-s>` sends
+it, `q` cancels. diffy doesn't store it: it fires `User DiffyFeedback` with `data.text`, right after the box
+closes, so the handler sees the session as it was. With no such autocmd the command only warns. For
+example, to record it like an error:
+
+```lua
+vim.api.nvim_create_autocmd('User', {
+  pattern = 'DiffyFeedback',
+  callback = function(ev)
+    my_reporter.record('diffy feedback: ' .. ev.data.text, require('diffy').debug_state())
+  end,
+})
+```
 
 ## The panels
 
@@ -114,25 +138,41 @@ result (the real file) below. Works for merge, rebase, cherry-pick and stash pop
 
 ## Review
 
-Comments show as a sign on their line, 💬 for an open thread and ✓ for a resolved one, and a one-line
-summary under it (author, reply count, first line of the comment; dimmed with a ✓ when resolved). The other
-side gets matching blank lines so the diff stays aligned. Several threads under one line are listed top to
-bottom by the line they end on, then oldest first; `]t`/`[t` walk them in that order, and the hover opens
-the oldest one still open.
+Each comment draws a bar over its lines in the gutter, between the line numbers and the text, and a one-line
+summary under its last line (author, reply count, first line of the comment). The bar ends on its summary,
+turning right across the bars still going on. A bar's colour comes from its thread's id, so it stays the
+same across files and sessions; the summary's `●` and the thread float's frame take it too. Overlapping
+ranges get bars side by side, the enclosing one on the left. The open thread's bar is heavy and its summary
+bold in its colour; the other summaries under the cursor take their colour. A resolved thread's bar and
+summary are dimmed, the summary marked ✓. The other side gets matching blank lines so the diff stays
+aligned. Several summaries under one line are listed top to bottom by the line they end on, then oldest first.
+
+Moving onto a commented line opens its leftmost thread; `<Tab>`/`<S-Tab>` cycle through the others covering
+that line, left to right. `]t`/`[t` walk every thread of the side by the line its range starts on, then the
+larger range first (the one drawn further left), then oldest first.
+
+The bars take over the diff windows' `statuscolumn` (fold, sign and number columns, then the bars) while
+the file has comments, and put your own back otherwise.
 
 | Key (in a diff window) | |
 |---|---|
 | `gc` | comment on the line (visual mode: on the range); `<C-s>` or `:w` saves, `q` cancels |
-| move onto a commented line | preview its thread, over the other diff window, with its lines marked |
+| move onto a commented line | preview its leftmost thread, over the other diff window |
 | `K` / `<CR>` | enter the thread float |
-| `]t` / `[t` | next / previous thread, including several on the same line |
-| `<leader>ds` | hide / show the summaries, keeping the signs (hover still previews) |
+| `]t` / `[t` | next / previous thread, by first line, larger range first, oldest first |
+| `<Tab>` / `<S-Tab>` | next / previous thread covering the cursor line, left to right, wrapping (also in the thread float) |
+| `<leader>ds` | hide / show the summaries, keeping the bars (hover still previews) |
 | `<leader>dr` | hide / show resolved threads |
 | `<leader>dt` | hide / show comments inline altogether |
-| `<leader>dc` / `<leader>dC` | threads of this file / of the whole selected range (`:Diffy threads file`, `:Diffy threads selection`) |
+| `<leader>dC` / `<leader>dc` | the threads view: every thread / those of this file (`:Diffy threads`, `:Diffy threads file`) |
 | `gP` | PR description and conversation (`:Diffy pr`) |
 
-Threads open as a framed card over the other diff window. Each comment gets a header strip: avatar, author (on
+Threads open as a framed card over the other diff window; on an added or deleted file, where there is only
+one, right under the commented lines (above them when there's more room there), so they stay visible;
+there, the open thread's own summary is blanked while it's open, since it'd show past its right edge. A
+card is at most 100 columns wide and centred over the window's text; it follows the diff when it scrolls
+under it and is fitted again when the editor or the diff windows are resized. The
+comment boxes are placed the same way; the `gP` card is centred on the editor and refitted too. Each comment gets a header strip: avatar, author (on
 GitHub; "You" in a local review), age, and its state when it isn't published yet: `draft` (only in
 diffy), `pending` (in your unsubmitted GitHub review), `sent` (exported to the agent). The first header
 also says `outdated` or `✓ resolved`. Bodies render as markdown; suggestion blocks are labelled, empty
@@ -140,31 +180,52 @@ ones as "remove these lines". A preview taller than half the window is cut, with
 
 In the thread float, the footer lists the keys that apply: `r` reply, `e` edit the draft under the cursor,
 `dd` delete the draft under the cursor, `x` resolve/unresolve, `]t`/`[t` switch thread, `q` close. A
-reply or an edit is written in a box under the thread, which stays in view; saving or cancelling goes
+reply or an edit is written in a box under the thread, which stays in view (a reply starts in insert
+mode, an edit in normal mode at the end of the draft); saving or cancelling goes
 back into the thread. Leaving a comment box or the thread for the diff puts the cursor back where it
 was. In the compose float, `<C-g>s` inserts a GitHub suggestion block with the commented lines. `gP`
 shows the PR description and its conversation the same way.
 
-The thread lists use [snacks.nvim](https://github.com/folke/snacks.nvim)'s picker when it's installed:
-fuzzy search over every comment; the preview shows the code the thread is on (its lines numbered and
-marked, up to 3 lines of context above, the middle of a long range cut) above the thread; `<CR>` opens its
-file, moves to it and enters it (showing resolved threads again if they were hidden); snacks' `<C-q>` still
-sends the list to the quickfix. Without snacks the list goes to the quickfix; for GitHub each entry says
-which commits show the thread.
+**The threads view** lists the review's threads grouped by where they stand: Open, Outdated (no longer
+trackable to HEAD, not resolved), Detached (a local comment whose lines are gone), Resolved, and Resolved,
+outdated. Headers carry the count; the resolved groups start folded. Each row gives the file and line, who
+started the thread ("you" for yours), how many replies and who wrote the last one when it's someone else,
+`draft`/`pending`, and the first line. A thread the selected range doesn't show has its location dimmed.
+
+It opens in a float over the diff with a preview beside it (on a wide enough screen): which commits show
+the thread (GitHub), the code it's on (its lines numbered and marked, up to 3 lines of context above, the
+middle of a long range cut), then the thread. With `'threads'` in `column` it sits in the left column
+instead, compact and without the preview, and `:Diffy threads` moves the cursor into it.
+
+| Key (in the threads view) | |
+|---|---|
+| `<CR>` | go to the thread: its file, its line, into its float. An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). Resolved or hidden threads are shown again. On a header: fold / unfold |
+| `<Tab>` | fold / unfold the group under the cursor |
+| `x` | resolve / unresolve the thread under the cursor |
+| `m` | only threads you started / everyone's (GitHub) |
+| `<C-f>` / `<C-b>` | scroll the preview |
+| `q` / `<Esc>` | close the float; leaving it for another window closes it too |
 
 Avatars need a terminal with the kitty graphics protocol, `curl` and ImageMagick. They're downloaded once
 and cached in `stdpath('cache')/diffy/avatars`; without them the headers are text only.
 
 Local comments follow the code: after edits they're found again by their text within ±20 lines. When they
-can't be, they're listed in `:Diffy threads` as detached.
+can't be, they're in the threads view as detached.
 
 ### Local review, for an LLM agent
 
 Available in `:Diffy` and `:Diffy branch`. Drafts are saved in `.git/diffy/<branch>/local.json`.
 
-`:Diffy review export` writes `.git/diffy/<branch>/review.md` with every comment not yet sent (location,
-side, commit, the code with context, the diff hunk, the comment), marks them sent and copies the prompt to
-the `+` register: paste it to your agent. `:Diffy review clear` deletes the local review.
+`:Diffy review submit` opens a box for an overall message (may be left empty); `<C-s>` writes
+`.git/diffy/<branch>/review.md` with that message and every comment not yet sent (location, side, commit,
+the code with context, the diff hunk, the comment), marks them sent and copies the prompt to the `+`
+register: paste it to your agent. A message alone is sent too. `:Diffy review clear` deletes the local
+review.
+
+Each comment's section starts with a `- [ ] resolved` box, and the prompt asks the agent to tick it once
+the comment is handled. diffy reads the ticks when it opens the review, on `R`, and before the next submit
+replaces the file: those threads become resolved (✓ inline, in the Resolved group of the threads view). A
+tick counts once, so a thread you reopen with `x` stays open.
 
 ### GitHub review
 
@@ -172,14 +233,17 @@ the `+` register: paste it to your agent. `:Diffy review clear` deletes the loca
 on GitHub and the tree is clean.
 
 - Threads are placed like github.com's "Changes" view: in the full view and in each commit's view, at the
-  line they track to, hidden where their lines changed. Outdated threads (not trackable to HEAD) and
-  everything else are in `:Diffy threads`, with the commits each thread is visible in.
+  line they track to, hidden where their lines changed. Outdated threads (not trackable to HEAD) are in
+  the threads view with the others; `<CR>` there opens the commit they were written on.
 - Your comments are local drafts (`.git/diffy/<branch>/pr-<number>.json`) until you push.
 - `:Diffy review push` replaces your pending review on GitHub with your drafts. Each lands on the commit
   you wrote it in. Drafts GitHub would reject (outside the diff and its 3 lines of context) stay local
   with a warning.
 - `:Diffy review pull` imports your pending review from GitHub (it asks before replacing local drafts).
-- `:Diffy review submit [comment|approve|request_changes]` pushes, then submits with a message you type.
+- `:Diffy review submit` opens a box for the review message; `<C-s>` then asks `c` comment, `a` approve or
+  `r` request changes (`q` goes back to the message). It pushes your drafts and submits; with no drafts,
+  it submits the message alone (approving without comments). An argument picks the event and skips the
+  question; on your own PR, where GitHub only allows a comment, there's no question either.
 - `x` resolves or unresolves a thread on GitHub immediately.
 - `R` refreshes from GitHub.
 
@@ -194,11 +258,13 @@ All set with `default = true`, so a colorscheme or your config can override any 
 | `DiffyDirectory`, `DiffySha`, `DiffyLabel`, `DiffyMerge` | `Directory`, `Identifier`, `Title`, `Comment` | tree folders, log rows |
 | `DiffySelection` | `Visual` | selected commits |
 | `DiffyCurrentFile`, `DiffyCurrentFileName` | `Visual`, bold | the file shown in the diff |
-| `DiffyThreadSummary` / `DiffyThreadRelevant` / `DiffyThreadCurrent` | `Comment` / `Special` / `PmenuSel` | comment summaries: others / on the cursor line / open |
-| `DiffyThreadSummaryResolved` | `NonText` | summaries of resolved threads (their ✓ and sign use `DiffyThreadResolved`) |
-| `DiffyThreadRange` | `PmenuSel` | line numbers of the open thread's lines |
+| `DiffyThreadSummary` / `DiffyThreadCurrent` | `Comment` / bold | comment summaries / the weight of the open one's |
+| `DiffyThreadStep` | `Normal`'s colour, bold | the `]t`/`[t` marks on summaries |
+| `DiffyThreadSummaryResolved` | `NonText` | summaries and bars of resolved threads (their ✓ uses `DiffyThreadResolved`) |
+| `DiffyThreadLane1`…`6` | `DiagnosticError` `DiagnosticWarn` `DiagnosticInfo` `DiagnosticHint` `DiagnosticOk` `Constant` | comment bars and summary dots, a colour per thread |
+| `DiffyThreadRange` | `PmenuSel` | line numbers of the commented lines in `:Diffy threads` previews |
 | `DiffyThread` / `DiffyThreadHeader` | background of `CursorLine` / `Pmenu` | comment cards / their header strips |
-| `DiffyThreadBorder` | `WinSeparator`'s colour on the card background | card frames |
+| `DiffyThreadBorder`, `DiffyThreadBorder1`…`6` | `WinSeparator`'s colour / the lane's, on the card background | card frames; an open thread's float in its colour |
 | `DiffyThreadAuthor`, `DiffyThreadAuthor1`…`5` | bold, `Identifier` `DiagnosticHint` `Constant` `Title` `Function` | author names, a colour per login |
 | `DiffyThreadTime` | `Comment` | comment age |
 | `DiffyThreadDraft` / `DiffyThreadPending` / `DiffyThreadSent` | `DiagnosticWarn` / `DiagnosticInfo` / `Comment` | comment states |

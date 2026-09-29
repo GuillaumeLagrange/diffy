@@ -39,17 +39,13 @@ local function open_branch()
   ui.wait_ready(child)
 end
 
-local function select_row(row)
-  ui.select_log_row(child, row)
-end
+local all_entries = { 'Unstaged', 'Staged', 'Shift', 'Add', 'Delete', 'Rename', 'Merge branch \'main\' into feat', 'C1' }
+local c1_tree = { 'M f.txt' .. (' '):rep(27) .. '+1 -1' }
 
 T[':Diffy branch lists Unstaged, Staged and the branch commits, with only the merge dimmed'] = function()
   open_branch()
 
-  MiniTest.expect.equality(
-    subjects(),
-    { 'Unstaged', 'Staged', 'Shift', 'Add', 'Delete', 'Rename', 'Merge branch \'main\' into feat', 'C1' }
-  )
+  MiniTest.expect.equality(subjects(), all_entries)
   MiniTest.expect.equality(subjects(ui.rows_with(child, 'log', 'DiffyMerge')), { 'Merge branch \'main\' into feat' })
 
   child.cmd('Diffy close')
@@ -57,7 +53,7 @@ end
 
 T[']r from the commit before the merge lands on the commit after it, skipping it'] = function()
   open_branch()
-  select_row(6)
+  ui.select_log_row(child, 6)
   MiniTest.expect.equality(selected(), { 'Rename' })
 
   child.api.nvim_set_current_win(ui.wins(child).right)
@@ -66,7 +62,7 @@ T[']r from the commit before the merge lands on the commit after it, skipping it
   ui.wait_ready(child)
 
   MiniTest.expect.equality(selected(), { 'C1' })
-  MiniTest.expect.equality(ui.layout(child).tree, { 'M f.txt' .. (' '):rep(27) .. '+1 -1' })
+  MiniTest.expect.equality(ui.layout(child).tree, c1_tree)
 
   child.cmd('Diffy close')
 end
@@ -78,24 +74,22 @@ T['the log always lists every entry, sized min(#entries, 40% of the column), foc
   local function heights()
     return child.lua_get(('{ vim.api.nvim_win_get_height(%d), vim.api.nvim_win_get_height(%d) }'):format(w.tree, w.log))
   end
-  local all = { 'Unstaged', 'Staged', 'Shift', 'Add', 'Delete', 'Rename', 'Merge branch \'main\' into feat', 'C1' }
-
   local h = heights()
-  MiniTest.expect.equality(h[2], math.min(#all, math.floor((h[1] + h[2]) * 0.4)))
-  MiniTest.expect.equality(subjects(), all)
+  MiniTest.expect.equality(h[2], math.min(#all_entries, math.floor((h[1] + h[2]) * 0.4)))
+  MiniTest.expect.equality(subjects(), all_entries)
 
   child.api.nvim_set_current_win(w.tree)
   child.type_keys('<C-w>j')
   child.type_keys('<C-w>k')
   MiniTest.expect.equality(heights(), h)
-  MiniTest.expect.equality(subjects(), all)
+  MiniTest.expect.equality(subjects(), all_entries)
 
   child.cmd('Diffy close')
 end
 
 T['rapid J J J ends up showing the last selection, even if an earlier one\'s git calls resolve later'] = function()
   open_branch()
-  select_row(4) -- Add
+  ui.select_log_row(child, 4) -- Add
 
   -- J visits Delete, Rename, then (skipping the merge) C1. Hold back every
   -- diff call naming Delete's commit until released below, so its render
@@ -120,7 +114,6 @@ T['rapid J J J ends up showing the last selection, even if an earlier one\'s git
   child.type_keys('J')
   ui.wait_ready(child)
 
-  local c1_tree = { 'M f.txt' .. (' '):rep(27) .. '+1 -1' }
   MiniTest.expect.equality(selected(), { 'C1' })
   MiniTest.expect.equality(ui.layout(child).tree, c1_tree)
 

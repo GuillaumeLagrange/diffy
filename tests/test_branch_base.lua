@@ -25,51 +25,21 @@ local T = MiniTest.new_set({
   },
 })
 
-local function buf_lines(win)
-  return child.lua_get(('vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(%d), 0, -1, false)'):format(win))
-end
-
-local function open_file(w, name)
-  for i, l in ipairs(buf_lines(w.tree)) do
-    if l:find(name, 1, true) then
-      child.api.nvim_set_current_win(w.tree)
-      child.fn.win_execute(w.tree, ('call cursor(%d, 1)'):format(i))
-      ui.arm_ready(child, 'open_row')
-      child.type_keys('<CR>')
-      ui.wait_ready(child)
-      return
-    end
-  end
-  error(name .. ' not in the tree')
-end
-
 T['all commits of :Diffy branch diff against the merge-base; the oldest commit alone against its parent'] = function()
   ui.arm_ready(child, 'render')
   child.cmd('Diffy branch main')
   ui.wait_ready(child)
-  local w = ui.wins(child)
 
   -- default selection is every branch commit: main's line-90 edit, merged
   -- into the branch, is on both sides, so it isn't part of the diff
-  open_file(w, 'f.txt')
+  ui.open_tree_row(child, 'f.txt', '<CR>', 'open_row')
   local l = ui.layout(child)
   MiniTest.expect.equality(l.left.text[90], 'main: line 90 v2')
   MiniTest.expect.equality(l.right.text[91], 'main: line 90 v2')
   MiniTest.expect.equality(ui.git(repo.dir, { 'rev-parse', l.left.rev }), repo.sha.M2)
 
   -- C1 alone (the oldest commit, before the merge): its own parent
-  local log = buf_lines(w.log)
-  local c1
-  for i, l in ipairs(log) do
-    if l:find(repo.sha.C1:sub(1, 7), 1, true) then
-      c1 = i
-    end
-  end
-  child.api.nvim_set_current_win(w.log)
-  child.fn.win_execute(w.log, ('call cursor(%d, 1)'):format(c1))
-  ui.arm_ready(child, 'select')
-  child.type_keys('<CR>')
-  ui.wait_ready(child)
+  ui.select_log_row(child, repo.sha.C1:sub(1, 7))
   l = ui.layout(child)
   MiniTest.expect.equality(l.left.text[90], '90')
   MiniTest.expect.equality(l.right.text[10], 'feat: line 10')

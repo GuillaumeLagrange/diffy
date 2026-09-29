@@ -1,8 +1,5 @@
--- The leak check itself fails when a diffy augroup,
--- buffer, buffer-local keymap or extmark is deliberately left behind. Each
--- case restarts a fresh child (no diffy session involved) and fabricates
--- one artifact directly, bypassing the normal `post_case` hook since the
--- artifact is intentionally left dangling.
+-- The leak check itself fails on a deliberately leaked diffy augroup, buffer,
+-- buffer-local keymap or extmark. No `post_case` check: the leak is the point.
 local leak = require('tests.helpers.leak')
 
 local child = MiniTest.new_child_neovim()

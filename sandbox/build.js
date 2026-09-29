@@ -111,7 +111,7 @@ async function init() {
   await sh(`git init -q -b main && git remote add origin git@github.com:${OWNER}/${REPO}.git`);
   await Bun.write(`${DIR}/README.md`, [
     '# diffy-tests', '',
-    'Review sandbox for diffy.nvim. Rebuilt by `nvim/diffy/sandbox/build.js` in the dotfiles repo.', '',
+    'Review sandbox for diffy.nvim. Rebuilt by `sandbox/build.js` in GuillaumeLagrange/diffy.', '',
     'Each open PR tests one concern; its description lists every comment and where it must show.', '',
   ].join('\n'));
   return commit('readme');

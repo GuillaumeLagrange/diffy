@@ -1,12 +1,6 @@
--- Pure review/model.lua logic with edges a UI scenario can't hit
--- deterministically: excerpt relocation's +/-20 line search window, and the
--- code snippet shown with a thread (hunk parsing, cutting long ranges).
---
--- Everything else review/model.lua's local backend does (relocate finding
--- a shifted/deleted excerpt, pair_side placement, id generation,
--- summary_text, find_hunk's diff-hunk lookup) is proven by the UI
--- scenarios in tests/test_review_local.lua that exercise it through real
--- keys and files.
+-- Pure review/model.lua edges a UI scenario can't hit deterministically:
+-- relocation's +/-20 line window and the thread code snippet. The rest of
+-- the local backend is covered through tests/test_review_local.lua.
 local model = require('diffy.review.model')
 
 local T = MiniTest.new_set()

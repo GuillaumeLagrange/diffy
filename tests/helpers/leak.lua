@@ -51,8 +51,6 @@ function M.check(child, snapshot)
     return
   end
 
-  -- close any session still open, so a forgotten `:Diffy close` doesn't
-  -- hide a genuine leak underneath it
   child.lua([[
     local session = require('diffy.session')
     for _, s in pairs(session.sessions) do

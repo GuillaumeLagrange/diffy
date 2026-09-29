@@ -130,9 +130,20 @@ function M.log_subjects(child, texts)
   return out
 end
 
---- Put the log cursor on `row` and press `<CR>`, waiting for the `select` render.
+--- Put the log cursor on `row` (a line number, or the first row containing
+--- string `row`) and press `<CR>`, waiting for the `select` render.
 function M.select_log_row(child, row)
   local w = M.wins(child)
+  if type(row) == 'string' then
+    local needle = row
+    for i, l in ipairs(M.layout(child).log) do
+      if l:find(needle, 1, true) then
+        row = i
+        break
+      end
+    end
+    assert(type(row) == 'number', needle .. ' not in the log')
+  end
   child.api.nvim_set_current_win(w.log)
   child.api.nvim_win_set_cursor(w.log, { row, 0 })
   M.arm_ready(child, 'select')
@@ -145,15 +156,44 @@ end
 function M.open_tree_row(child, path, key, event, timeout)
   local w = M.wins(child)
   child.api.nvim_set_current_win(w.tree)
+  local found
   for i, row in ipairs(M.panel(child, 'tree')) do
     if row.text:find(path, 1, true) then
-      child.api.nvim_win_set_cursor(w.tree, { i, 0 })
+      found = i
       break
     end
   end
+  assert(found, path .. ' not in the tree')
+  child.api.nvim_win_set_cursor(w.tree, { found, 0 })
   M.arm_ready(child, event)
   child.type_keys(key)
   M.wait_ready(child, timeout)
+end
+
+--- Record every WARN/ERROR `vim.notify` message from now on, instead of
+--- displaying it; read them with `M.warnings`.
+function M.capture_warnings(child)
+  child.lua([[
+    _G.__diffy_warnings = {}
+    vim.notify = function(msg, level)
+      if level == vim.log.levels.WARN or level == vim.log.levels.ERROR then
+        table.insert(_G.__diffy_warnings, { msg = msg, level = level })
+      end
+    end
+  ]])
+end
+
+--- Messages recorded since `M.capture_warnings`, only those at `level`
+--- ('WARN'/'ERROR') if given. Raw API, so it also works while the child is
+--- transiently blocking.
+function M.warnings(child, level)
+  local out = {}
+  for _, w in ipairs(child.api.nvim_exec_lua('return _G.__diffy_warnings', {})) do
+    if not level or w.level == vim.log.levels[level] then
+      table.insert(out, w.msg)
+    end
+  end
+  return out
 end
 
 --- Runs `git <args>` in fixture repo `dir`, for asserting HEAD/index/branch/
@@ -170,10 +210,10 @@ end
 
 --- Threads currently rendered in `side`'s window ('left'|'right') of the
 --- session in `child`'s current tab, read from the extmarks actually drawn:
---- `{ { line = 15, summary = '💬 alice +1: first line' }, … }`; several
+--- `{ { line = 15, summary = '● alice +1: first line' }, … }`; several
 --- summaries under one line are joined with ' | '. `blanks` counts the
 --- padding lines drawn under that line; `hl` maps each summary text to the
---- highlight group it's drawn with.
+--- highlight group its text (past the dot) is drawn with, `dot` to the dot's.
 function M.threads_visible(child, side)
   return child.lua(([[
     local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
@@ -188,7 +228,7 @@ function M.threads_visible(child, side)
     for _, m in ipairs(marks) do
       local details = m[4]
       if details.virt_lines then
-        local parts, blanks, hl = {}, 0, {}
+        local parts, blanks, hl, dot = {}, 0, {}, {}
         for _, vl in ipairs(details.virt_lines) do
           local text = {}
           for _, chunk in ipairs(vl) do
@@ -197,13 +237,16 @@ function M.threads_visible(child, side)
           text = table.concat(text)
           if text ~= '' then
             table.insert(parts, text)
-            hl[text] = vl[1][2]
+            -- a stacked highlight: the last group is the one that decides
+            local function top(h) return type(h) == 'table' and h[#h] or h end
+            hl[text] = top((vl[2] or vl[1])[2])
+            dot[text] = top(vl[1][2])
           else
             blanks = blanks + 1
           end
         end
         if #parts > 0 then
-          table.insert(out, { line = m[2] + 1, summary = table.concat(parts, ' | '), count = #parts, blanks = blanks, hl = hl })
+          table.insert(out, { line = m[2] + 1, summary = table.concat(parts, ' | '), count = #parts, blanks = blanks, hl = hl, dot = dot })
         end
       end
     end
@@ -221,23 +264,55 @@ function M.thread_lines(child, side)
   return out
 end
 
---- Review signs in `side`'s window: `{ ['5'] = '💬' | '✓', … }`, the one
---- that shows when several threads share a line.
-function M.thread_signs(child, side)
+--- Range bars in `side`'s window as the screen shows them, for every row
+--- with one: `{ ['5'] = { text = '│┃', hl = { 'DiffyThreadLane2', 'DiffyThreadLane5' } },
+--- ['5+1'] = { text = '│╰' }, … }`, lanes left to right, a blank lane ' '
+--- (hl ''). `'5+k'` is the k-th virtual row (summary, padding, filler)
+--- under line 5; `hl` is only read for buffer lines.
+function M.thread_bars(child, side)
   return child.lua(([[
     local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
     local win = s and s.wins[%q]
-    if not (win and vim.api.nvim_win_is_valid(win) and s.ns.review) then return {} end
-    local best = {}
-    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(vim.api.nvim_win_get_buf(win), s.ns.review, 0, -1, { details = true })) do
-      local d, line = m[4], tostring(m[2] + 1)
-      if d.sign_text and (not best[line] or d.priority > best[line].priority) then
-        best[line] = { text = vim.trim(d.sign_text), priority = d.priority }
+    if not (win and vim.api.nvim_win_is_valid(win)) then return {} end
+    vim.cmd('redraw')
+    local item = "%%{%%v:lua.require'diffy.review.ui'.statuscolumn()%%}"
+    local info = vim.fn.getwininfo(win)[1]
+    local out, width = {}, nil
+    local function cells(row)
+      local t = {}
+      for c = info.wincol + info.textoff - width - 1, info.wincol + info.textoff - 2 do
+        t[#t + 1] = vim.fn.screenstring(row, c)
       end
+      return table.concat(t)
     end
-    local out = {}
-    for line, b in pairs(best) do
-      out[line] = b.text
+    for l = info.topline, info.botline do
+      local ev = vim.api.nvim_eval_statusline(item, { winid = win, use_statuscol_lnum = l, highlights = true })
+      width = width or (ev.width > 0 and ev.width - 1 or nil)
+      if not width then return {} end
+      local row = vim.fn.screenpos(win, l, 1).row
+      if row > 0 then
+        local text = cells(row)
+        if vim.trim(text) ~= '' then
+          local hl = {}
+          for i, h in ipairs(ev.highlights) do
+            local stop = ev.highlights[i + 1] and ev.highlights[i + 1].start or #ev.str
+            for _, ch in ipairs(vim.fn.split(ev.str:sub(h.start + 1, stop), '\\zs')) do
+              if #hl < width then
+                hl[#hl + 1] = ch == ' ' and '' or h.group
+              end
+            end
+          end
+          out[tostring(l)] = { text = text, hl = hl }
+        end
+        local next_row = l < info.botline and vim.fn.screenpos(win, l + 1, 1).row or 0
+        local last = next_row > 0 and next_row - 1 or math.min(row + 20, info.winrow + info.height - 1)
+        for r = row + 1, last do
+          local vt = cells(r)
+          if vim.trim(vt) ~= '' then
+            out[('%%d+%%d'):format(l, r - row)] = { text = vt }
+          end
+        end
+      end
     end
     return out
   ]]):format(side))
@@ -286,6 +361,88 @@ function M.thread_float(child)
     end
     return vim.NIL
   ]])
+end
+
+--- The threads view as drawn, or nil when it isn't shown: `{ float = bool,
+--- rows = its lines, cursor = its cursor line, title, footer, preview =
+--- the preview pane's lines (inline virtual text included), preview_title }`.
+function M.threads_view(child)
+  return child.lua([[
+    local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
+    local win = s and s.wins.threads
+    if not (win and vim.api.nvim_win_is_valid(win)) then return vim.NIL end
+    local function join(chunks)
+      local t = {}
+      for _, ch in ipairs(type(chunks) == 'table' and chunks or {}) do
+        t[#t + 1] = type(ch) == 'table' and ch[1] or ch
+      end
+      return vim.trim(table.concat(t))
+    end
+    local cfg = vim.api.nvim_win_get_config(win)
+    local out = {
+      float = cfg.relative ~= '',
+      rows = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false),
+      cursor = vim.api.nvim_win_get_cursor(win)[1],
+      title = join(cfg.title),
+      footer = join(cfg.footer),
+    }
+    local pwin = s.wins.threads_preview
+    if pwin and vim.api.nvim_win_is_valid(pwin) then
+      local pbuf = vim.api.nvim_win_get_buf(pwin)
+      local pre = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_extmarks(pbuf, -1, 0, -1, { details = true })) do
+        if m[4].virt_text_pos == 'inline' then
+          pre[m[2] + 1] = (pre[m[2] + 1] or '') .. join(m[4].virt_text)
+        end
+      end
+      out.preview = {}
+      for i, l in ipairs(vim.api.nvim_buf_get_lines(pbuf, 0, -1, false)) do
+        out.preview[i] = vim.trim((pre[i] or '') .. ' ' .. l)
+      end
+      out.preview_title = join(vim.api.nvim_win_get_config(pwin).title)
+    end
+    return out
+  ]])
+end
+
+--- The threads view's rows grouped under their headers: `{ { group =
+--- 'Open', count = 2, rows = { row text, … } }, … }` (a folded group has
+--- no rows), from `M.threads_view`'s rows.
+function M.thread_groups(view)
+  local out = {}
+  for _, l in ipairs(view.rows) do
+    local label, count = l:match('^▾ (.-)  (%d+)$')
+    if not label then
+      label, count = l:match('^▸ (.-)  (%d+)$')
+    end
+    if label then
+      table.insert(out, { group = label, count = tonumber(count), rows = {} })
+    elseif out[#out] and vim.trim(l) ~= '' then
+      table.insert(out[#out].rows, vim.trim(l))
+    end
+  end
+  return out
+end
+
+--- Run `cmd` (a `:Diffy threads …`), unfold every folded group with
+--- `<Tab>` and return `M.thread_groups` of what the view then shows. The
+--- view stays open.
+function M.all_threads(child, cmd)
+  child.cmd(cmd)
+  local function folded_at()
+    for i, l in ipairs(M.threads_view(child).rows) do
+      if l:find('^▸ ') then
+        return i
+      end
+    end
+  end
+  local lnum = folded_at()
+  while lnum do
+    child.api.nvim_win_set_cursor(M.wins(child).threads, { lnum, 0 })
+    child.type_keys('<Tab>')
+    lnum = folded_at()
+  end
+  return M.thread_groups(M.threads_view(child))
 end
 
 --- True if every pair of counterpart lines visible in both diff windows is

@@ -1,6 +1,5 @@
--- GitHub backend line tracking, anchor
--- validity and `position` computation. Pure `review/model.lua` functions;
--- inputs are real `git diff` output from fixture repos.
+-- GitHub backend line tracking, anchor validity and `position`. Pure
+-- `review/model.lua` functions fed real `git diff` output.
 local Repo = require('tests.helpers.repo')
 local model = require('diffy.review.model')
 
@@ -122,13 +121,11 @@ T['diff_position for a single-hunk and a multi-hunk file (position = 1-based dif
   for i = start, #lines do
     table.insert(diff_lines, lines[i])
   end
-  -- verified independently against the sandbox's own `position()` helper
-  -- (`sandbox/build.js`) on the same shape of diff: one hunk -> pos 5 for
-  -- the changed line itself, two hunks -> pos 14 for the second hunk's
-  -- changed line (later `@@` headers count as diff lines too)
+  -- matches the sandbox's `position()` (`sandbox/build.js`); later `@@`
+  -- headers count as diff lines too
   MiniTest.expect.equality(model.diff_position(diff_lines, 11), 5)
   MiniTest.expect.equality(model.diff_position(diff_lines, 50), 14)
-  -- a line nowhere in the diff (outside every hunk) has no position
+  -- outside every hunk
   MiniTest.expect.equality(model.diff_position(diff_lines, 5), nil)
 
   r:destroy()

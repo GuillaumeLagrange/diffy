@@ -91,7 +91,7 @@ function M.leave(session)
   end
 
   local right_buf = session_mod.scratch_buf(session, 'right')
-  vim.api.nvim_buf_set_lines(right_buf, 0, -1, false, { 'diffy: nothing loaded yet' })
+  vim.api.nvim_buf_set_lines(right_buf, 0, -1, false, session_mod.PLACEHOLDER)
   local right_win = vim.api.nvim_open_win(right_buf, false, { win = ours_win, split = 'right' })
   session_mod.register_buffer(session, 'right', right_buf)
   session_mod.register_window(session, 'right', right_win)
@@ -147,14 +147,6 @@ local function marker_block()
   return nil
 end
 
-local function map_rebuild(session, buf)
-  session_mod.map(session, 'n', 'R', function()
-    if session.refresh then
-      session.refresh(session)
-    end
-  end, { buffer = buf, desc = 'rebuild' })
-end
-
 local function set_result_keymaps(session, buf)
   local map = session_mod.map
   -- linematch splits a conflict into per-line hunks, so a bare :diffget would
@@ -182,8 +174,7 @@ local function set_result_keymaps(session, buf)
   map(session, 'n', '[x', function()
     vim.fn.search(MARKER_PAT, 'b')
   end, { buffer = buf, desc = 'previous conflict marker' })
-  map_rebuild(session, buf)
-  session_mod.map_toggle(session, buf)
+  require('diffy.layout').map_panel_keys(session, buf)
 end
 
 --- The result pane: the real worktree file (still holding its conflict
@@ -372,8 +363,7 @@ local function setup_conflicts_tree(session)
     end
     vim.cmd('edit ' .. vim.fn.fnameescape(abspath))
   end, { buffer = buf, desc = 'open real file' })
-  map_rebuild(session, buf)
-  session_mod.map_toggle(session, buf)
+  require('diffy.layout').map_panel_keys(session, buf)
 end
 
 --- Rebuild the conflicted-file list and open the current (or first) one.
@@ -425,7 +415,7 @@ function M.start()
 
   repo.root(vim.fn.getcwd(), function(root, err)
     if not root then
-      vim.notify('diffy: not a git repository (' .. tostring(err) .. ')', vim.log.levels.ERROR)
+      repo.notify_not_repo(err)
       session_mod.teardown(s)
       return
     end

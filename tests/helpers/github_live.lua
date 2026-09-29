@@ -113,4 +113,34 @@ function M.position(dir, merge_base, commit, path, line)
   error(('line %d not in the diff of %s'):format(line, path))
 end
 
+--- PR-view actions on `child`, waiting up to `M.timeout`.
+function M.bind(child)
+  local ui = require('tests.helpers.ui')
+  local b = {}
+  function b.wins()
+    return ui.wins(child)
+  end
+  function b.open_pr()
+    ui.arm_ready(child, 'render')
+    child.cmd('Diffy pr')
+    ui.wait_ready(child, M.timeout)
+  end
+  function b.open_file(path)
+    ui.open_tree_row(child, path, '<CR>', 'review', M.timeout)
+  end
+  --- Select log entry `idx` (1-based, newest first) as a single commit.
+  function b.select_commit(idx)
+    local w = ui.wins(child)
+    child.api.nvim_set_current_win(w.log)
+    ui.arm_ready(child, 'select')
+    child.fn.win_execute(w.log, ('call cursor(%d, 1)'):format(idx))
+    child.type_keys('<CR>')
+    ui.wait_ready(child, M.timeout)
+  end
+  function b.lines_with_signs(side)
+    return ui.thread_lines(child, side)
+  end
+  return b
+end
+
 return M

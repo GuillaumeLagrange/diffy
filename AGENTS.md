@@ -7,37 +7,40 @@ document, being retired; don't cite it (or this file) from code or tests.
 
 ## Working here
 
-- `~/.config/nvim` is an out-of-store symlink to `~/dotfiles/nvim`: edits are live, no Home Manager rebuild.
-  `nvim/plugin/diffy.lua` prepends `nvim/diffy` to the runtimepath and sets the user's `<leader>dv*` maps.
-- Run tests from `nvim/diffy/`: `make test` (~10 s, offline, test files in parallel, `JOBS=N`
-  to cap), `make test FILE=tests/test_x.lua`, `make test-gh` (live GitHub, opt-in).
+- The user's config (`~/dotfiles/nvim`, symlinked as `~/.config/nvim`) loads this checkout from
+  `~/projects/diffy`: `nvim/plugin/diffy.lua` there prepends it to the runtimepath and sets the user's
+  `<leader>dv*` maps. Edits are live.
+- Run tests from the repo root: `make test` (~10 s, offline, test files in parallel, `JOBS=N` to cap),
+  `make test FILE=tests/test_x.lua`, `make test-gh` (live GitHub, opt-in).
 - Comments state the non-obvious why, invariants and gotchas; no narration of how the code came to be.
 - A change that affects behaviour updates `README.md`.
 
 ## Code map
 
 ```
-plugin/diffy.lua        :Diffy command + completion, nothing else at startup
+plugin/diffy.lua        :Diffy command, nothing else at startup
 lua/diffy/
-  init.lua              setup/config, :Diffy dispatch, M.start (open a session) / M.build (render pipeline),
-                        M.debug_state (sessions + recent commands for the user config's errlog reports)
-  session.lua           one session per tab: registry, augroup, namespaces, keymap tracking, layout, teardown
+  init.lua              setup/config, :Diffy dispatch + completion, M.start (open a session) / M.build (render pipeline),
+                        M.debug_state (sessions + recent commands for the user config's errlog reports),
+                        :Diffy feedback (modal -> `User DiffyFeedback`)
+  session.lua           one session per tab: registry, augroup, namespaces, keymap tracking, teardown
+  layout.lua            views (tree, log, threads) and where they're shown: the left column, floats
   git/run.lua           every git/gh subprocess (vim.system), error notify, DiffyReady, M.recent (last 50)
   git/parse.lua         pure parsers for git's -z formats (log, name-status, numstat, status v2, ls-files -u)
   git/repo.lua          root, merge-base, base resolution, status, default range, diff args
   selection.lua         log selection -> (left rev, right rev); the real-file rule
-  panels/log.lua        commits panel: entries per view kind, selection keys
-  panels/tree.lua       files panel: tree rows, staging keys, file navigation
+  panels/log.lua        commits view: entries per view kind, selection keys
+  panels/tree.lua       files view: tree rows, staging keys, file navigation
   diffpair.lua          the two diff windows: buffers, diff mode, winbars, shared keys
   navigation.lua        BufWinEnter on the right window: swap the pair when you jump to another file
   checkout.lua          X full checkout, .git/diffy/checkout.json, restore
   conflict.lua          :Diffy conflicts and the 4-window conflict view
-  prompt.lua            key-driven yes/no float (vim.fn.confirm can't be driven in tests)
+  prompt.lua            key-driven yes/no and pick-one floats (vim.fn.confirm can't be driven in tests)
   highlight.lua         highlight groups (default links, card backgrounds) and width-fitting helpers
   avatar.lua            GitHub avatars over the terminal (kitty graphics): detect, fetch, place, clear
   review/model.lua      thread data, excerpt relocation, line tracking, GitHub anchor validity/position
   review/ui.lua         signs, summaries, comment cards (thread float, gP), compose float, thread jumps
-  review/threads.lua    :Diffy threads: snacks.nvim picker with card previews, or the quickfix list
+  review/threads.lua    the threads view (:Diffy threads): grouped rows, preview pane, jump keys
   review/store.lua      JSON in .git/diffy/<branch>/
   review/local.lua      local backend + review.md export
   review/github.lua     GitHub backend: gh transport, read, placement, push/pull/submit
@@ -50,16 +53,24 @@ Conventions the code relies on:
   map through `session.map` (desc prefixed `diffy: `, removed on teardown or when a real file leaves a diffy
   window); every namespace through `session.namespace`. Window options are only set inside the session tab.
   `teardown` is idempotent and runs from every close path.
+- **Views.** The file tree, the commit log and the threads list are views (`layout.lua`): a buffer at
+  `session.bufs[name]`, shown at `session.wins[name]` in whichever host holds it, the left column
+  (`session.column`, from `config.column`) or a float over the diff area. A view module exports `view`
+  (render, height, keys, preview, …) and renders at its window's width, asking `layout.host` how much to
+  show. Column windows end the session when closed; floats are registered `transient` and only closed by
+  teardown. The tree and log buffers exist even when not shown: the diff navigation and the conflict list
+  draw into them.
 - **Async.** All git/gh calls go through `git/run.lua` with `opts.session` (callbacks no-op once the session
   is closed) and, for renders, `opts.gen` (`session.gen` is bumped by every tree render, so a stale render
   from an earlier selection is dropped). Chained calls start the next link from the previous callback, so
   dropping one link drops the chain.
 - **DiffyReady.** `run.ready({ session, event })` fires `User DiffyReady` when something finished drawing.
-  Events: `render`, `select`, `open_row`, `review`, `thread`, `compose`, `conflict`, `checkout`, `restore`,
-  `pr`, `close`. Tests wait on these; never sleep.
+  Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `choose`, `conflict`,
+  `checkout`, `restore`, `pr`, `close`. Tests wait on these; never sleep.
 - **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `branch`, `author`,
   `place(session, thread) -> {win, start_line, end_line} | nil` (in the open file), `view_place` (the same
-  for any file of the current pair, used by the thread lists), and for authoring `load`, `save`, `clear`,
+  for any file of the current pair, or of a given pair: the threads view uses it to pick a selection that
+  shows a thread), and for authoring `load`, `save`, `clear`,
   `export` (local) or `push`/`pull`/`submit`/`resolve_thread` (GitHub). `review/ui.lua` only draws what
   `place` returns and caches it on `thread._place`.
 - **One-sided files.** An added or deleted file closes the empty side's window (`session.hidden_side`,
@@ -127,8 +138,9 @@ Reproducing a bug under the user's real config (most real bugs only showed up th
 vim.fn.expand('~/.config/nvim/init.lua') })`, then `set termguicolors`. `child.get_screenshot()` errors with their colorscheme; read the screen with
 `vim.fn.screenstring(row, col)` and highlights with `vim.fn.screenattr`. Throwaway scripts go in `/tmp`.
 
-Bugs the user hit come as reports from `nvim/lua/errlog/` (see its `AGENTS.md`): keys, windows, repo state
-and `debug_state()` at the time of the error.
+Bugs the user hit come as reports from `~/dotfiles/nvim/lua/errlog/` (see its `AGENTS.md`): keys, windows,
+repo state and `debug_state()` at the time of the error. `:Diffy feedback` lands there too, as a report whose
+`message` is the user's complaint about what the session showed at that moment; it's not an error.
 
 Seeing what the user sees (colours, avatars, floats): a headless compositor running kitty › zellij › nvim
 with the real config and `--listen`, screenshotted with `grim`:
@@ -176,6 +188,14 @@ with the real config and `--listen`, screenshotted with `grim`:
   `number_hl_group` instead.
 - A float with `relative='win'` and `bufpos={w0, 0}` puts `col = 0` at the window's first text column, past
   its number/sign gutter.
+- 'statuscolumn' also runs for virt_lines and diff filler rows (`v:virtnum` < 0, `v:lnum` = the line above
+  them): the rows under a line count `-N..-1` top to bottom, virt_lines first, then filler. `%{}` items run
+  with the drawn window current (`g:statusline_winid` isn't set), `%l` isn't padded to 'numberwidth'
+  (right-align with `%=`), and an extmark's `number_hl_group` colours the whole status column.
+  Ephemeral `inline` virt_text from a decoration provider isn't drawn.
+- A window opened while a diff window is current, floats included (a snacks picker), copies its
+  window-local options: `scrollbind`, `cursorbind`, `diff`. A bound picker prompt gets its cursor dragged
+  back to column 0 as you type; `session.lua` unbinds every window of the tab diffy doesn't own on `WinNew`.
 - `nvim_set_current_win`/`nvim_win_set_buf` don't fire `WinEnter`/`BufEnter`. `BufWinEnter` runs with the
   affected window current and only when the buffer actually changes.
 - `WinClosed`/`BufWipeout` callbacks that close other windows of the same tab race `:tabclose`/`:qa`

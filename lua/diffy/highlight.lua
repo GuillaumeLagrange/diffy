@@ -18,9 +18,7 @@ local LINKS = {
   DiffyCurrentFile = 'Visual',
   DiffyThreadSummary = 'Comment',
   DiffyThreadSummaryResolved = 'NonText',
-  DiffyThreadRelevant = 'Special',
-  DiffyThreadCurrent = 'PmenuSel',
-  -- drawn on the number column, so it needs a strong background
+  -- the line numbers of the commented lines in thread previews
   DiffyThreadRange = 'PmenuSel',
   DiffyThreadTime = 'Comment',
   DiffyThreadKey = 'Special',
@@ -37,18 +35,46 @@ local LINKS = {
   DiffyThreadAuthor3 = 'Constant',
   DiffyThreadAuthor4 = 'Title',
   DiffyThreadAuthor5 = 'Function',
+  DiffyThreadLane1 = 'DiagnosticError',
+  DiffyThreadLane2 = 'DiagnosticWarn',
+  DiffyThreadLane3 = 'DiagnosticInfo',
+  DiffyThreadLane4 = 'DiagnosticHint',
+  DiffyThreadLane5 = 'DiagnosticOk',
+  DiffyThreadLane6 = 'Constant',
 }
 
--- author name colours, picked by login
-M.AUTHOR_COLORS = 5
+-- number of DiffyThreadAuthor<n> groups, picked by login
+local AUTHOR_COLORS = 5
 
---- The colour group of an author's name, the same one everywhere.
+--- An author's name group, the same one everywhere.
 function M.author(name)
   local sum = 0
   for i = 1, #name do
     sum = sum + name:byte(i)
   end
-  return 'DiffyThreadAuthor' .. (sum % M.AUTHOR_COLORS + 1)
+  return 'DiffyThreadAuthor' .. (sum % AUTHOR_COLORS + 1)
+end
+
+local LANE_COLORS = 6
+
+--- A thread's colour index from its id: stable across files, sessions and
+--- redraws.
+local function lane_index(id)
+  local h, s = 0, tostring(id)
+  for i = 1, #s do
+    h = (h * 31 + s:byte(i)) % 4294967296
+  end
+  return h % LANE_COLORS + 1
+end
+
+--- The colour group of a thread's range bar, summary dot and text.
+function M.lane(id)
+  return 'DiffyThreadLane' .. lane_index(id)
+end
+
+--- The frame group of a thread's float, in the thread's colour.
+function M.lane_border(id)
+  return 'DiffyThreadBorder' .. lane_index(id)
 end
 
 --- Status letter -> highlight group.
@@ -86,6 +112,11 @@ function M.setup()
   -- belongs to the card and titles/footers sit on it without patches
   vim.api.nvim_set_hl(0, 'DiffyThreadBorder', { fg = color_of('fg', 'WinSeparator', 'FloatBorder', 'Comment'), bg = card, default = true })
   vim.api.nvim_set_hl(0, 'DiffyThreadAuthor', { bold = true, default = true })
+  for i = 1, LANE_COLORS do
+    vim.api.nvim_set_hl(0, 'DiffyThreadBorder' .. i, { fg = color_of('fg', 'DiffyThreadLane' .. i), bg = card, default = true })
+  end
+  -- weight only: the open thread's summary keeps its bar's colour
+  vim.api.nvim_set_hl(0, 'DiffyThreadCurrent', { bold = true, default = true })
 end
 
 --- Truncate `s` to at most `width` display cells, ending in '…' if cut.
@@ -143,6 +174,58 @@ function M.panel_width(win, cached)
     return M.text_width(win) - 1
   end
   return cached or require('diffy').config.panel_width
+end
+
+--- `winhighlight` of a card float: its own background inside a thin frame.
+M.CARD_HL = table.concat({
+  'NormalFloat:DiffyThread',
+  'FloatBorder:DiffyThreadBorder',
+  'FloatTitle:DiffyThreadHeader',
+  'FloatFooter:DiffyThreadBorder',
+  'FoldColumn:DiffyThread',
+  'EndOfBuffer:DiffyThread',
+}, ',')
+
+--- `CARD_HL` framed in `thread`'s lane colour, or plain once it's resolved.
+function M.card_hl(thread)
+  if thread.resolved then
+    return M.CARD_HL
+  end
+  local frame = M.lane_border(thread.id)
+  return (M.CARD_HL:gsub('FloatBorder:DiffyThreadBorder', 'FloatBorder:' .. frame)
+    :gsub('FloatFooter:DiffyThreadBorder', 'FloatFooter:' .. frame))
+end
+
+--- Key hints for a float's footer, `{ {key, label, drop = n}, ... }`. Hints
+--- with a `drop` rank go, lowest first, until the rest fit `width`.
+function M.key_hints(keys, width)
+  local shown = vim.list_extend({}, keys)
+  local function size()
+    local n = 2
+    for i, k in ipairs(shown) do
+      n = n + vim.fn.strdisplaywidth(k[1] .. ' ' .. k[2]) + (i < #shown and 3 or 0)
+    end
+    return n
+  end
+  while width and size() > width do
+    local worst
+    for i, k in ipairs(shown) do
+      if k.drop and (not worst or k.drop < shown[worst].drop) then
+        worst = i
+      end
+    end
+    if not worst then
+      break
+    end
+    table.remove(shown, worst)
+  end
+  -- title/footer chunks don't take the border's background: stack it in
+  local chunks = { { ' ', 'DiffyThread' } }
+  for i, k in ipairs(shown) do
+    table.insert(chunks, { k[1], { 'DiffyThread', 'DiffyThreadKey' } })
+    table.insert(chunks, { ' ' .. k[2] .. (i < #shown and '   ' or ' '), { 'DiffyThread', 'DiffyThreadHint' } })
+  end
+  return chunks
 end
 
 return M

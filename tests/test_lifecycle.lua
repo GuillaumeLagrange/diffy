@@ -12,17 +12,13 @@ local function tabs()
   return child.lua_get('#vim.api.nvim_list_tabpages()')
 end
 
--- teardown is complete when only the original tab is left and no diffy://
--- buffer survives
 local function expect_no_session()
   MiniTest.expect.equality(tabs(), 1)
   MiniTest.expect.equality(ui.diffy_buffers(child), {})
   MiniTest.expect.equality(ui.layout(child), nil)
 end
 
--- some paths defer teardown to the next tick (see session.lua's
--- watch_close/watch_wipe); wait for the observable effect instead of
--- asserting immediately.
+-- some teardown paths are deferred to the next tick
 local function wait_tabs(n)
   child.lua(('vim.wait(500, function() return #vim.api.nvim_list_tabpages() == %d end)'):format(n))
 end
@@ -48,7 +44,6 @@ T[':Diffy opens a session tab with the layout skeleton'] = function()
   child.cmd('Diffy')
   MiniTest.expect.equality(tabs(), 2)
   local l = ui.layout(child)
-  MiniTest.expect.equality(l ~= nil, true)
   MiniTest.expect.equality(
     { tree = l.tree ~= vim.NIL, log = l.log ~= vim.NIL, left = l.left ~= vim.NIL, right = l.right ~= vim.NIL },
     { tree = true, log = true, left = true, right = true }
@@ -65,11 +60,8 @@ T['closing the tab with :tabclose leaves no diffy state'] = function()
 end
 
 T[':tabclose before DiffyReady tears down cleanly, and the pending async render is a no-op'] = function()
-  -- deterministically reproduce the race (real subprocess completion time
-  -- is not reliable enough to race against on its own): hold back the
-  -- delivery of `M.start`'s very first git call (`repo.root`, still a real
-  -- `git rev-parse` subprocess) until released below, standing in for it
-  -- completing after the tab is already gone.
+  -- hold back delivery of the first git call (`rev-parse --show-toplevel`)
+  -- until after the tab is gone
   child.lua([[
     local real_system = vim.system
     _G.__release_root = nil
@@ -89,10 +81,7 @@ T[':tabclose before DiffyReady tears down cleanly, and the pending async render 
   wait_tabs(1)
   expect_no_session()
 
-  -- release the held-back completion now that the session is gone, then
-  -- give the rest of the (real, unpatched) chain it kicks off - `git log`,
-  -- `head_sha`, `status`, the tree's own two `git diff` calls - actual
-  -- wall-clock time to run all the way to its former crash point
+  -- release it and let the rest of the real async chain run to where it used to crash
   child.lua('vim.wait(2000, function() return _G.__release_root ~= nil end)')
   child.lua('_G.__release_root()')
   child.lua("vim.wait(1500, function() return vim.v.errmsg ~= '' end)")

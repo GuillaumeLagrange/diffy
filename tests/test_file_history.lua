@@ -39,14 +39,6 @@ local function file_history_repo()
   return r
 end
 
-local function subjects(texts)
-  return ui.log_subjects(child, texts)
-end
-
-local function select_row(row)
-  ui.select_log_row(child, row)
-end
-
 T[':Diffy file follows a file across its rename'] = function()
   repo = file_history_repo()
   child.fn.chdir(repo.dir)
@@ -55,23 +47,23 @@ T[':Diffy file follows a file across its rename'] = function()
   child.cmd('Diffy file new.txt')
   ui.wait_ready(child)
 
-  MiniTest.expect.equality(subjects(), { 'Edit', 'Rename', 'Base' })
+  MiniTest.expect.equality(ui.log_subjects(child), { 'Edit', 'Rename', 'Base' })
 
   -- default selection: the newest commit; tree restricted to just this file
-  MiniTest.expect.equality(subjects(ui.rows_with(child, 'log', 'DiffySelection')), { 'Edit' })
+  MiniTest.expect.equality(ui.log_subjects(child, ui.rows_with(child, 'log', 'DiffySelection')), { 'Edit' })
   local l = ui.layout(child)
   MiniTest.expect.equality(l.tree, { 'M new.txt' .. (' '):rep(25) .. '+1 -1' })
   MiniTest.expect.equality(l.right.path, 'new.txt')
 
   -- the rename commit: one row, old -> new, sides old.txt/new.txt
-  select_row(2)
+  ui.select_log_row(child, 2)
   l = ui.layout(child)
   MiniTest.expect.equality(l.tree, { 'R old.txt \226\134\146 new.txt' .. (' '):rep(15) .. '+0 -0' })
   MiniTest.expect.equality(l.left.path, 'old.txt')
   MiniTest.expect.equality(l.right.path, 'new.txt')
 
   -- the commit that added the file, before the rename: shown under its old name
-  select_row(3)
+  ui.select_log_row(child, 3)
   l = ui.layout(child)
   MiniTest.expect.equality(l.tree, { 'A old.txt' .. (' '):rep(25) .. '+5 -0' })
   MiniTest.expect.equality(l.right.path, 'old.txt')

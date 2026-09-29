@@ -72,22 +72,21 @@ local function build_diff_entries(session, gen, cb)
     cwd = session.root,
     session = session,
     gen = gen,
-    on_exit = function(res1)
-      if res1.code ~= 0 then
-        cb(nil, vim.trim(res1.stderr or ''))
+    on_exit = run.parsed(parse.name_status, function(ns_list, err)
+      if not ns_list then
+        cb(nil, err)
         return
       end
-      local ns_list = parse.name_status(res1.stdout or '')
       run.git(num_args, {
         cwd = session.root,
         session = session,
         gen = gen,
-        on_exit = function(res2)
-          if res2.code ~= 0 then
-            cb(nil, vim.trim(res2.stderr or ''))
+        on_exit = run.parsed(parse.numstat, function(numstat, num_err)
+          if not numstat then
+            cb(nil, num_err)
             return
           end
-          local entries = merge_counts(ns_list, parse.numstat(res2.stdout or ''))
+          local entries = merge_counts(ns_list, numstat)
           if session.pair.left == 'INDEX' and session.pair.right == 'WORKTREE' then
             for _, s in ipairs(session.status_entries or {}) do
               if s.kind == 'untracked' then
@@ -100,9 +99,9 @@ local function build_diff_entries(session, gen, cb)
             return a.path < b.path
           end)
           cb(entries, nil)
-        end,
+        end),
       })
-    end,
+    end),
   })
 end
 
@@ -425,6 +424,16 @@ local function set_tree_cursor(session, lnum)
   end
 end
 
+--- Whether `path` is one of the files of the current selection.
+function M.has_path(session, path)
+  for _, row in ipairs(session.tree_rows or {}) do
+    if row.kind == 'file' and row.entry.path == path then
+      return true
+    end
+  end
+  return false
+end
+
 --- Locate the tree row for `path` and open its diff pair, updating the
 --- tracked current-file line and cursor position.
 --- Returns `true` if `path` is in the current file list, `false` otherwise.
@@ -652,12 +661,7 @@ function M.setup(session)
   map(session, 'n', 'U', function()
     M.unstage_all(session)
   end, { buffer = buf, desc = 'unstage all' })
-  map(session, 'n', 'R', function()
-    if session.refresh then
-      session.refresh(session)
-    end
-  end, { buffer = buf, desc = 'rebuild' })
-  require('diffy.session').map_toggle(session, buf)
+  require('diffy.layout').map_panel_keys(session, buf)
   vim.api.nvim_create_autocmd({ 'WinResized', 'VimResized' }, {
     group = session.augroup,
     callback = function()
@@ -668,5 +672,15 @@ function M.setup(session)
     end,
   })
 end
+
+M.view = {
+  label = ' Files',
+  persistent = true,
+  render = function(session)
+    if session.tree_rows then
+      M.redraw(session)
+    end
+  end,
+}
 
 return M

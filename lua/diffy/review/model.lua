@@ -295,16 +295,18 @@ function M.parse_diff_files(diff_text)
   return files
 end
 
---- The hunks for `old_path` in `files` (from `M.parse_diff_files`), and the
---- path it maps to on the other side (renamed, or unchanged). A file absent
---- from the diff is unchanged: returns `{}` and `old_path` itself.
-function M.diff_file_hunks(files, old_path)
+--- The hunks of the file named `path` on `side` ('old', the default, or
+--- 'new') in `files` (from `M.parse_diff_files`), and the file's name on
+--- the other side. A file absent from the diff is unchanged: returns
+--- `path` itself and `{}`.
+function M.diff_file_hunks(files, path, side)
+  local new = side == 'new'
   for _, f in ipairs(files) do
-    if f.old_path == old_path then
-      return f.new_path, f.hunks
+    if (new and f.new_path or f.old_path) == path then
+      return new and f.old_path or f.new_path, f.hunks
     end
   end
-  return old_path, {}
+  return path, {}
 end
 
 --- Map one line from the diff's old side to its new side, `nil` if `line`

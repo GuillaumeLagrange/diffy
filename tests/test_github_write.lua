@@ -1,11 +1,7 @@
--- The GitHub backend's write side through the UI -
--- push (client-side validation before any API call, primary-commit/
--- other-commit routing, multi-line tracking to HEAD), pull (restoring
--- drafts to their original commit/line from a pending review), reply,
--- resolve/unresolve, submit. A real git bundle of the
--- sandbox's `pending` PR history (exact shas) in both modes. Default: fake
--- `gh` transport. `make test-gh` (DIFFY_TESTGH=1): the real transport against
--- a fresh PR per case, pre-existing state created through the real API.
+-- The GitHub backend's write side through the UI: push (local validation,
+-- per-commit routing, tracking to HEAD), pull, reply, resolve/unresolve,
+-- submit. Repo: a git bundle of the sandbox's `pending` PR (exact shas).
+-- `make test-gh`: the real transport against a fresh PR per case.
 local leak = require('tests.helpers.leak')
 local live = require('tests.helpers.github_live')
 local ui = require('tests.helpers.ui')
@@ -130,29 +126,9 @@ local T = MiniTest.new_set({
   },
 })
 
-local function wins()
-  return ui.wins(child)
-end
-
-local function open_pr()
-  ui.arm_ready(child, 'render')
-  child.cmd('Diffy pr')
-  ui.wait_ready(child, live.timeout)
-end
-
-local function open_file(path)
-  ui.open_tree_row(child, path, '<CR>', 'review', live.timeout)
-end
-
---- Select log entry `idx` (1-based, newest first) as a single commit.
-local function select_commit(idx)
-  local w = wins()
-  child.api.nvim_set_current_win(w.log)
-  ui.arm_ready(child, 'select')
-  child.fn.win_execute(w.log, ('call cursor(%d, 1)'):format(idx))
-  child.type_keys('<CR>')
-  ui.wait_ready(child, live.timeout)
-end
+local view = live.bind(child)
+local wins, open_pr, open_file, select_commit, lines_with_signs =
+  view.wins, view.open_pr, view.open_file, view.select_commit, view.lines_with_signs
 
 local function select_all()
   local w = wins()
@@ -203,16 +179,20 @@ local function remote_reviews()
   )
 end
 
-local function compose_draft(win, lnum, body)
-  child.api.nvim_set_current_win(win)
-  child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum))
-  arm_ready_raw('compose')
-  child.type_keys('gc')
+local function save_composed(body)
   wait_ready_raw()
   child.type_keys(body, '<Esc>')
   arm_ready_raw('review')
   child.type_keys('<C-s>')
   wait_ready_raw()
+end
+
+local function compose_draft(win, lnum, body)
+  child.api.nvim_set_current_win(win)
+  child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum))
+  arm_ready_raw('compose')
+  child.type_keys('gc')
+  save_composed(body)
 end
 
 local function compose_draft_range(win, lnum1, lnum2, body)
@@ -222,11 +202,33 @@ local function compose_draft_range(win, lnum1, lnum2, body)
   child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum2))
   arm_ready_raw('compose')
   child.type_keys('gc')
-  wait_ready_raw()
-  child.type_keys(body, '<Esc>')
-  arm_ready_raw('review')
-  child.type_keys('<C-s>')
-  wait_ready_raw()
+  save_composed(body)
+end
+
+--- Replies to the default thread at `lnum` of `win`; the float stays open.
+local function reply_at(win, lnum, body)
+  child.api.nvim_set_current_win(win)
+  child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum))
+  child.type_keys('K')
+  arm_ready_raw('compose')
+  child.type_keys('r')
+  save_composed(body)
+end
+
+--- The local drafts file's text, or nil when there is none.
+local function drafts_text()
+  local branch = ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
+  local path = ('%s/.git/diffy/%s/pr-%d.json'):format(dir, branch, pr_number())
+  if vim.fn.filereadable(path) == 0 then
+    return nil
+  end
+  return table.concat(vim.fn.readfile(path), '\n')
+end
+
+local function drafts_file()
+  local text = drafts_text()
+  MiniTest.expect.equality(text ~= nil, true)
+  return vim.json.decode(text)
 end
 
 local function push()
@@ -235,33 +237,43 @@ local function push()
   ui.wait_ready(child, live.timeout)
 end
 
-local function lines_with_signs(side)
-  return ui.thread_lines(child, side)
+--- Every thread row of `:Diffy threads`, groups unfolded: `{ lnum, text,
+--- group, shown }`, `lnum` being the line the row says and `shown` the
+--- preview's list of the views showing it (the cursor moved onto the row).
+local function thread_entries()
+  child.o.columns = 200
+  ui.all_threads(child, 'Diffy threads')
+  local out, group = {}, nil
+  for i, l in ipairs(ui.threads_view(child).rows) do
+    local label = l:match('^▾ (.-)  %d+$')
+    if label then
+      group = label
+    elseif vim.trim(l) ~= '' then
+      child.type_keys(i .. 'G')
+      local shown = ui.threads_view(child).preview[1]
+      table.insert(out, { lnum = tonumber(l:match(':(%d+)%s')), text = vim.trim(l), group = group, shown = shown })
+    end
+  end
+  child.type_keys('q')
+  return out
 end
 
-local function quickfix_entries()
-  child.cmd('Diffy threads')
-  local qf = child.lua_get('vim.tbl_map(function(e) return {lnum = e.lnum, text = e.text} end, vim.fn.getqflist())')
-  child.cmd('cclose')
-  return qf
-end
-
---- The single quickfix entry anchored at `lnum`.
-local function quickfix_at(lnum)
-  for _, e in ipairs(quickfix_entries()) do
+--- The entry of the single thread at `lnum`.
+local function thread_at(lnum)
+  for _, e in ipairs(thread_entries()) do
     if e.lnum == lnum then
-      return e.text
+      return e
     end
   end
   return nil
 end
 
---- The quickfix entry of the thread whose first line starts with `id`
---- (the sandbox's comment ids, e.g. 'D2').
-local function quickfix_of(id)
-  for _, e in ipairs(quickfix_entries()) do
-    if e.text:find(': ' .. id .. ' ', 1, true) then
-      return e.text
+--- The entry of the thread whose first line starts with `id` (the
+--- sandbox's comment ids, e.g. 'D2').
+local function thread_of(id)
+  for _, e in ipairs(thread_entries()) do
+    if e.text:find(' ' .. id .. ' ', 1, true) then
+      return e
     end
   end
   return nil
@@ -295,20 +307,18 @@ T['push validates locally, sends nothing for an invalid draft (kept local with a
   compose_draft(right, 30, 'valid: on the head hunk')
   compose_draft(right, 1, 'invalid: nowhere near a change')
 
-  child.lua([[_G.__warn = nil; local n = vim.notify; vim.notify = function(msg, level) if level == vim.log.levels.WARN then _G.__warn = msg end; n(msg, level) end]])
+  ui.capture_warnings(child)
   push()
 
-  MiniTest.expect.equality(child.lua_get('_G.__warn') ~= vim.NIL, true)
+  MiniTest.expect.equality(#ui.warnings(child, 'WARN') > 0, true)
+  MiniTest.expect.equality(ui.warnings(child, 'ERROR'), {})
 
   -- the valid one is now `pending` on GitHub (no longer just a local
   -- draft): still visible at its line after the push+refresh round-trip
   MiniTest.expect.equality(lines_with_signs('right')[30], true)
 
   -- the invalid one stayed local: persisted to disk, still `draft`
-  local branch = ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
-  local path = dir .. '/.git/diffy/' .. branch .. '/pr-' .. pr_number() .. '.json'
-  MiniTest.expect.equality(vim.fn.filereadable(path), 1)
-  local data = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
+  local data = drafts_file()
   local found
   for _, t in ipairs(data.threads) do
     for _, c in ipairs(t.comments) do
@@ -355,25 +365,18 @@ T['push with drafts on two commits lands each on its own commit; a multi-line dr
   MiniTest.expect.equality(at_head[7], true)
   MiniTest.expect.equality(at_head[22], true)
 
-  -- the strongest signal that both drafts really left local storage and
-  -- became real GitHub content (diffy's own cross-commit placement would
-  -- show a still-local draft at these same lines/commits regardless of
-  -- whether the push actually succeeded, so the two checks above alone
-  -- don't prove it): nothing left in the local drafts file
-  local branch = ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
-  local draft_path = dir .. '/.git/diffy/' .. branch .. '/pr-' .. pr_number() .. '.json'
-  if vim.fn.filereadable(draft_path) == 1 then
-    local text = table.concat(vim.fn.readfile(draft_path), '\n')
-    MiniTest.expect.equality(text:find('multi-line 18-22', 1, true), nil)
-    MiniTest.expect.equality(text:find('on Q1 line', 1, true), nil)
-  end
+  -- diffy's own cross-commit placement would show still-local drafts at the
+  -- same lines, so only the emptied drafts file proves they were pushed
+  local text = drafts_text() or ''
+  MiniTest.expect.equality(text:find('multi-line 18-22', 1, true), nil)
+  MiniTest.expect.equality(text:find('on Q1 line', 1, true), nil)
 
-  local q1_line = quickfix_at(5)
-  local q2_line = quickfix_at(18)
-  MiniTest.expect.equality(q1_line ~= nil, true)
-  MiniTest.expect.equality(q1_line:find(Q1:sub(1, 7), 1, true) ~= nil, true)
-  MiniTest.expect.equality(q2_line ~= nil, true)
-  MiniTest.expect.equality(q2_line:find('head', 1, true) ~= nil, true)
+  local q1 = thread_at(5)
+  local q2 = thread_at(18)
+  MiniTest.expect.equality(q1 ~= nil, true)
+  MiniTest.expect.equality(q1.shown:find(Q1:sub(1, 7), 1, true) ~= nil, true)
+  MiniTest.expect.equality(q2 ~= nil, true)
+  MiniTest.expect.equality(q2.shown:find('head', 1, true) ~= nil, true)
 
   child.cmd('Diffy close')
 end
@@ -385,34 +388,20 @@ T['a reply drafted on a not-yet-pushed thread lands in that thread on push'] = f
 
   local right = wins().right
   compose_draft(right, 30, 'root comment')
-  child.api.nvim_set_current_win(right)
-  child.fn.win_execute(right, 'call cursor(30, 1)')
-  child.type_keys('K')
-  arm_ready_raw('compose')
-  child.type_keys('r')
-  wait_ready_raw()
-  child.type_keys('follow-up', '<Esc>')
-  arm_ready_raw('review')
-  child.type_keys('<C-s>')
-  wait_ready_raw()
+  reply_at(right, 30, 'follow-up')
 
   push()
 
   -- one thread on GitHub holding both comments, nothing left as a local draft
   local at_30 = {}
-  for _, e in ipairs(quickfix_entries()) do
+  for _, e in ipairs(thread_entries()) do
     if e.lnum == 30 then
       table.insert(at_30, e.text)
     end
   end
   MiniTest.expect.equality(#at_30, 1)
   MiniTest.expect.equality(at_30[1]:find('+1', 1, true) ~= nil, true)
-  local branch = ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
-  local draft_path = dir .. '/.git/diffy/' .. branch .. '/pr-' .. pr_number() .. '.json'
-  if vim.fn.filereadable(draft_path) == 1 then
-    local text = table.concat(vim.fn.readfile(draft_path), '\n')
-    MiniTest.expect.equality(text:find('follow-up', 1, true), nil)
-  end
+  MiniTest.expect.equality((drafts_text() or ''):find('follow-up', 1, true), nil)
 
   child.cmd('Diffy close')
 end
@@ -424,22 +413,13 @@ T['a reply drafted on one of two new same-file threads with the same body lands 
 
   local right = wins().right
   compose_draft(right, 20, 'nit')
-  child.api.nvim_set_current_win(right)
-  child.fn.win_execute(right, 'call cursor(20, 1)')
-  child.type_keys('K')
-  arm_ready_raw('compose')
-  child.type_keys('r')
-  wait_ready_raw()
-  child.type_keys('follow-up', '<Esc>')
-  arm_ready_raw('review')
-  child.type_keys('<C-s>')
-  wait_ready_raw()
+  reply_at(right, 20, 'follow-up')
   compose_draft(right, 30, 'nit')
 
   push()
 
   local by_line = {}
-  for _, e in ipairs(quickfix_entries()) do
+  for _, e in ipairs(thread_entries()) do
     by_line[e.lnum] = (by_line[e.lnum] or '') .. e.text
   end
   MiniTest.expect.equality(by_line[20]:find('+1', 1, true) ~= nil, true)
@@ -457,10 +437,7 @@ T['pull restores a pending comment (eagerly remapped for display) at its origina
   child.cmd('Diffy review pull')
   ui.wait_ready(child, live.timeout)
 
-  local branch = ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
-  local path = dir .. '/.git/diffy/' .. branch .. '/pr-' .. pr_number() .. '.json'
-  MiniTest.expect.equality(vim.fn.filereadable(path), 1)
-  local data = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
+  local data = drafts_file()
 
   -- E3 was written via the legacy position API against Q2 and eagerly
   -- remapped by GitHub to `commit = head` - `pull` must restore
@@ -486,18 +463,8 @@ T['the thread float names each author and marks drafts and resolved threads'] = 
   open_pr()
   open_file('f.txt')
   local right = wins().right
-  child.api.nvim_set_current_win(right)
-  child.fn.win_execute(right, 'call cursor(30, 1)')
-  child.type_keys('K')
-  arm_ready_raw('compose')
-  child.type_keys('r')
-  wait_ready_raw()
-  child.type_keys('a reply', '<Esc>')
-  arm_ready_raw('review')
-  child.type_keys('<C-s>')
-  wait_ready_raw()
+  reply_at(right, 30, 'a reply')
 
-  -- saving the reply went back into the thread
   local text = ui.thread_float(child).text
   -- D1 is published: its header carries no state
   MiniTest.expect.equality(text[1]:find('^GuillaumeLagrange  ') ~= nil, true)
@@ -530,16 +497,7 @@ T['reply, resolve/unresolve and submit'] = function()
 
   local right = wins().right
   -- D1 (published, head R30) and D2 (published, resolved, head R20)
-  child.api.nvim_set_current_win(right)
-  child.fn.win_execute(right, 'call cursor(30, 1)')
-  child.type_keys('K')
-  arm_ready_raw('compose')
-  child.type_keys('r')
-  wait_ready_raw()
-  child.type_keys('a reply from the test', '<Esc>')
-  arm_ready_raw('review')
-  child.type_keys('<C-s>')
-  wait_ready_raw()
+  reply_at(right, 30, 'a reply from the test')
 
   MiniTest.expect.equality(lines_with_signs('right')[30], true)
 
@@ -556,12 +514,12 @@ T['reply, resolve/unresolve and submit'] = function()
   wait_ready_raw()
   child.type_keys('q')
 
-  local d1_line = quickfix_of('D1')
-  local d2_line = quickfix_of('D2')
-  MiniTest.expect.equality(d1_line ~= nil, true)
-  MiniTest.expect.equality(d1_line:find('[resolved]', 1, true) ~= nil, true)
-  MiniTest.expect.equality(d2_line ~= nil, true)
-  MiniTest.expect.equality(d2_line:find('[resolved]', 1, true), nil)
+  local d1 = thread_of('D1')
+  local d2 = thread_of('D2')
+  MiniTest.expect.equality(d1 ~= nil, true)
+  MiniTest.expect.equality(d1.group:find('^Resolved') ~= nil, true)
+  MiniTest.expect.equality(d2 ~= nil, true)
+  MiniTest.expect.equality(d2.group:find('^Resolved'), nil)
 
   arm_ready_raw('compose')
   child.cmd('Diffy review submit comment')
@@ -582,6 +540,66 @@ T['reply, resolve/unresolve and submit'] = function()
     return false
   end
   MiniTest.expect.equality(vim.wait(live.timeout, submitted, live.enabled and 1000 or 10), true)
+
+  child.cmd('Diffy close')
+end
+
+T['review submit takes a message, then asks comment, approve or request changes; approving needs no drafts'] = function()
+  setup_empty()
+  open_pr()
+  MiniTest.expect.equality(child.fn.getcompletion('Diffy review submit ', 'cmdline'), live.enabled and { 'comment' } or { 'comment', 'approve', 'request_changes' })
+
+  arm_ready_raw('compose')
+  child.cmd('Diffy review submit')
+  wait_ready_raw()
+  child.type_keys('lgtm', '<Esc>')
+  local expected
+  if live.enabled then
+    -- your own PR: comment is the only event, no prompt
+    child.type_keys('<C-s>')
+    expected = { state = 'COMMENTED', body = 'lgtm' }
+  else
+    arm_ready_raw('choose')
+    child.type_keys('<C-s>')
+    wait_ready_raw()
+    local prompt = child.api.nvim_buf_get_lines(0, 0, -1, false)
+    MiniTest.expect.equality(vim.list_slice(prompt, 2), { '  c  comment', '  a  approve', '  r  request changes' })
+    -- cancelling goes back to the message, kept
+    child.type_keys('q')
+    MiniTest.expect.equality(child.api.nvim_buf_get_lines(0, 0, -1, false), { 'lgtm' })
+    arm_ready_raw('choose')
+    child.type_keys('<C-s>')
+    wait_ready_raw()
+    child.type_keys('a')
+    expected = { state = 'APPROVED', body = 'lgtm' }
+  end
+  MiniTest.expect.equality(vim.wait(live.timeout, function()
+    return vim.deep_equal(remote_reviews().submitted, { expected })
+  end, live.enabled and 1000 or 10), true)
+
+  child.cmd('Diffy close')
+end
+
+T['submitting 35 drafts lands them all even though GitHub errors returning the review'] = function()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  for i = 1, 35 do
+    compose_draft(right, 30, ('draft %d'):format(i))
+  end
+
+  arm_ready_raw('compose')
+  child.cmd('Diffy review submit comment')
+  wait_ready_raw()
+  child.type_keys('big review', '<Esc>')
+  arm_ready_raw('review')
+  child.type_keys('<C-s>')
+  wait_ready_raw()
+
+  MiniTest.expect.equality(remote_reviews(), { pending = false, submitted = { { state = 'COMMENTED', body = 'big review' } } })
+  -- pushed drafts leave the local file; nothing is pushed twice later
+  MiniTest.expect.equality(vim.json.decode(drafts_text()).threads or {}, {})
 
   child.cmd('Diffy close')
 end

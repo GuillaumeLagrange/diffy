@@ -1,19 +1,10 @@
--- The GitHub backend's read side through `:Diffy
--- pr` - placement tracked across commits (outdated/hidden/tracked-to-head),
--- opening the fold around a thread placed on an unchanged line, and the
--- readiness refusal (dirty tree / HEAD != PR head).
+-- The GitHub backend's read side through `:Diffy pr`: placement tracked across
+-- commits, fold opening around a thread, and the readiness refusal.
 --
--- Fixture repo: a `git bundle` of the real sandbox PRs #2's `base/placement`
--- and `sandbox/placement` branches (`tests/fixtures/github/placement.bundle`,
--- fetched read-only from `GuillaumeLagrange/diffy-tests`, never rebuilt/
--- pushed from here) gives commits with the *exact* shas the recorded
--- GraphQL fixture (`tests/fixtures/github/pr2.json`, saved verbatim from
--- `gh api graphql --input -` against the real PR #2) refers to - this is
--- what keeps the placement test deterministic and fully offline
--- while still exercising real line-tracking `git diff` calls against real
--- history, not a hand-rolled approximation of it. The GitHub *transport*
--- (`review/github.lua`'s `M.transport`) is the only thing faked
--- (`tests/helpers/fake_github.lua`) - git and nvim are real.
+-- Fixture repo: a `git bundle` of the sandbox PR #2's `base/placement` and
+-- `sandbox/placement` branches (`tests/fixtures/github/placement.bundle`), so
+-- shas match the recorded GraphQL fixture (`tests/fixtures/github/pr2.json`)
+-- and line tracking runs real `git diff` offline.
 -- `make test-gh`: only the refusal cases run live (fresh PR per case).
 local leak = require('tests.helpers.leak')
 local live = require('tests.helpers.github_live')
@@ -65,6 +56,25 @@ local function serve_thread_at(line)
   ]]):format(HEAD_SHA, line, line, line, line))
 end
 
+--- Adds a published thread written on `commit` (a short sha), line `line`
+--- of f.txt, that GitHub reports outdated (no current line), to the fake
+--- PR #2.
+local function serve_outdated(id, commit, line)
+  child.lua(([[
+    local pr = _G.__fake_state.reads[2].repository.pullRequest
+    local oid = %q
+    table.insert(pr.reviewThreads.nodes, {
+      id = 'PRRT_' .. %q, isResolved = false, path = 'f.txt', diffSide = 'RIGHT',
+      originalLine = %d,
+      comments = { nodes = { {
+        id = 'PRRC_' .. %q, author = { login = 'x' }, body = %q .. ' outdated here',
+        createdAt = '2026-09-27T07:00:00Z', originalLine = %d,
+        commit = { oid = oid }, originalCommit = { oid = oid },
+      } } },
+    })
+  ]]):format(git(dir, { 'rev-parse', commit }), id, line, id, id, line))
+end
+
 local T = MiniTest.new_set({
   hooks = {
     pre_case = function()
@@ -90,33 +100,9 @@ local T = MiniTest.new_set({
   },
 })
 
-local function wins()
-  return ui.wins(child)
-end
-
-local function open_pr()
-  ui.arm_ready(child, 'render')
-  child.cmd('Diffy pr')
-  ui.wait_ready(child)
-end
-
---- Select log entry `idx` (1-based, newest first) as a single commit.
-local function select_commit(idx)
-  local w = wins()
-  child.api.nvim_set_current_win(w.log)
-  ui.arm_ready(child, 'select')
-  child.fn.win_execute(w.log, ('call cursor(%d, 1)'):format(idx))
-  child.type_keys('<CR>')
-  ui.wait_ready(child)
-end
-
-local function open_file(path)
-  ui.open_tree_row(child, path, '<CR>', 'review')
-end
-
-local function lines_with_signs(side)
-  return ui.thread_lines(child, side)
-end
+local view = live.bind(child)
+local wins, open_pr, open_file, select_commit, lines_with_signs =
+  view.wins, view.open_pr, view.open_file, view.select_commit, view.lines_with_signs
 
 T['placement tracks a thread across commits (shown at head/its own view) and hides+outdates one whose line later changed'] = function()
   -- Live: PR #2's between-pushes state can't be recreated; recorded fixtures cover it.
@@ -152,18 +138,36 @@ T['placement tracks a thread across commits (shown at head/its own view) and hid
   MiniTest.expect.equality(at_head[11], nil)
   MiniTest.expect.equality(at_head[10], nil)
 
-  -- `:Diffy threads`: B2 (outdated) lists only its own P1 view, never `head`
-  child.cmd('Diffy threads')
-  local qf = child.lua_get('vim.tbl_map(function(e) return e.text end, vim.fn.getqflist())')
-  local b2_line
-  for _, text in ipairs(qf) do
-    if text:find(': B2 ', 1, true) then
-      b2_line = text
+  -- `:Diffy threads`: B2 (resolved) is under "Resolved, outdated"; its
+  -- preview lists only its own P1 view, never `head`
+  child.o.columns = 200
+  local b2_group
+  for _, g in ipairs(ui.all_threads(child, 'Diffy threads')) do
+    for _, row in ipairs(g.rows) do
+      if row:find(' B2 ', 1, true) then
+        b2_group = g.group
+      end
     end
   end
-  MiniTest.expect.equality(b2_line ~= nil, true)
-  MiniTest.expect.equality(b2_line:find('head', 1, true), nil)
-  MiniTest.expect.equality(b2_line:find('786410a', 1, true) ~= nil, true)
+  MiniTest.expect.equality(b2_group, 'Resolved, outdated')
+  for i, l in ipairs(ui.threads_view(child).rows) do
+    if l:find(' B2 ', 1, true) then
+      child.type_keys(i .. 'G')
+    end
+  end
+  MiniTest.expect.equality(ui.threads_view(child).preview[1], 'Shown in: 786410a')
+
+  -- <CR> on it from head selects P1, the commit it shows in, and enters it
+  ui.arm_ready_raw(child, 'thread')
+  child.type_keys('<CR>')
+  ui.wait_ready_raw(child)
+  MiniTest.expect.equality(ui.threads_view(child), vim.NIL)
+  local selected = ui.rows_with(child, 'log', 'DiffySelection')
+  MiniTest.expect.equality(#selected, 1)
+  MiniTest.expect.equality(selected[1]:find('786410a', 1, true) ~= nil, true)
+  local float = ui.thread_float(child)
+  MiniTest.expect.equality(float.focused, true)
+  MiniTest.expect.equality(table.concat(float.text, '\n'):find('B2', 1, true) ~= nil, true)
 
   child.cmd('Diffy close')
 end
@@ -186,29 +190,59 @@ T['a thread placed on a line unchanged in the viewed commit opens the fold aroun
   child.cmd('Diffy close')
 end
 
+T['<CR> in the threads view opens an outdated thread where it was written: its commit, or everything up to it'] = function()
+  if live.enabled then
+    MiniTest.skip('placement: recorded-fixture only')
+  end
+  -- both on f.txt line 70, which P5 changes: outdated, still shown in the
+  -- views of P2 to P3
+  serve_outdated('OUT2', '6980f1a', 70) -- P2 changes f.txt: written in P2's own view
+  serve_outdated('OUT3', '6ec44a6', 70) -- P3 doesn't: written from the full view at P3
+  child.o.columns = 200
+  open_pr()
+  local function go(id)
+    child.cmd('Diffy threads')
+    for i, l in ipairs(ui.threads_view(child).rows) do
+      if l:find(id .. ' outdated here', 1, true) then
+        child.api.nvim_win_set_cursor(wins().threads, { i, 0 })
+      end
+    end
+    ui.arm_ready_raw(child, 'thread')
+    child.type_keys('<CR>')
+    ui.wait_ready_raw(child)
+    local float = ui.thread_float(child)
+    MiniTest.expect.equality(float.focused, true)
+    MiniTest.expect.equality(table.concat(float.text, '\n'):find(id, 1, true) ~= nil, true)
+    -- commit ids, the first word of each subject (the log cuts them)
+    return vim.tbl_map(function(s)
+      return s:match('^%S+')
+    end, ui.log_subjects(child, ui.rows_with(child, 'log', 'DiffySelection')))
+  end
+  MiniTest.expect.equality(go('OUT2'), { 'P2' })
+  MiniTest.expect.equality(go('OUT3'), { 'P3', 'P2', 'P1' })
+
+  child.cmd('Diffy close')
+end
+
 local function expect_refused()
   vim.wait(live.timeout, function()
-    return child.lua_get('_G.__warned') == true
+    return #ui.warnings(child) > 0
   end, 10)
-  MiniTest.expect.equality(child.lua_get('_G.__warned'), true)
+  MiniTest.expect.equality(#ui.warnings(child) > 0, true)
   MiniTest.expect.equality(child.fn.tabpagenr('$'), 1)
   MiniTest.expect.equality(ui.diffy_buffers(child), {})
 end
 
-local function capture_warnings()
-  child.lua([[_G.__warned = false; vim.notify = function(_, level) if level == vim.log.levels.WARN or level == vim.log.levels.ERROR then _G.__warned = true end end]])
-end
-
 T[':Diffy pr refuses to open when local HEAD differs from the PR head on GitHub'] = function()
   git(dir, { 'commit', '--amend', '-q', '--allow-empty', '-m', 'local-only amend' })
-  capture_warnings()
+  ui.capture_warnings(child)
   child.cmd('Diffy pr')
   expect_refused()
 end
 
 T[':Diffy pr refuses to open when the tree is dirty'] = function()
   vim.fn.writefile({ 'dirty' }, dir .. '/f.txt')
-  capture_warnings()
+  ui.capture_warnings(child)
   child.cmd('Diffy pr')
   expect_refused()
 end

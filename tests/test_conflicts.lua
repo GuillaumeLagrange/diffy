@@ -47,8 +47,8 @@ local function is_diff(win)
   return child.lua_get(('vim.wo[%d].diff'):format(win))
 end
 
-local function arm_ready_raw(event)
-  ui.arm_ready_raw(child, event)
+local function conflicted()
+  return ui.git(repo.dir, { 'status', '--porcelain=v2' }):find('^u ') ~= nil
 end
 
 T[':Diffy conflicts opens the 4-window layout for the first conflicted file'] = function()
@@ -109,9 +109,8 @@ T['gho/ght take hunks and s on the last conflict resolves it and leaves no confl
   child.type_keys('s')
   ui.wait_ready(child)
 
-  local status = ui.git(repo.dir, { 'status', '--porcelain=v2' })
-  MiniTest.expect.equality(status:find('^u ') == nil, true)
-  MiniTest.expect.equality(status:find('f.txt', 1, true) ~= nil, true)
+  MiniTest.expect.equality(conflicted(), false)
+  MiniTest.expect.equality(ui.git(repo.dir, { 'status', '--porcelain=v2' }):find('f.txt', 1, true) ~= nil, true)
   -- no conflict pane (not even a stale ours) remains once nothing is conflicted
   for _, bar in ipairs(ui.layout(child).bars) do
     MiniTest.expect.equality(bar:find('^ours ') or bar:find('^theirs ') or bar:find('^base ') or bar:find('^result '), nil)
@@ -145,9 +144,7 @@ T[']x skips a markdown heading underline and stops on each real marker'] = funct
   child.cmd('Diffy close')
 end
 
--- `s` with markers left opens `lua/diffy/prompt.lua`'s real floating
--- confirmation - driven here with
--- actual `y`/`n` keystrokes, not a `vim.fn.confirm` mock.
+-- `s` with markers left opens prompt.lua's float, driven with real `y`/`n` keys.
 T['s with conflict markers left asks for confirmation'] = function()
   repo = conflict_repo()
   child.fn.chdir(repo.dir)
@@ -160,18 +157,18 @@ T['s with conflict markers left asks for confirmation'] = function()
   child.api.nvim_set_current_win(w.tree)
   child.type_keys('s') -- markers still present: opens the confirm float
   MiniTest.expect.equality(child.lua_get('vim.api.nvim_win_get_config(0).relative'), 'editor')
-  MiniTest.expect.equality(ui.git(repo.dir, { 'status', '--porcelain=v2' }):find('^u ') ~= nil, true)
+  MiniTest.expect.equality(conflicted(), true)
 
   child.type_keys('n') -- declines
   MiniTest.expect.equality(child.lua_get('vim.api.nvim_win_get_config(0).relative'), '')
-  MiniTest.expect.equality(ui.git(repo.dir, { 'status', '--porcelain=v2' }):find('^u ') ~= nil, true)
+  MiniTest.expect.equality(conflicted(), true)
 
   child.type_keys('s') -- asks again
   MiniTest.expect.equality(child.lua_get('vim.api.nvim_win_get_config(0).relative'), 'editor')
-  arm_ready_raw('render')
+  ui.arm_ready_raw(child, 'render')
   child.type_keys('y') -- accepts
   ui.wait_ready_raw(child)
-  MiniTest.expect.equality(ui.git(repo.dir, { 'status', '--porcelain=v2' }):find('^u ') == nil, true)
+  MiniTest.expect.equality(conflicted(), false)
 
   child.cmd('Diffy close')
 end
@@ -203,7 +200,7 @@ T['the same flow works during a rebase conflict'] = function()
   child.api.nvim_set_current_win(w.tree)
   child.type_keys('s')
   ui.wait_ready(child)
-  MiniTest.expect.equality(ui.git(repo.dir, { 'status', '--porcelain=v2' }):find('^u ') == nil, true)
+  MiniTest.expect.equality(conflicted(), false)
 
   child.cmd('Diffy close')
 end
@@ -217,35 +214,12 @@ T['selecting a normal file after a U row restores the 2-window diff area'] = fun
   child.cmd('Diffy')
   ui.wait_ready(child)
 
-  local w = ui.wins(child)
-  local tree_lines = buf_lines(w.tree)
-  local u_line, g_line
-  for i, l in ipairs(tree_lines) do
-    if l:find('U f.txt', 1, true) then
-      u_line = i
-    end
-    if l:find('M g.txt', 1, true) then
-      g_line = i
-    end
-  end
-  MiniTest.expect.equality(u_line ~= nil, true)
-  MiniTest.expect.equality(g_line ~= nil, true)
-
-  child.api.nvim_set_current_win(w.tree)
-  child.fn.win_execute(w.tree, ('call cursor(%d, 1)'):format(u_line))
-  ui.arm_ready(child, 'conflict')
-  child.type_keys('<CR>')
-  ui.wait_ready(child)
+  ui.open_tree_row(child, 'U f.txt', '<CR>', 'conflict')
   MiniTest.expect.equality(vim.tbl_contains(ui.layout(child).bars, 'result  f.txt'), true)
   -- <CR> moved to the result window, the one to edit
   MiniTest.expect.equality(child.lua_get('vim.wo.winbar'), 'result  f.txt')
 
-  child.api.nvim_set_current_win(w.tree)
-  child.fn.win_execute(w.tree, ('call cursor(%d, 1)'):format(g_line))
-  ui.arm_ready(child, 'open_row')
-  child.type_keys('<CR>')
-  ui.wait_ready(child)
-
+  ui.open_tree_row(child, 'M g.txt', '<CR>', 'open_row')
   local lay = ui.layout(child)
   MiniTest.expect.equality(vim.tbl_contains(lay.bars, 'result  f.txt'), false)
   MiniTest.expect.equality(lay.right.path, 'g.txt')

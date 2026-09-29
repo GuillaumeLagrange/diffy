@@ -1,51 +1,40 @@
--- Review UI shared by every backend: signs + mirrored virt_lines summaries,
--- the thread float (`K`/`<CR>`), the compose float (`gc`), `]t`/`[t`, the
--- display toggles (`<leader>dt`/`ds`/`dr`), `gP` (GitHub PR description),
--- and the jump used by `:Diffy threads` (review/threads.lua).
+-- Review UI shared by every backend: range bars + summaries, the thread
+-- float (`K`/`<CR>`), the compose float (`gc`), `]t`/`[t`, the display
+-- toggles (`<leader>dt`/`ds`/`dr`), `gP` and the jump used by
+-- `:Diffy threads`.
 --
--- `session.review` (nil until `M.ensure` runs, `false` if this session's
--- range kind doesn't support review, else a table):
---   backend   the backend module (`review/local.lua` for `:Diffy`/`:Diffy
---             branch`, `review/github.lua` for `:Diffy pr`)
---   branch    backend-resolved persistence scope key
---   threads   Thread[] (see review/model.lua)
---   inline    whether decorations are currently drawn (`<leader>dt`)
---   summaries whether summaries are drawn under commented lines, or only
---             signs (`<leader>ds`)
---   hide_resolved  whether resolved threads are left out (`<leader>dr`)
---   pr        GitHub only: `{number, title, body, author, created_at, base,
---             head_sha, conversation, reviews, pending}`, `gP`'s source.
---   merge_base, _diff_cache  GitHub only: placement plumbing, not for UI use.
--- A backend module exposes: `name`, `capabilities = {resolve, suggestions,
--- people}` (`people`: comments come from several people, so the float shows
--- names and avatars; else every comment is the user's), `branch(session)`,
--- `author(root)`, optionally `avatar_url(login)`, `view_place(session,
--- thread)` (where it shows in the current pair, any file: the thread lists),
--- `place(session, thread) -> nil | {win='left'|'right', start_line,
---   end_line}` (the only backend-specific step of decorate()), and, for
---   authoring, `load(session, branch) -> Thread[]`, `save(session, branch,
---   threads)`, `clear(session, branch)`, `export(session, cb)`. `gc`/`r`/`x`
---   etc. are no-ops (with a notice) while a backend lacks `save`.
+-- A backend exposes `name`, `capabilities = {resolve, suggestions, people}`,
+-- `branch(session)`, `author(root)`, optionally `avatar_url(login)`,
+-- `place(session, thread) -> nil | {win, start_line, end_line}` (in the open
+-- file), `view_place(session, thread, pair?)` (any file of a pair), and for
+-- authoring `load`/`save`/`clear` (`gc`, `r`, `x` are no-ops without `save`),
+-- `submit(session, event, body, cb(ok, warnings))` (`event` nil unless the
+-- backend offers review events through `verdicts(session)`).
+--
+-- `session.review`: nil until `M.ensure` runs, `false` if the range kind
+-- doesn't support review, else
+--   { backend, branch, threads: Thread[], inline (`<leader>dt`),
+--     summaries (`<leader>ds`), hide_resolved (`<leader>dr`),
+--     pr (GitHub only, `gP`'s source), merge_base/_diff_cache (GitHub
+--     placement plumbing) }
 local session_mod = require('diffy.session')
 local model = require('diffy.review.model')
 local run = require('diffy.git.run')
 local highlight = require('diffy.highlight')
 local avatar = require('diffy.avatar')
+local prompt = require('diffy.prompt')
+local layout = require('diffy.layout')
 
 local M = {}
 
---- A scratch buffer named `diffy://<id>/<kind>/<seq>`, registered with the session.
+--- A scratch buffer named `diffy://<id>/<kind>/<n>`, registered with the session.
 local function scratch_buf(session, kind, buftype, filetype)
-  local buf = vim.api.nvim_create_buf(false, true)
-  session._review_buf_seq = (session._review_buf_seq or 0) + 1
-  local seq = session._review_buf_seq
-  vim.api.nvim_buf_set_name(buf, ('diffy://%d/%s/%d'):format(session.id, kind, seq))
+  local buf = session_mod.scratch_buf(session, kind)
   vim.bo[buf].buftype = buftype
   if filetype then
     vim.bo[buf].filetype = filetype
   end
-  vim.bo[buf].swapfile = false
-  session_mod.register_buffer(session, kind .. '_' .. seq, buf)
+  session_mod.register_buffer(session, kind .. '_' .. buf, buf)
   return buf
 end
 
@@ -103,18 +92,26 @@ local function row_map(win)
   end)
 end
 
---- One summary line: `💬 author +N: first line of the comment`, cut to
---- `width` so threads on the same line can be told apart. A resolved one
---- reads `✓ author +N: …`, dimmed. `hl`, when given, colours the whole line
---- (open or relevant thread, see `paint`).
-local function summary_chunks(thread, width, hl)
+--- One summary line: `● author +N: first line of the comment`, the dot in
+--- the thread's lane colour, cut to `width` so threads on the same line can
+--- be told apart. A resolved one reads `✓ author +N: …`, dimmed. `mode`
+--- (see `paint`): 'open' draws the whole line bold in the lane colour,
+--- 'near' in the lane colour.
+local function summary_chunks(thread, width, mode)
   local first = thread.comments[1]
   local head = (first and first.author or 'unknown') .. (#thread.comments > 1 and (' +%d'):format(#thread.comments - 1) or '')
-  -- both two cells wide, so resolved and open summaries line up
-  local icon = thread.resolved and '✓ ' or model.COMMENT_ICON
+  local icon = thread.resolved and '✓' or '●'
   local text_hl = thread.resolved and 'DiffyThreadSummaryResolved' or 'DiffyThreadSummary'
+  local icon_hl = thread.resolved and 'DiffyThreadResolved' or highlight.lane(thread.id)
+  local hl, dot_hl
+  if mode == 'open' then
+    -- DiffyThreadCurrent only adds the weight; the colour stays the lane's
+    hl, dot_hl = { thread.resolved and text_hl or icon_hl, 'DiffyThreadCurrent' }, { 'DiffyThreadCurrent', icon_hl }
+  elseif mode == 'near' then
+    hl = thread.resolved and text_hl or icon_hl
+  end
   local chunks = {
-    { icon .. ' ', hl or (thread.resolved and 'DiffyThreadResolved' or text_hl) },
+    { icon .. ' ', dot_hl or icon_hl },
     { head, hl or text_hl },
   }
   local line = first and vim.split(first.body or '', '\n', { plain = true })[1] or ''
@@ -125,22 +122,158 @@ local function summary_chunks(thread, width, hl)
   return chunks
 end
 
---- Threads covering the cursor line of the current window, if it's a diff
---- window: the "relevant" ones whose summaries stand out.
-local function relevant_threads(session)
+--- The current window, or the diff window under it when it's the thread
+--- float; second result: whether it's the float.
+local function source_win(session)
   local win = vim.api.nvim_get_current_win()
   local open = session.review and session.review._open
   if open and win == open.float then
-    win = open.src
+    return open.src, true
   end
+  return win, false
+end
+
+--- Threads covering the cursor line of the current window, if it's a diff
+--- window: the "relevant" ones whose summaries stand out.
+local function relevant_threads(session)
+  local win = source_win(session)
   if not M.side_of(session, win) then
     return {}
   end
   return M.threads_at(session, win, vim.api.nvim_win_get_cursor(win)[1])
 end
 
+-- Range bars are drawn by 'statuscolumn', not signs: it also runs for
+-- virt_lines and diff filler rows, so a bar goes on through the summaries
+-- and fillers inside its range and down to its own summary.
+-- `gutters[win]` = { buf, width (lanes), threads (placed in `win`, `_lane`
+-- set), rows (line -> diffy virt_lines under it), pos (thread -> its
+-- summary's row under its last line), lit (thread -> 'open' | 'near') }.
+local gutters = {}
+local STATUSCOLUMN = "%C%s%=%l %{%v:lua.require'diffy.review.ui'.statuscolumn()%}"
+-- only the open thread's bar is heavy; each bar ends on its summary row
+local BAR = { open = '┃', off = '│' }
+local BAR_END = { open = '┗', off = '╰' }
+-- a bar ending runs right to its summary, across the bars still going on
+local ACROSS = { open = '━', off = '─' }
+-- CROSS[going bar][ending bar]
+local CROSS = {
+  off = { off = '┼', open = '┿' },
+  open = { off = '╂', open = '╋' },
+}
+
+local function weight(g, thread)
+  return g.lit[thread] == 'open' and 'open' or 'off'
+end
+
+local function lane_hl(thread)
+  return thread.resolved and 'DiffyThreadSummaryResolved' or highlight.lane(thread.id)
+end
+
+local function cell(thread, ch)
+  return ('%%#%s#%s'):format(lane_hl(thread), ch)
+end
+
+--- 'statuscolumn' item of diff windows with threads: the range bars of
+--- the row being drawn, one cell per lane, then a space (a line to the
+--- summary on a thread's summary row).
+function M.statuscolumn()
+  -- %{} items run with the drawn window current
+  local win = vim.api.nvim_get_current_win()
+  local g = gutters[win]
+  if not g or vim.api.nvim_win_get_buf(win) ~= g.buf then
+    return ''
+  end
+  local l, v = vim.v.lnum, vim.v.virtnum
+  -- virtual rows under `l`, top to bottom: diffy's virt_lines, then filler
+  local k = v < 0 and (g.rows[l] or 0) + vim.fn.diff_filler(l + 1) + v + 1
+  local going, ending = {}, nil
+  for _, t in ipairs(g.threads) do
+    local s, e = t._place.start_line, t._place.end_line
+    if s <= l and (l < e or (l == e and (v >= 0 or (g.pos[t] and k < g.pos[t])))) then
+      going[t._lane] = t
+    elseif l == e and g.pos[t] == k then
+      ending = t
+    end
+  end
+  local across = ending and ACROSS[weight(g, ending)]
+  local cells = {}
+  for i = 1, g.width do
+    local t = going[i]
+    if ending and i == ending._lane then
+      cells[i] = cell(ending, BAR_END[weight(g, ending)])
+    elseif ending and i > ending._lane then
+      cells[i] = t and cell(t, CROSS[weight(g, t)][weight(g, ending)]) or cell(ending, across)
+    else
+      cells[i] = t and cell(t, BAR[weight(g, t)]) or ' '
+    end
+  end
+  return table.concat(cells) .. (ending and cell(ending, across) .. '%*' or '%* ')
+end
+
+--- The order `]t`/`[t` walk threads and lanes are handed out in: by first
+--- line, then the larger range first (it's drawn left of the ones it
+--- contains), then oldest first. The id makes it total: two threads can
+--- start in the same second.
+local function by_start(a, b)
+  local pa, pb = a._place, b._place
+  if pa.start_line ~= pb.start_line then
+    return pa.start_line < pb.start_line
+  end
+  if pa.end_line ~= pb.end_line then
+    return pa.end_line > pb.end_line
+  end
+  local sa, sb = model.started(a), model.started(b)
+  if sa ~= sb then
+    return sa < sb
+  end
+  return tostring(a.id) < tostring(b.id)
+end
+
+--- Give each of one window's placed `threads` a lane (`t._lane`), a
+--- column of its own, so overlapping ranges draw side by side, handed out
+--- in `by_start` order to the leftmost free lane. Returns the number of
+--- lanes.
+local function assign_lanes(threads)
+  local order = vim.list_slice(threads)
+  table.sort(order, by_start)
+  local ends = {}
+  for _, t in ipairs(order) do
+    local lane = 1
+    while ends[lane] and ends[lane] >= t._place.start_line do
+      lane = lane + 1
+    end
+    ends[lane] = t._place.end_line
+    t._lane = lane
+  end
+  return #ends
+end
+
+--- Draw `g`'s range bars in `win` (see `gutters`), or, with nil, put
+--- back the 'statuscolumn' diffy found (kept in `w:diffy_statuscolumn`).
+function M.fit_gutter(win, g)
+  for w in pairs(gutters) do
+    if not vim.api.nvim_win_is_valid(w) then
+      gutters[w] = nil
+    end
+  end
+  gutters[win] = g
+  local saved = vim.w[win].diffy_statuscolumn
+  if g then
+    if saved == nil then
+      vim.w[win].diffy_statuscolumn = vim.wo[win].statuscolumn
+    end
+    -- set even if unchanged: the column only shrinks when the option is set
+    vim.api.nvim_set_option_value('statuscolumn', STATUSCOLUMN, { win = win, scope = 'local' })
+  elseif saved ~= nil then
+    vim.api.nvim_set_option_value('statuscolumn', saved, { win = win, scope = 'local' })
+    vim.w[win].diffy_statuscolumn = nil
+  end
+end
+
 --- (Re)draw the summary virt_lines recorded by `M.decorate`, highlighting
---- the open thread and the others covering the cursor line.
+--- the open thread and the others covering the cursor line, and thicken
+--- the open thread's bar.
 local function paint(session)
   local review = session.review
   if not (review and review._draw) then
@@ -152,17 +285,39 @@ local function paint(session)
     relevant[t] = true
   end
   local open = review._open and review._open.thread
+  -- on a one-sided file the float sits in the commented window itself, and
+  -- the open thread's summary, wider than it, would show past its right
+  -- edge: blank it (keeping its row, so nothing moves) while it's open
+  local covered
+  local o = review._open
+  if o and vim.api.nvim_win_is_valid(o.float) and vim.api.nvim_win_is_valid(o.src)
+    and vim.api.nvim_win_get_config(o.float).win == o.src then
+    covered = vim.api.nvim_win_get_buf(o.src)
+  end
   for _, d in ipairs(review._draw) do
     if vim.api.nvim_buf_is_valid(d.buf) then
       local vlines = {}
       for _, t in ipairs(d.threads) do
-        local hl = (t == open and 'DiffyThreadCurrent') or (relevant[t] and 'DiffyThreadRelevant') or nil
-        table.insert(vlines, summary_chunks(t, d.width, hl))
+        local mode = (t == open and 'open') or (relevant[t] and 'near') or nil
+        table.insert(vlines, (d.buf == covered and t == open) and { { '', 'Normal' } } or summary_chunks(t, d.width, mode))
       end
       for _ = #vlines + 1, d.n do
         table.insert(vlines, { { '', 'Normal' } })
       end
       d.id = vim.api.nvim_buf_set_extmark(d.buf, ns, d.line - 1, 0, { id = d.id, virt_lines = vlines })
+    end
+  end
+  for win, g in pairs(gutters) do
+    if vim.api.nvim_win_is_valid(win) and M.side_of(session, win) then
+      local lit, changed = {}, false
+      for _, t in ipairs(g.threads) do
+        lit[t] = (t == open and 'open') or (relevant[t] and 'near') or nil
+        changed = changed or lit[t] ~= g.lit[t]
+      end
+      if changed then
+        g.lit = lit
+        vim.api.nvim__redraw({ win = win, statuscolumn = true })
+      end
     end
   end
 end
@@ -195,62 +350,81 @@ local function by_place(a, b)
   return tostring(a.id) < tostring(b.id)
 end
 
---- Which of `threads` (covering one line) to show first: the oldest one
---- still open, else the oldest.
-local function first_thread(threads)
-  local pick
-  for _, t in ipairs(threads) do
-    if not pick or (pick.resolved and not t.resolved) then
-      pick = t
-    elseif not pick.resolved == not t.resolved and model.started(t) < model.started(pick) then
-      pick = t
-    end
-  end
-  return pick
-end
+-- a card's widest; narrower windows take their text width
+local CARD_WIDTH = 100
 
 --- Float config over the diff window opposite `src_win`, its top level with
---- `line`'s screen row, so the commented code stays in view. `height` text
---- rows plus `edges` title/footer rows are kept inside that window. Falls
---- back to below the cursor when there's no other diff window.
-local function beside(session, src_win, line, height, edges)
+--- line `first`'s screen row, so the commented code stays in view. `height`
+--- text rows plus `edges` title/footer rows are kept inside that window.
+--- With no other diff window (a one-sided file), in `src_win` right under
+--- lines `first`..`last`, over their summaries, or above them when that
+--- fits better. Either way at most `CARD_WIDTH` wide, centred over the
+--- window's text.
+local function beside(session, src_win, first, last, height, edges)
   local other = src_win == session.wins.left and session.wins.right
     or src_win == session.wins.right and session.wins.left
     or nil
-  if not (other and vim.api.nvim_win_is_valid(other)) then
-    local width = math.max(20, math.min(70, vim.o.columns - 4))
-    return { relative = 'cursor', row = 1, col = 0, width = width, height = math.max(1, math.min(height, vim.o.lines - 4 - edges)) }
-  end
+  local target = other and vim.api.nvim_win_is_valid(other) and other or src_win
   -- getwininfo's height leaves out the winbar, nvim_win_get_height doesn't
-  local info = vim.fn.getwininfo(other)[1]
+  local info = vim.fn.getwininfo(target)[1]
   local h = info.height
-  height = math.max(1, math.min(height, h - edges))
-  local pos = vim.fn.screenpos(src_win, line, 1)
-  local text_top = vim.fn.screenpos(other, vim.fn.line('w0', other), 1).row
-  local row = 0
-  if pos.row > 0 and text_top > 0 then
-    row = pos.row - text_top
+  local text_width = highlight.text_width(target)
+  -- the frame takes a column on each side
+  local width = math.max(10, math.min(CARD_WIDTH, text_width - 2))
+  local margin = math.max(0, math.floor((text_width - width - 2) / 2))
+  if target == other then
+    local w0 = vim.fn.line('w0', target)
+    local text_top = vim.fn.screenpos(target, w0, 1).row
+    height = math.max(1, math.min(height, h - edges))
+    local pos = vim.fn.screenpos(src_win, first, 1)
+    local row = 0
+    if pos.row > 0 and text_top > 0 then
+      row = pos.row - text_top
+    end
+    -- `bufpos` anchors col 0 at the first text column, past the gutter
+    return { relative = 'win', win = target, bufpos = { w0 - 1, 0 }, row = math.max(0, math.min(row, h - height - edges)), col = margin, width = width, height = height }
   end
-  row = math.max(0, math.min(row, h - height - edges))
-  -- `bufpos` anchors col 0 at the first text column, past the gutter
-  return { relative = 'win', win = other, bufpos = { vim.fn.line('w0', other) - 1, 0 }, row = row, col = 0, width = math.max(10, info.width - info.textoff - 2), height = height }
+
+  -- relative to the window itself: row 0 is its first text row (under the
+  -- winbar), col 0 its gutter
+  local cfg = { relative = 'win', win = target, col = info.textoff + margin, width = width }
+  local text_top = info.winrow + info.winbar
+  -- window rows of the range: `top` its first, `bottom` past its last (a
+  -- wrapped last line ends further down); nil when off screen
+  local s = vim.fn.screenpos(src_win, first, 1).row
+  local last_text = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(src_win), last - 1, last, false)[1] or ''
+  local e = vim.fn.screenpos(src_win, last, math.max(1, #last_text)).row
+  local top = s > 0 and s - text_top or nil
+  local bottom = e > 0 and e - text_top + 1 or nil
+  local below = bottom and h - bottom or 0
+  local above = top or 0
+  local need = height + edges
+  if below >= need or (below >= above and below > edges) then
+    cfg.height = math.max(1, math.min(height, below - edges))
+    cfg.row = bottom
+  elseif above > edges then
+    cfg.height = math.max(1, math.min(height, above - edges))
+    cfg.row = above - cfg.height - edges
+  else
+    -- the range fills the window: nothing left to keep in view
+    cfg.height = math.max(1, math.min(height, h - edges))
+    cfg.row = math.max(0, h - cfg.height - edges)
+  end
+  return cfg
 end
 
---- Make room under the framed float `top` (placed by `beside`) for another
---- framed float of up to `height` rows, shrinking and lifting `top` as
---- needed, scrolled to its end, or to `lnum` at its top when given. Returns
---- that float's config, or nil when `top` isn't anchored to a window.
-local function stack_below(top, height, lnum)
+--- Make room under the framed float `top` (the thread of lines
+--- `first`..`last` of `anchor_win`) for another framed float of up to
+--- `height` rows: both are placed by `beside` as one block, shrinking `top`
+--- as needed, scrolled to its end, or to `lnum` at its top when given.
+--- Returns the lower float's config.
+local function stack_below(session, top, anchor_win, first, last, height, lnum)
   local t = vim.api.nvim_win_get_config(top)
-  if t.relative ~= 'win' then
-    return nil
-  end
-  local room = vim.fn.getwininfo(t.win)[1].height
-  -- both frames, and at least three rows of `top`
-  height = math.max(1, math.min(height, room - 7))
-  local top_height = math.max(1, math.min(t.height, room - height - 4))
-  local row = math.max(0, math.min(t.row, room - top_height - height - 4))
-  vim.api.nvim_win_set_config(top, { relative = 'win', win = t.win, bufpos = t.bufpos, row = row, col = t.col, height = top_height, footer = '' })
+  local block = beside(session, anchor_win, first, last, t.height + 2 + height, 2)
+  -- the frames between the two, and at least three rows of `top`
+  height = math.max(1, math.min(height, block.height - 5))
+  local top_height = math.max(1, math.min(t.height, block.height - height - 2))
+  vim.api.nvim_win_set_config(top, { relative = 'win', win = block.win, bufpos = block.bufpos, row = block.row, col = block.col, height = top_height, footer = '' })
   vim.api.nvim_win_call(top, function()
     if lnum then
       vim.api.nvim_win_set_cursor(top, { lnum, 0 })
@@ -259,7 +433,7 @@ local function stack_below(top, height, lnum)
       vim.cmd('normal! G')
     end
   end)
-  return { relative = 'win', win = t.win, bufpos = t.bufpos, row = row + top_height + 2, col = t.col, width = t.width, height = height }
+  return { relative = 'win', win = block.win, bufpos = block.bufpos, row = block.row + top_height + 2, col = block.col, width = t.width, height = height }
 end
 
 --- Hover: the cursor on a commented line of a diff window opens that line's
@@ -292,7 +466,7 @@ local function setup_hover(session)
       elseif open and open.src == win and vim.tbl_contains(threads, open.thread) then
         paint(session)
       else
-        M.show_thread(session, first_thread(threads))
+        M.show_thread(session, threads[1])
       end
     end,
   })
@@ -306,9 +480,64 @@ local function setup_hover(session)
       end
     end,
   })
+  vim.api.nvim_create_autocmd('WinScrolled', {
+    group = session.augroup,
+    callback = function(args)
+      local win = tonumber(args.match)
+      if review._open and win and M.side_of(session, win) then
+        M.follow_scroll(session)
+      end
+    end,
+  })
+  -- a card keeps its width limit and stays centred: the editor or the diff
+  -- windows changed size (floats resizing themselves don't count)
+  vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {
+    group = session.augroup,
+    callback = function(args)
+      if args.event == 'WinResized' then
+        local diff = false
+        for _, w in ipairs(vim.v.event.windows or {}) do
+          diff = diff or M.side_of(session, w) ~= nil
+        end
+        if not diff then
+          return
+        end
+      end
+      vim.schedule(function()
+        M.refit(session)
+      end)
+    end,
+  })
 end
 
---- Redraw every thread's sign + summary for the current file/pair (call
+--- Fit card float `win` again with `fit()` whenever the editor or a diff
+--- window is resized, while it's open.
+local function refit_on_resize(session, win, fit)
+  session.review._refits = session.review._refits or {}
+  session.review._refits[win] = fit
+end
+
+--- Fit every open card float to the windows' current sizes.
+function M.refit(session)
+  local review = session.review
+  if session.closed or type(review) ~= 'table' then
+    return
+  end
+  -- a refit may open a float in place of its own (and register it)
+  local fits = {}
+  for win, fit in pairs(review._refits or {}) do
+    if vim.api.nvim_win_is_valid(win) then
+      table.insert(fits, fit)
+    else
+      review._refits[win] = nil
+    end
+  end
+  for _, fit in ipairs(fits) do
+    fit()
+  end
+end
+
+--- Redraw every thread's range bar + summary for the current file/pair (call
 --- after `diffpair.show`), and the counterpart blank lines that keep the
 --- two windows aligned. Placement comes from `review.backend.place`, cached
 --- on `thread._place` (session-only, not persisted) for `M.threads_at`,
@@ -336,7 +565,11 @@ function M.decorate(session)
     for _, t in ipairs(review.threads) do
       t._place = nil
     end
+    for _, w in ipairs(live_wins) do
+      M.fit_gutter(w, nil)
+    end
     review._draw = nil
+    layout.refresh(session, 'threads')
     run.ready({ session = session.id, event = 'review' })
     return
   end
@@ -358,21 +591,23 @@ function M.decorate(session)
   -- Summaries per side, keyed by screen row so both windows get the same
   -- number of virt_lines at each aligned row: a side's own summaries, padded
   -- with blanks up to the other side's count (never the sum of both).
-  -- Without summaries, only the signs.
+  -- Without summaries, only the range bars.
   local rows = {}
   for _, name in ipairs({ 'left', 'right' }) do
     local win = wins[name]
+    local g
     if win and vim.api.nvim_win_is_valid(win) and #placed[name] > 0 then
-      local buf = vim.api.nvim_win_get_buf(win)
       local line_rows = row_map(win)
       table.sort(placed[name], by_place)
+      g = {
+        buf = vim.api.nvim_win_get_buf(win),
+        width = assign_lanes(placed[name]),
+        threads = placed[name],
+        rows = {},
+        pos = {},
+        lit = {},
+      }
       for _, t in ipairs(placed[name]) do
-        vim.api.nvim_buf_set_extmark(buf, ns, t._place.start_line - 1, 0, {
-          sign_text = t.resolved and '✓' or model.COMMENT_ICON,
-          sign_hl_group = t.resolved and 'DiffyThreadResolved' or 'Comment',
-          -- on a line shared with a resolved thread, the open one's sign shows
-          priority = t.resolved and 4000 or 4096,
-        })
         open_fold_if_closed(win, t._place.start_line)
         open_fold_if_closed(win, t._place.end_line)
         if review.summaries ~= false then
@@ -382,6 +617,10 @@ function M.decorate(session)
           table.insert(rows[row][name].threads, t)
         end
       end
+    end
+    if win and vim.api.nvim_win_is_valid(win) then
+      -- before the summaries measure the text width
+      M.fit_gutter(win, g)
     end
   end
   local maps, draw = {}, {}
@@ -395,6 +634,13 @@ function M.decorate(session)
         local line = e and e.line or maps[name].line[row]
         if line then
           open_fold_if_closed(win, line)
+          local g = gutters[win]
+          if g then
+            g.rows[line] = n
+            for i, t in ipairs(e and e.threads or {}) do
+              g.pos[t] = i
+            end
+          end
           table.insert(draw, {
             buf = vim.api.nvim_win_get_buf(win),
             line = line,
@@ -432,6 +678,7 @@ function M.decorate(session)
     end
   end
   paint(session)
+  layout.refresh(session, 'threads')
   run.ready({ session = session.id, event = 'review' })
 end
 
@@ -448,8 +695,8 @@ function M.toggle_inline(session)
   M.decorate(session)
 end
 
---- `<leader>ds`: summaries under commented lines on/off; the signs stay,
---- and hovering a sign still previews its thread.
+--- `<leader>ds`: summaries under commented lines on/off; the range bars
+--- stay, and hovering a commented line still previews its thread.
 function M.toggle_summaries(session)
   local review = M.ensure(session)
   if not review then
@@ -476,27 +723,19 @@ function M.toggle_resolved(session)
   vim.notify(('diffy: %d resolved thread%s %s'):format(n, n == 1 and '' or 's', review.hide_resolved and 'hidden' or 'shown'))
 end
 
---- Diff window and line where `thread` is drawn in the current view.
+--- Diff window and range (first, last line) where `thread` is drawn in the current view.
 local function thread_anchor(session, thread)
   local p = thread._place
   if p and session.wins[p.win] and vim.api.nvim_win_is_valid(session.wins[p.win]) then
-    return session.wins[p.win], p.end_line
+    return session.wins[p.win], p.start_line, p.end_line
   end
-  return vim.api.nvim_get_current_win(), thread.anchor.end_line
+  return vim.api.nvim_get_current_win(), thread.anchor.start_line, thread.anchor.end_line
 end
 
 -- ---------------------------------------------------------------------
 -- comment cards: the thread float and `gP`
 
-local CARD_WIDTH = 100
-local CARD_HL = table.concat({
-  'NormalFloat:DiffyThread',
-  'FloatBorder:DiffyThreadBorder',
-  'FloatTitle:DiffyThreadHeader',
-  'FloatFooter:DiffyThreadBorder',
-  'FoldColumn:DiffyThread',
-  'EndOfBuffer:DiffyThread',
-}, ',')
+local CARD_HL = highlight.CARD_HL
 
 --- A card title, set in the top border like a tab.
 local function card_title(text, width)
@@ -505,16 +744,19 @@ end
 
 --- A float drawn as a card: its own background inside a thin frame, wrapped text.
 local function card_window(win)
-  -- copied from the diff window it was opened from: bound, its cursor would
-  -- drag the diff's along
-  vim.wo[win].scrollbind = false
-  vim.wo[win].cursorbind = false
+  session_mod.unbind(win)
   vim.wo[win].winhighlight = CARD_HL
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
   vim.wo[win].breakindent = true
   -- a cut preview ends mid-paragraph: no `@@@` marker there
   vim.wo[win].fillchars = 'eob: ,lastline: '
+end
+
+local function close_win(win)
+  if vim.api.nvim_win_is_valid(win) then
+    pcall(vim.api.nvim_win_close, win, true)
+  end
 end
 
 --- Open `buf` in a card float, entering it once it's set up.
@@ -766,49 +1008,20 @@ local function hide_avatars(session, win)
   end
 end
 
---- Key hints for a card's footer, `{ {key, label, drop = n}, ... }`. Hints
---- with a `drop` rank go, lowest first, until the rest fit `width`.
-local function key_hints(keys, width)
-  local shown = vim.list_extend({}, keys)
-  local function size()
-    local n = 2
-    for i, k in ipairs(shown) do
-      n = n + vim.fn.strdisplaywidth(k[1] .. ' ' .. k[2]) + (i < #shown and 3 or 0)
-    end
-    return n
-  end
-  while width and size() > width do
-    local worst
-    for i, k in ipairs(shown) do
-      if k.drop and (not worst or k.drop < shown[worst].drop) then
-        worst = i
-      end
-    end
-    if not worst then
-      break
-    end
-    table.remove(shown, worst)
-  end
-  -- title/footer chunks don't take the border's background: stack it in
-  local chunks = { { ' ', 'DiffyThread' } }
-  for i, k in ipairs(shown) do
-    table.insert(chunks, { k[1], { 'DiffyThread', 'DiffyThreadKey' } })
-    table.insert(chunks, { ' ' .. k[2] .. (i < #shown and '   ' or ' '), { 'DiffyThread', 'DiffyThreadHint' } })
-  end
-  return chunks
-end
+local key_hints = highlight.key_hints
 
 -- ---------------------------------------------------------------------
 -- compose float (`gc`)
 
---- Open a floating markdown compose buffer over the diff window opposite
---- `anchor_win`, level with `anchor_line`, so the code being commented stays
+--- Open a floating markdown compose buffer beside lines `first`..`last` of
+--- `anchor_win` (see `beside`), so the code being commented stays
 --- visible; with `opts.above` (the thread float), right under that float
 --- instead, so the thread stays in view (its end, or its line
 --- `opts.above_line`). `<C-s>`/`:w` calls `on_save(lines)` and closes; `q`
 --- cancels. `opts.on_close()` runs once it's closed, either way.
---- `opts.prefill` seeds the buffer (editing a draft).
-function M.open_compose(session, anchor_win, anchor_line, on_save, opts)
+--- `opts.prefill` seeds the buffer (editing a draft), which then opens in
+--- normal mode at its end; otherwise in insert mode.
+function M.open_compose(session, anchor_win, first, last, on_save, opts)
   opts = opts or {}
   local buf = scratch_buf(session, 'compose', 'acwrite', 'markdown')
   if opts.prefill then
@@ -816,28 +1029,37 @@ function M.open_compose(session, anchor_win, anchor_line, on_save, opts)
     vim.bo[buf].modified = false
   end
 
-  local cfg = opts.above and vim.api.nvim_win_is_valid(opts.above) and stack_below(opts.above, 8, opts.above_line)
-  if cfg then
-    -- the thread moved and scrolled: its avatars follow
-    schedule_avatars(session)
-  else
-    cfg = beside(session, anchor_win, anchor_line, 8, 2)
-  end
-  cfg.width = math.min(cfg.width, CARD_WIDTH)
-  cfg.style = 'minimal'
-  cfg.border = 'rounded'
-  cfg.zindex = 200
-  cfg.title = card_title(opts.title or 'New comment', cfg.width)
   local keys = { { '<C-s>', 'save' }, { 'q', 'cancel' } }
   if opts.suggestion then
     table.insert(keys, { '<C-g>s', 'suggest a change', drop = 1 })
   end
-  cfg.footer = key_hints(keys, cfg.width)
+  local function place()
+    local cfg
+    if opts.above and vim.api.nvim_win_is_valid(opts.above) then
+      -- the thread above takes the width the two share
+      vim.api.nvim_win_set_config(opts.above, { width = beside(session, anchor_win, first, last, 1, 2).width })
+      cfg = stack_below(session, opts.above, anchor_win, first, last, 8, opts.above_line)
+      -- the thread moved and scrolled: its avatars follow
+      schedule_avatars(session)
+    else
+      cfg = beside(session, anchor_win, first, last, 8, 2)
+    end
+    cfg.title = card_title(opts.title or 'New comment', cfg.width)
+    cfg.footer = key_hints(keys, cfg.width)
+    return cfg
+  end
+  local cfg = place()
+  cfg.style = 'minimal'
+  cfg.border = 'rounded'
+  cfg.zindex = 200
   local win = open_card(buf, false, cfg)
   -- before focusing it: entering it mustn't close the thread above
   session.review._reply_win = opts.above and win or nil
   vim.api.nvim_set_current_win(win)
   vim.wo[win].foldcolumn = '1'
+  refit_on_resize(session, win, function()
+    vim.api.nvim_win_set_config(win, place())
+  end)
 
   local closed = false
   local function close()
@@ -849,9 +1071,7 @@ function M.open_compose(session, anchor_win, anchor_line, on_save, opts)
     if session.review._reply_win == win then
       session.review._reply_win = nil
     end
-    if vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
+    close_win(win)
     if opts.on_close and not session.closed then
       opts.on_close()
     end
@@ -892,7 +1112,14 @@ function M.open_compose(session, anchor_win, anchor_line, on_save, opts)
     vim.api.nvim_win_set_cursor(0, { lnum + #block, 0 })
   end, { buffer = buf, desc = 'insert suggestion block' })
 
-  vim.cmd('startinsert')
+  if opts.prefill then
+    -- editing: in normal mode, at the end of what's there
+    local n = vim.api.nvim_buf_line_count(buf)
+    local text = vim.api.nvim_buf_get_lines(buf, n - 1, n, false)[1] or ''
+    vim.api.nvim_win_set_cursor(win, { n, math.max(0, #text - 1) })
+  else
+    vim.cmd('startinsert')
+  end
   run.ready({ session = session.id, event = 'compose' })
 end
 
@@ -957,7 +1184,7 @@ function M.compose(session, mode)
   local pinned_left, pinned_right = pin(session.pair.left), pin(session.pair.right)
 
   local suggestion = review.backend.capabilities.suggestions and excerpt or nil
-  M.open_compose(session, win, end_line, function(body)
+  M.open_compose(session, win, start_line, end_line, function(body)
     if vim.trim(table.concat(body, '\n')) == '' then
       return
     end
@@ -982,6 +1209,12 @@ function M.compose(session, mode)
   })
 end
 
+--- The thread float, when it's open on `thread`.
+local function open_float_of(review, thread)
+  local open = review._open
+  return open and open.thread == thread and vim.api.nvim_win_is_valid(open.float) and open.float or nil
+end
+
 --- Reply to an existing `thread`: appends a new comment on save. From the
 --- thread float, the reply box opens under it and the thread stays in
 --- view; closing the box (saved or not) goes back into the thread.
@@ -992,10 +1225,9 @@ function M.reply(session, thread)
     return
   end
   local backend = review.backend
-  local open = review._open
-  local above = open and open.thread == thread and vim.api.nvim_win_is_valid(open.float) and open.float or nil
-  local win, line = thread_anchor(session, thread)
-  M.open_compose(session, win, line, function(body)
+  local above = open_float_of(review, thread)
+  local win, first, last = thread_anchor(session, thread)
+  M.open_compose(session, win, first, last, function(body)
     if vim.trim(table.concat(body, '\n')) == '' then
       return
     end
@@ -1018,16 +1250,15 @@ end
 function M.edit_comment(session, thread, comment)
   local review = session.review
   local backend = review.backend
-  local open = review._open
-  local above = open and open.thread == thread and vim.api.nvim_win_is_valid(open.float) and open.float or nil
+  local above = open_float_of(review, thread)
   local above_line
-  for _, h in ipairs(above and open.heads or {}) do
+  for _, h in ipairs(above and review._open.heads or {}) do
     if h.comment == comment then
       above_line = h.row + 1
     end
   end
-  local win, line = thread_anchor(session, thread)
-  M.open_compose(session, win, line, function(body)
+  local win, first, last = thread_anchor(session, thread)
+  M.open_compose(session, win, first, last, function(body)
     comment.body = table.concat(body, '\n')
     backend.save(session, review.branch, review.threads)
     M.decorate(session)
@@ -1042,11 +1273,48 @@ function M.edit_comment(session, thread, comment)
   })
 end
 
+local function reply_open(review)
+  return review._reply_win and vim.api.nvim_win_is_valid(review._reply_win)
+end
+
+--- The comment whose card holds 0-based `row` of a buffer filled by `fill_cards`.
+local function comment_at(heads, row)
+  local comment
+  for _, h in ipairs(heads) do
+    if h.row <= row then
+      comment = h.comment
+    end
+  end
+  return comment
+end
+
+local function remove(list, item)
+  for i, x in ipairs(list) do
+    if x == item then
+      table.remove(list, i)
+      return
+    end
+  end
+end
+
+--- `fit` (from `beside`) as a set_config position, `width` included if asked.
+local function position(fit, width)
+  return {
+    relative = fit.relative,
+    win = fit.win,
+    bufpos = fit.bufpos,
+    row = fit.row,
+    col = fit.col,
+    width = width and fit.width or nil,
+    height = fit.height,
+  }
+end
+
 -- ---------------------------------------------------------------------
 -- thread float (`K`/`<CR>`)
 
 --- Threads whose placed range covers `lnum` of `win` (one of the session's
---- diff windows), in the order they're drawn.
+--- diff windows), left to right as their bars are.
 function M.threads_at(session, win, lnum)
   local review = session.review
   local out = {}
@@ -1058,15 +1326,16 @@ function M.threads_at(session, win, lnum)
       table.insert(out, t)
     end
   end
-  table.sort(out, by_place)
+  table.sort(out, function(a, b)
+    if a._lane ~= b._lane then
+      return (a._lane or 0) < (b._lane or 0)
+    end
+    return by_start(a, b)
+  end)
   return out
 end
 
-local function range_ns(session)
-  return session_mod.namespace(session, 'review_range')
-end
-
---- Close the thread float and drop its range highlight, without repainting.
+--- Close the thread float, without repainting.
 local function close_float(session)
   local review = session.review
   local open = review and review._open
@@ -1075,12 +1344,7 @@ local function close_float(session)
   end
   review._open = nil
   hide_avatars(session, open.float)
-  if vim.api.nvim_win_is_valid(open.float) then
-    pcall(vim.api.nvim_win_close, open.float, true)
-  end
-  if vim.api.nvim_win_is_valid(open.src) then
-    vim.api.nvim_buf_clear_namespace(vim.api.nvim_win_get_buf(open.src), range_ns(session), 0, -1)
-  end
+  close_win(open.float)
 end
 
 --- Close the open thread (if any); focus goes back to its diff window when
@@ -1108,7 +1372,7 @@ local function side_threads(session, win)
       table.insert(out, t)
     end
   end
-  table.sort(out, by_place)
+  table.sort(out, by_start)
   return out
 end
 
@@ -1131,6 +1395,20 @@ function M.render_thread(session, buf, thread, opts)
     avatar_url = opts.avatars and backend.avatar_url or nil,
     preamble = opts.preamble,
   })
+end
+
+--- Resolve (or unresolve) `thread`: on GitHub right away, in a local review
+--- in its saved drafts. Redraws once done.
+function M.set_resolved(session, thread, resolved)
+  local review = session.review
+  local backend = review.backend
+  if type(backend.resolve_thread) == 'function' then
+    backend.resolve_thread(session, thread, resolved, function() end)
+    return
+  end
+  thread.resolved = resolved
+  backend.save(session, review.branch, review.threads)
+  M.decorate(session)
 end
 
 --- Show `thread` alone in the thread float: over the other diff
@@ -1160,8 +1438,7 @@ function M.show_thread(session, thread, opts)
     end
   end
   local edges = 2
-  local cfg = beside(session, src, place.start_line, vim.api.nvim_buf_line_count(buf), edges)
-  cfg.width = math.min(cfg.width, CARD_WIDTH)
+  local cfg = beside(session, src, place.start_line, place.end_line, vim.api.nvim_buf_line_count(buf), edges)
   cfg.style = 'minimal'
   cfg.zindex = 50
   if opts.focus then
@@ -1182,11 +1459,20 @@ function M.show_thread(session, thread, opts)
     if #order > 1 then
       table.insert(keys, { ']t [t', ('%d/%d'):format(idx, #order), drop = 1 })
     end
+    local here = M.threads_at(session, src, vim.api.nvim_win_get_cursor(src)[1])
+    if #here > 1 then
+      for i, t in ipairs(here) do
+        if t == thread then
+          table.insert(keys, { '<Tab>', ('%d/%d on this line'):format(i, #here), drop = 1 })
+        end
+      end
+    end
     table.insert(keys, { 'q', 'close' })
     cfg.footer = key_hints(keys, cfg.width)
   end
   cfg.border = 'rounded'
   local fwin = open_card(buf, false, cfg)
+  vim.wo[fwin].winhighlight = highlight.card_hl(thread)
   vim.wo[fwin].conceallevel = 2
   vim.wo[fwin].concealcursor = 'nc'
   if opts.focus then
@@ -1204,17 +1490,29 @@ function M.show_thread(session, thread, opts)
       rows = cap
     end
   end
-  local fit = beside(session, src, place.start_line, rows, edges)
-  vim.api.nvim_win_set_config(fwin, vim.tbl_extend('force', fit_cfg, {
-    relative = fit.relative,
-    win = fit.win,
-    bufpos = fit.bufpos,
-    row = fit.row,
-    col = fit.col,
-    width = math.min(fit.width, CARD_WIDTH),
-    height = fit.height,
-  }))
-  review._open = { thread = thread, src = src, float = fwin, buf = buf, heads = heads }
+  local fit = beside(session, src, place.start_line, place.end_line, rows, edges)
+  vim.api.nvim_win_set_config(fwin, vim.tbl_extend('force', fit_cfg, position(fit, true)))
+  review._open = { thread = thread, src = src, float = fwin, buf = buf, heads = heads, rows = rows }
+  refit_on_resize(session, fwin, function()
+    -- a reply box under it places both
+    if reply_open(review) then
+      return
+    end
+    local now = thread._place
+    if not (now and review._open and review._open.float == fwin) then
+      return
+    end
+    local target = beside(session, src, now.start_line, now.end_line, rows, edges)
+    local cur = vim.api.nvim_win_get_config(fwin)
+    if cur.width == target.width and cur.col == target.col then
+      M.follow_scroll(session)
+      return
+    end
+    -- a new width wraps the text anew: show it again, on the same comment
+    local focused = vim.api.nvim_get_current_win() == fwin
+    local comment = comment_at(heads, vim.api.nvim_win_get_cursor(fwin)[1] - 1)
+    M.show_thread(session, thread, { focus = focused, comment = focused and comment or nil })
+  end)
   for _, h in ipairs(heads) do
     if opts.focus and h.comment == opts.comment then
       vim.api.nvim_win_set_cursor(fwin, { h.row + 1, 0 })
@@ -1222,14 +1520,6 @@ function M.show_thread(session, thread, opts)
   end
   if backend.capabilities.people then
     show_avatars(session, fwin, buf, heads)
-  end
-
-  local rns = range_ns(session)
-  pcall(vim.api.nvim__ns_set, rns, { wins = { src } })
-  local src_buf = vim.api.nvim_win_get_buf(src)
-  for l = place.start_line, math.min(place.end_line, vim.api.nvim_buf_line_count(src_buf)) do
-    -- on the number column: DiffAdd/DiffText would hide a line_hl_group
-    vim.api.nvim_buf_set_extmark(src_buf, rns, l - 1, 0, { number_hl_group = 'DiffyThreadRange', priority = 250 })
   end
 
   vim.api.nvim_create_autocmd('WinClosed', {
@@ -1258,18 +1548,17 @@ function M.show_thread(session, thread, opts)
   map(session, 'n', '[t', function()
     M.next_thread(session, -1)
   end, { buffer = buf, desc = 'previous thread' })
+  map(session, 'n', '<Tab>', function()
+    M.cycle_line(session, 1)
+  end, { buffer = buf, desc = 'next thread on this line' })
+  map(session, 'n', '<S-Tab>', function()
+    M.cycle_line(session, -1)
+  end, { buffer = buf, desc = 'previous thread on this line' })
   map(session, 'n', 'r', function()
     M.reply(session, thread)
   end, { buffer = buf, desc = 'reply' })
-  -- the card under the cursor
   local function draft_at_cursor(verb)
-    local row = vim.api.nvim_win_get_cursor(fwin)[1] - 1
-    local comment
-    for _, h in ipairs(heads) do
-      if h.row <= row then
-        comment = h.comment
-      end
-    end
+    local comment = comment_at(heads, vim.api.nvim_win_get_cursor(fwin)[1] - 1)
     if not comment or comment.state ~= 'draft' then
       vim.notify(('diffy: only a draft comment can be %s'):format(verb), vim.log.levels.WARN)
       return nil
@@ -1288,37 +1577,46 @@ function M.show_thread(session, thread, opts)
       return
     end
     M.close_thread(session)
-    for i, c in ipairs(thread.comments) do
-      if c == comment then
-        table.remove(thread.comments, i)
-        break
-      end
-    end
+    remove(thread.comments, comment)
     if #thread.comments == 0 then
-      for i, t in ipairs(review.threads) do
-        if t == thread then
-          table.remove(review.threads, i)
-          break
-        end
-      end
+      remove(review.threads, thread)
     end
     backend.save(session, review.branch, review.threads)
     M.decorate(session)
   end, { buffer = buf, desc = 'delete draft' })
   if backend.capabilities.resolve then
     map(session, 'n', 'x', function()
-      if type(backend.resolve_thread) == 'function' then
-        backend.resolve_thread(session, thread, not thread.resolved, function() end)
-        return
-      end
-      thread.resolved = not thread.resolved
-      backend.save(session, review.branch, review.threads)
-      M.decorate(session)
+      M.set_resolved(session, thread, not thread.resolved)
     end, { buffer = buf, desc = 'resolve/unresolve thread' })
   end
 
   paint(session)
   run.ready({ session = session.id, event = 'thread' })
+end
+
+--- Move the open thread's float back level with its thread after the diff
+--- scrolled under it; it keeps its size. Not while a reply box is stacked
+--- under it: the two are placed as one block.
+function M.follow_scroll(session)
+  local review = session.review
+  local open = review and review._open
+  if not (open and vim.api.nvim_win_is_valid(open.float) and vim.api.nvim_win_is_valid(open.src)) then
+    return
+  end
+  if reply_open(review) then
+    return
+  end
+  local place = open.thread._place
+  if not place then
+    return
+  end
+  local fit = beside(session, open.src, place.start_line, place.end_line, open.rows, 2)
+  local cur = vim.api.nvim_win_get_config(open.float)
+  if cur.win == fit.win and cur.row == fit.row and cur.col == fit.col and cur.height == fit.height
+    and vim.deep_equal(cur.bufpos, fit.bufpos) then
+    return
+  end
+  vim.api.nvim_win_set_config(open.float, position(fit))
 end
 
 --- `K`/`<CR>`: enter the thread at the cursor line (the one previewed, or
@@ -1330,15 +1628,101 @@ function M.open_thread(session)
     return
   end
   local open = session.review._open
-  local thread = (open and open.src == win and vim.tbl_contains(threads, open.thread)) and open.thread or first_thread(threads)
+  local thread = (open and open.src == win and vim.tbl_contains(threads, open.thread)) and open.thread or threads[1]
   M.show_thread(session, thread, { focus = true })
 end
 
+--- Whether the diff of selection `c` shows `thread`.
+local function selection_shows(session, thread, c)
+  local pair = require('diffy.selection').resolve(session.entries, c.top, c.bottom)
+  return session.review.backend.view_place(session, thread, pair) ~= nil
+end
+
+--- A selection showing `thread`: the current one if it does, the whole
+--- range, or the newest commit that does. nil if none does.
+local function selection_for(session, thread)
+  local entries = session.entries or {}
+  local candidates = {}
+  if session.sel and require('diffy.panels.tree').has_path(session, thread.anchor.path) then
+    table.insert(candidates, session.sel)
+  end
+  table.insert(candidates, require('diffy.panels.log').default_selection(entries, session.range))
+  for i, e in ipairs(entries) do
+    if not (e.kind == 'commit' and e.merge) then
+      table.insert(candidates, { top = i, bottom = i })
+    end
+  end
+  for _, c in ipairs(candidates) do
+    if selection_shows(session, thread, c) then
+      return c
+    end
+  end
+  return nil
+end
+
+--- The view an outdated `thread` was written in, to read it where it was
+--- made: its commit alone when that commit changes its file (written from
+--- the commit's view), else everything up to that commit (written from the
+--- full view back then). `cb(selection | nil)`.
+local function written_selection(session, thread, cb)
+  local entries = session.entries or {}
+  local at
+  for i, e in ipairs(entries) do
+    if e.kind == 'commit' and not e.merge and e.sha == thread.anchor.commit then
+      at = i
+    end
+  end
+  if not at then
+    cb(nil)
+    return
+  end
+  local sha = entries[at].sha
+  run.git({ 'diff', '--quiet', sha .. '^', sha, '--', thread.anchor.path }, {
+    cwd = session.root,
+    session = session,
+    notify_on_error = false,
+    on_exit = function(res)
+      local alone = { top = at, bottom = at }
+      local up_to = { top = at, bottom = require('diffy.selection').last_selectable(entries) }
+      -- `git diff --quiet` exits 1 when the file differs
+      if res.code == 1 and selection_shows(session, thread, alone) then
+        cb(alone)
+      elseif selection_shows(session, thread, up_to) then
+        cb(up_to)
+      else
+        cb(nil)
+      end
+    end,
+  })
+end
+
+--- Select `sel` (unless it's the current selection), then jump to `thread`.
+local function reveal(session, thread, sel)
+  if sel and not (session.sel and sel.top == session.sel.top and sel.bottom == session.sel.bottom) then
+    require('diffy.panels.log').select(session, sel.top, sel.bottom, function()
+      M.goto_thread(session, thread, true)
+    end)
+  else
+    M.goto_thread(session, thread, true)
+  end
+end
+
 --- Jump to `thread` from anywhere in the session: open its file in the
---- diff, put the cursor on it and enter it. Shows what it takes to see it
---- (resolved threads, inline comments) and says why when it can't be
---- shown in the current selection.
-function M.goto_thread(session, thread)
+--- diff, put the cursor on it and enter it. Shows what it takes to see it:
+--- resolved threads, inline comments, and a selection that shows it (for
+--- an outdated thread, the view it was written in); says why when none
+--- can.
+function M.goto_thread(session, thread, revealed)
+  if not revealed then
+    if thread.outdated then
+      written_selection(session, thread, function(sel)
+        reveal(session, thread, sel or selection_for(session, thread))
+      end)
+    else
+      reveal(session, thread, selection_for(session, thread))
+    end
+    return
+  end
   local review = session.review
   local redraw = false
   if not review.inline then
@@ -1373,58 +1757,87 @@ function M.goto_thread(session, thread)
   M.show_thread(session, thread, { focus = true })
 end
 
+--- The thread `]t` (`delta` 1) or `[t` (-1) opens from the current window,
+--- and the diff window it's in; nil past the first/last one.
+local function step_target(session, delta)
+  local review = session.review
+  if not review then
+    return nil
+  end
+  local open = review._open
+  local win = source_win(session)
+  if not M.side_of(session, win) then
+    return nil
+  end
+  local order = side_threads(session, win)
+  if open and open.src == win then
+    for i, t in ipairs(order) do
+      if t == open.thread then
+        return order[i + delta], win
+      end
+    end
+    return nil
+  end
+  local lnum = vim.api.nvim_win_get_cursor(win)[1]
+  if delta > 0 then
+    for _, t in ipairs(order) do
+      if t._place.start_line > lnum then
+        return t, win
+      end
+    end
+  else
+    for i = #order, 1, -1 do
+      if order[i]._place.start_line < lnum then
+        return order[i], win
+      end
+    end
+  end
+  return nil
+end
+
 --- `]t`/`[t` (from a diff window or the thread float): open the next or
 --- previous thread of that window, one at a time, stacked threads included,
 --- moving the diff cursor to it. No-op past the first/last one.
 function M.next_thread(session, delta)
-  local review = session.review
-  if not review then
-    return
-  end
-  local cur = vim.api.nvim_get_current_win()
-  local open = review._open
-  local in_float = open and cur == open.float
-  local win = in_float and open.src or cur
-  if not M.side_of(session, win) then
-    return
-  end
-  local order = side_threads(session, win)
-  local target
-  if open and open.src == win then
-    for i, t in ipairs(order) do
-      if t == open.thread then
-        target = order[i + delta]
-      end
-    end
-  else
-    local lnum = vim.api.nvim_win_get_cursor(win)[1]
-    if delta > 0 then
-      for _, t in ipairs(order) do
-        if t._place.start_line > lnum then
-          target = t
-          break
-        end
-      end
-    else
-      for i = #order, 1, -1 do
-        if order[i]._place.start_line < lnum then
-          target = order[i]
-          break
-        end
-      end
-    end
-  end
+  local target, win = step_target(session, delta)
   if not target then
     return
   end
+  local open = session.review._open
+  local in_float = open and vim.api.nvim_get_current_win() == open.float
   vim.api.nvim_win_set_cursor(win, { target._place.start_line, 0 })
   M.show_thread(session, target, { focus = in_float })
 end
 
---- One-time keymap setup for a diff-window buffer (on every left/right
---- swap): `gc`, `K`/`<CR>`, `]t`/`[t`, the display toggles, the thread
---- lists (`<leader>dc`/`dC`), `gP`. These apply on any diff buffer, real
---- file or blob alike.
+--- `<Tab>`/`<S-Tab>` (from a diff window or the thread float): open the
+--- next (`delta` 1) or previous thread among those covering the cursor
+--- line, left to right as their bars, wrapping around. With none of them
+--- open, the leftmost (or, going back, the rightmost).
+function M.cycle_line(session, delta)
+  local review = session.review
+  if not review then
+    return
+  end
+  local open = review._open
+  local win, in_float = source_win(session)
+  if not M.side_of(session, win) then
+    return
+  end
+  local threads = M.threads_at(session, win, vim.api.nvim_win_get_cursor(win)[1])
+  if #threads == 0 then
+    return
+  end
+  local at = delta > 0 and 1 or #threads
+  for i, t in ipairs(threads) do
+    if open and t == open.thread then
+      at = (i - 1 + delta) % #threads + 1
+    end
+  end
+  M.show_thread(session, threads[at], { focus = in_float })
+end
+
+--- Review keymaps of a diff-window buffer, real file or blob alike (set on
+--- every left/right swap).
 function M.setup_diff_keymaps(session, buf)
   local map = session_mod.map
   map(session, 'n', 'gc', function()
@@ -1450,7 +1863,7 @@ function M.setup_diff_keymaps(session, buf)
   end, { buffer = buf, desc = 'review: toggle inline threads' })
   map(session, 'n', '<leader>ds', function()
     M.toggle_summaries(session)
-  end, { buffer = buf, desc = 'review: toggle thread summaries (signs stay)' })
+  end, { buffer = buf, desc = 'review: toggle thread summaries (range bars stay)' })
   map(session, 'n', '<leader>dr', function()
     M.toggle_resolved(session)
   end, { buffer = buf, desc = 'review: toggle resolved threads' })
@@ -1458,11 +1871,17 @@ function M.setup_diff_keymaps(session, buf)
     require('diffy.review.threads').open(session, { 'file' })
   end, { buffer = buf, desc = 'review: threads of this file' })
   map(session, 'n', '<leader>dC', function()
-    require('diffy.review.threads').open(session, { 'selection' })
-  end, { buffer = buf, desc = 'review: threads of the selected range' })
+    require('diffy.review.threads').open(session, {})
+  end, { buffer = buf, desc = 'review: every thread' })
   map(session, 'n', 'gP', function()
     M.open_pr_description(session)
   end, { buffer = buf, desc = 'review: PR description' })
+  map(session, 'n', '<Tab>', function()
+    M.cycle_line(session, 1)
+  end, { buffer = buf, desc = 'review: next thread on this line' })
+  map(session, 'n', '<S-Tab>', function()
+    M.cycle_line(session, -1)
+  end, { buffer = buf, desc = 'review: previous thread on this line' })
 end
 
 -- ---------------------------------------------------------------------
@@ -1486,29 +1905,32 @@ function M.open_pr_description(session)
   local buf = scratch_buf(session, 'pr', 'nofile')
   local heads = fill_cards(session, buf, messages, { people = true, avatar_url = review.backend.avatar_url })
 
-  local width = math.max(40, math.min(CARD_WIDTH, vim.o.columns - 4))
-  local win = open_card(buf, true, {
-    relative = 'editor',
+  local title = ('#%d %s'):format(pr.number, pr.title or '')
+  local function width()
+    return math.max(40, math.min(CARD_WIDTH, vim.o.columns - 4))
+  end
+  local win = open_card(buf, true, layout.centered(width(), 1, {
     row = 1,
-    col = math.floor((vim.o.columns - width) / 2),
-    width = width,
-    height = 1,
     style = 'minimal',
     border = 'rounded',
-    title = card_title(('#%d %s'):format(pr.number, pr.title or ''), width),
-    footer = key_hints({ { 'q', 'close' } }, width),
+    title = card_title(title, width()),
+    footer = key_hints({ { 'q', 'close' } }, width()),
     zindex = 200,
-  })
+  }))
   vim.wo[win].conceallevel = 2
   vim.wo[win].concealcursor = 'nc'
-  local height = math.max(1, math.min(vim.api.nvim_win_text_height(win, {}).all, vim.o.lines - 6))
-  vim.api.nvim_win_set_config(win, {
-    relative = 'editor',
-    row = math.floor((vim.o.lines - height - 2) / 2),
-    col = math.floor((vim.o.columns - width) / 2),
-    width = width,
-    height = height,
-  })
+  -- as tall as its wrapped text allows; the frame's two rows count
+  local function place()
+    local w = width()
+    vim.api.nvim_win_set_config(win, { width = w, title = card_title(title, w), footer = key_hints({ { 'q', 'close' } }, w) })
+    local height = math.max(1, math.min(vim.api.nvim_win_text_height(win, {}).all, vim.o.lines - 6))
+    vim.api.nvim_win_set_config(win, layout.centered(w, height, { row = math.floor((vim.o.lines - height - 2) / 2) }))
+  end
+  place()
+  refit_on_resize(session, win, function()
+    place()
+    schedule_avatars(session)
+  end)
   show_avatars(session, win, buf, heads)
   vim.api.nvim_create_autocmd('WinClosed', {
     group = session.augroup,
@@ -1519,33 +1941,29 @@ function M.open_pr_description(session)
     end,
   })
   session_mod.map(session, 'n', 'q', function()
-    if vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
+    close_win(win)
   end, { buffer = buf, desc = 'close PR description' })
 end
 
---- `:Diffy review submit`'s body float, centered since a review body isn't
---- anchored to any line. `<C-s>`/`:w` calls `on_save(body)` (a single
---- string, blank if the buffer was left empty) and closes; `q` cancels
---- (`on_save` never runs).
-function M.open_submit_body(session, on_save, title)
+--- `:Diffy review submit`'s modal, centered since a review body isn't
+--- anchored to any line: write the message, then `<C-s>`/`:w`. With
+--- several `opts.choices` (`{ { key, label, value }, … }`) a key prompt
+--- picks one (cancelling it goes back to the message); `on_save(body,
+--- value)` then runs (body blank if left empty, value the only choice's, or
+--- nil without choices) and the modal closes. `q` cancels.
+function M.open_submit_body(session, on_save, opts)
+  opts = opts or {}
+  local choices = opts.choices or {}
   local buf = scratch_buf(session, 'submit', 'acwrite', 'markdown')
 
   local width = math.max(40, math.min(80, vim.o.columns - 4))
-  local height = 8
-  local win = open_card(buf, true, {
-    relative = 'editor',
-    row = math.floor((vim.o.lines - height) / 2),
-    col = math.floor((vim.o.columns - width) / 2),
-    width = width,
-    height = height,
+  local win = open_card(buf, true, layout.centered(width, 8, {
     style = 'minimal',
     border = 'rounded',
-    title = card_title(title or 'Submit review', width),
-    footer = key_hints({ { '<C-s>', 'submit' }, { 'q', 'cancel' } }, width),
+    title = card_title(opts.title or 'Submit review', width),
+    footer = key_hints({ { '<C-s>', opts.action or 'submit' }, { 'q', 'cancel' } }, width),
     zindex = 200,
-  })
+  }))
   vim.wo[win].foldcolumn = '1'
 
   local closed = false
@@ -1555,9 +1973,13 @@ function M.open_submit_body(session, on_save, title)
     end
     closed = true
     vim.cmd('stopinsert')
-    if vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
+    close_win(win)
+  end
+
+  local function finish(value)
+    local body = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+    close()
+    on_save(body, value)
   end
 
   vim.api.nvim_create_autocmd('BufWriteCmd', {
@@ -1565,8 +1987,22 @@ function M.open_submit_body(session, on_save, title)
     buffer = buf,
     callback = function()
       vim.bo[buf].modified = false
-      on_save(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n'))
-      close()
+      if #choices < 2 then
+        finish(choices[1] and choices[1][3])
+        return
+      end
+      vim.cmd('stopinsert')
+      -- after the write: `:w` isn't done with this window yet
+      vim.schedule(function()
+        prompt.choose(session, opts.choose_title or 'Submit as', choices, function(value)
+          if value ~= nil then
+            finish(value)
+          elseif vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_set_current_win(win)
+          end
+        end)
+        run.ready({ session = session.id, event = 'choose' })
+      end)
     end,
   })
   session_mod.map(session, { 'n', 'i' }, '<C-s>', function()

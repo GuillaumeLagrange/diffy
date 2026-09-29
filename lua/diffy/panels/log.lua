@@ -30,13 +30,9 @@ local function commit_entries(root, args, cb, session)
   run.git(args, {
     cwd = root,
     session = session,
-    on_exit = function(res)
-      if res.code ~= 0 then
-        cb(nil, vim.trim(res.stderr or ''))
-        return
-      end
+    on_exit = run.parsed(function(stdout)
       local out = {}
-      for _, c in ipairs(parse.log(res.stdout or '')) do
+      for _, c in ipairs(parse.log(stdout)) do
         table.insert(out, {
           kind = 'commit',
           sha = c.sha,
@@ -46,8 +42,8 @@ local function commit_entries(root, args, cb, session)
           rev = c.sha,
         })
       end
-      cb(out, nil)
-    end,
+      return out
+    end, cb),
   })
 end
 
@@ -154,8 +150,9 @@ function M.build_entries(root, spec, cb, session)
       merge_base_entries(root, base, prefix, cb, session)
     end, session)
   elseif spec.kind == 'pr' then
-    -- `spec.base` is already the PR's resolved `baseRefName`, and there is
-    -- no Unstaged/Staged prefix (readiness guarantees a clean tree at the PR head).
+    -- `spec.base` is already the PR's resolved base (`repo.base_ref` of its
+    -- `baseRefName`), and there is no Unstaged/Staged prefix (readiness
+    -- guarantees a clean tree at the PR head).
     merge_base_entries(root, spec.base, prefix, cb, session)
   elseif spec.kind == 'file' then
     commit_entries(root, file_log_args(spec.path), function(commits, err)
@@ -322,6 +319,13 @@ function M.select_all(session)
   session.on_select(session)
 end
 
+--- Select entries `top..bottom` (no merge endpoints); `done()` runs once
+--- the new selection is drawn (not if a full checkout refuses to leave).
+function M.select(session, top, bottom, done)
+  session.sel = { top = top, bottom = bottom }
+  session.on_select(session, done)
+end
+
 --- `J`/`K` (also `]r`/`[r` from the diff windows): collapse the current
 --- selection to a single entry and move it to the next/previous non-merge
 --- entry (`delta = 1` moves toward older commits, `-1` toward newer).
@@ -374,12 +378,26 @@ function M.setup(session)
   map(session, 'n', 'X', function()
     require('diffy.checkout').toggle(session)
   end, { buffer = buf, desc = 'full checkout' })
-  map(session, 'n', 'R', function()
-    if session.refresh then
-      session.refresh(session)
-    end
-  end, { buffer = buf, desc = 'rebuild' })
-  require('diffy.session').map_toggle(session, buf)
+  require('diffy.layout').map_panel_keys(session, buf)
 end
+
+-- rows before there are entries (and in `:Diffy conflicts`, which has none)
+local EMPTY_HEIGHT = 10
+
+M.view = {
+  label = ' Commits',
+  persistent = true,
+  render = function(session)
+    if session.entries then
+      M.render(session)
+    end
+  end,
+  height = function(session, room)
+    if not (session.entries and #session.entries > 0) then
+      return EMPTY_HEIGHT
+    end
+    return math.max(1, math.min(#session.entries, math.floor(room * 0.4)))
+  end,
+}
 
 return M

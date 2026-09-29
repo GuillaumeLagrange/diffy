@@ -28,21 +28,6 @@ local function tree()
   return ui.layout(child).tree
 end
 
-local function select_log_row(needle)
-  local w = ui.wins(child)
-  child.api.nvim_set_current_win(w.log)
-  local row
-  for i, l in ipairs(ui.layout(child).log) do
-    if not row and l:find(needle, 1, true) then
-      row = i
-    end
-  end
-  child.api.nvim_win_set_cursor(w.log, { row, 0 })
-  ui.arm_ready(child, 'select')
-  child.type_keys('<CR>')
-  ui.wait_ready(child)
-end
-
 local function find_line(lines, needle)
   for i, l in ipairs(lines) do
     if l:find(needle, 1, true) then
@@ -50,6 +35,19 @@ local function find_line(lines, needle)
     end
   end
   return nil
+end
+
+local function exact_line(lines, text)
+  for i, l in ipairs(lines) do
+    if l == text then
+      return i
+    end
+  end
+  return nil
+end
+
+local function has(lines, text)
+  return exact_line(lines, text) ~= nil
 end
 
 T['Unstaged shows index/worktree, and writing the left buffer stages exactly the edited hunk'] = function()
@@ -107,7 +105,7 @@ T['`s` on an unstaged file stages it, then `u` from Staged unstages it again'] =
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'g.txt')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--name-only' }), '')
 
-  select_log_row('Staged')
+  ui.select_log_row(child, 'Staged')
   child.api.nvim_set_current_win(w.tree)
   child.api.nvim_win_set_cursor(w.tree, { find_line(tree(), 'g.txt'), 0 })
   ui.arm_ready(child, 'render')
@@ -129,7 +127,7 @@ T['`u` on a staged rename pair unstages both paths'] = function()
   child.cmd('Diffy')
   ui.wait_ready(child)
 
-  select_log_row('Staged')
+  ui.select_log_row(child, 'Staged')
   local w = ui.wins(child)
   child.api.nvim_set_current_win(w.tree)
   local lnum = find_line(tree(), 'R h.txt')
@@ -200,24 +198,14 @@ T['staging keys are a no-op, with a warning, when the selection is not exactly U
   child.cmd('Diffy')
   ui.wait_ready(child)
 
-  select_log_row('Shift') -- touches f.txt, same file as the dirty edit
+  ui.select_log_row(child, 'Shift') -- touches f.txt, same file as the dirty edit
   local w = ui.wins(child)
   child.api.nvim_set_current_win(w.tree)
   child.fn.win_execute(w.tree, 'call cursor(1, 1)')
 
-  -- observe only that a warning fires, never its exact wording
-  child.lua([[
-    _G.__warns = 0
-    local orig = vim.notify
-    vim.notify = function(msg, level, ...)
-      if level == vim.log.levels.WARN or level == vim.log.levels.ERROR then
-        _G.__warns = _G.__warns + 1
-      end
-      return orig(msg, level, ...)
-    end
-  ]])
+  ui.capture_warnings(child)
   child.type_keys('s')
-  MiniTest.expect.equality(child.lua_get('_G.__warns') >= 1, true)
+  MiniTest.expect.equality(#ui.warnings(child) >= 1, true)
 
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), '')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--name-only' }), 'f.txt')
@@ -241,24 +229,14 @@ T['nested directories group under collapsible headers, single-child chains flatt
 
   local w = ui.wins(child)
   local lines = tree()
-
-  local function has(text)
-    for _, l in ipairs(lines) do
-      if l == text then
-        return true
-      end
-    end
-    return false
-  end
-
   -- a/b/c collapses into one "b/c/" row under "a/" (chain flattening), not
   -- three separate header rows
-  MiniTest.expect.equality(has('a/'), true)
-  MiniTest.expect.equality(has('  b/c/'), true)
-  MiniTest.expect.equality(has('b/'), false)
-  MiniTest.expect.equality(has('c/'), false)
+  MiniTest.expect.equality(has(lines, 'a/'), true)
+  MiniTest.expect.equality(has(lines, '  b/c/'), true)
+  MiniTest.expect.equality(has(lines, 'b/'), false)
+  MiniTest.expect.equality(has(lines, 'c/'), false)
   -- a/d holds a single file, so `d/` never gets a header row at all
-  MiniTest.expect.equality(has('d/'), false)
+  MiniTest.expect.equality(has(lines, 'd/'), false)
 
   -- rows under a header show the path relative to it
   local f1 = find_line(lines, 'A file1.txt')
@@ -270,12 +248,7 @@ T['nested directories group under collapsible headers, single-child chains flatt
   -- foldmethod=indent starts a fold at the first *indented* line, not the
   -- shallower header above it - za on "  b/c/" folds it and its files,
   -- leaving "a/" visible above the closed fold
-  local child_line
-  for i, l in ipairs(lines) do
-    if l == '  b/c/' then
-      child_line = i
-    end
-  end
+  local child_line = exact_line(lines, '  b/c/')
   MiniTest.expect.equality(child_line ~= nil, true)
   child.api.nvim_set_current_win(w.tree)
   child.fn.win_execute(w.tree, ('call cursor(%d, 1)'):format(child_line))
@@ -300,23 +273,10 @@ T['a new untracked directory shows its files individually as ? rows, grouped und
   ui.wait_ready(child)
 
   local lines = tree()
-
-  local function has_exact(text)
-    for _, l in ipairs(lines) do
-      if l == text then
-        return true
-      end
-    end
-    return false
-  end
-
-  -- plain `git status` (no `--untracked-files=all`) reports a brand-new
-  -- untracked directory as one `?? newdir/` entry, rendered as a single
-  -- flattened `? newdir/` row with no header and no per-file rows; fails
-  -- without `repo.status` passing `--untracked-files=all`, which reports
-  -- (and so renders) both files individually instead
-  MiniTest.expect.equality(has_exact('? newdir/'), false)
-  MiniTest.expect.equality(has_exact('newdir/'), true)
+  -- without `--untracked-files=all`, git status collapses a new untracked
+  -- directory into one `?? newdir/` entry
+  MiniTest.expect.equality(has(lines, '? newdir/'), false)
+  MiniTest.expect.equality(has(lines, 'newdir/'), true)
   local a_lnum = find_line(lines, '? a.txt')
   local b_lnum = find_line(lines, '? b.txt')
   MiniTest.expect.equality(find_line(lines, 'newdir/a.txt'), nil)
@@ -340,7 +300,7 @@ T['staging from Unstaged in :Diffy branch keeps Unstaged selected'] = function()
   ui.arm_ready(child, 'render')
   child.cmd('Diffy branch main')
   ui.wait_ready(child)
-  select_log_row('Unstaged')
+  ui.select_log_row(child, 'Unstaged')
   local w = ui.wins(child)
   child.api.nvim_set_current_win(w.tree)
   child.fn.win_execute(w.tree, ('call cursor(%d, 1)'):format(find_line(tree(), 'a.txt')))

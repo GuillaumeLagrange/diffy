@@ -8,15 +8,12 @@
 --   { kind = 'commit', sha, parents, subject, merge, rev = sha }
 local M = {}
 
---- Contiguous range [top_idx, bottom_idx] (both inclusive, top_idx <=
---- bottom_idx, indices into `entries` where index 1 is the newest/topmost
---- row) -> `{ left, right, top, bottom }`. `left`/`right` are revs
---- ('WORKTREE'/'INDEX'/'HEAD'/a sha) suitable for `repo.diff_args`.
---- Right = top entry's rev; left = parent of the bottom
---- entry (its own rev if Unstaged -> index, if Staged -> HEAD, if a commit
---- -> `sha^`), except that a selection reaching the oldest commit of a
---- branch/PR view uses the merge-base (`entries.base`) once its top
---- contains it. A range spanning a merge is otherwise `A^..B`.
+--- Inclusive range `top_idx..bottom_idx` of `entries` (1 = newest row) ->
+--- `{ left, right, top, bottom, top_idx, bottom_idx }`, with `left`/`right`
+--- revs for `repo.diff_args`. Right is the top entry's rev; left is the
+--- bottom entry's parent (Unstaged -> INDEX, Staged -> HEAD, commit ->
+--- `sha^`), or the merge-base `entries.base` when the range reaches the
+--- oldest commit of a branch/PR view and its top contains the base.
 function M.resolve(entries, top_idx, bottom_idx)
   assert(top_idx <= bottom_idx, 'selection.resolve: top_idx must be <= bottom_idx')
   local top = entries[top_idx]

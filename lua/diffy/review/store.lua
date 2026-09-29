@@ -1,9 +1,9 @@
 -- JSON persistence in `.git/diffy/<branch>/`: one JSON object per file.
 local M = {}
 
---- Per-branch state directory under `gitdir`.
-function M.dir(gitdir, branch)
-  return gitdir .. '/diffy/' .. branch
+--- `<gitdir>/diffy/<branch>/<filename>`.
+function M.path(gitdir, branch, filename)
+  return ('%s/diffy/%s/%s'):format(gitdir, branch, filename)
 end
 
 --- Read `path` as a JSON object. Returns `nil` if the file is missing or

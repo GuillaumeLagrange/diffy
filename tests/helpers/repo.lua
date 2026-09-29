@@ -107,13 +107,11 @@ function Repo:commit(label, files)
   return self
 end
 
---- Create and switch to a new branch at HEAD.
 function Repo:branch(name)
   git(self.dir, { 'checkout', '--quiet', '-b', name })
   return self
 end
 
---- Switch to an existing branch.
 function Repo:checkout(name)
   git(self.dir, { 'checkout', '--quiet', name })
   return self
@@ -159,7 +157,6 @@ function Repo:rm(path)
   return self
 end
 
---- Remove the fixture's temp directory from disk.
 function Repo:destroy()
   vim.fn.delete(self.dir, 'rf')
 end

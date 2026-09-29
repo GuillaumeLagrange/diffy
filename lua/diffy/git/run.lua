@@ -9,22 +9,18 @@ local RECENT_MAX = 50
 --- when the result was discarded as stale.
 M.recent = {}
 
---- Run `git <args>` asynchronously.
+--- `M.run` for `git <args>`.
 --- @param opts { cwd: string, on_exit?: fun(res: vim.SystemCompleted), notify_on_error?: boolean, session?: table, gen?: integer }
 --- @return vim.SystemObj
 function M.git(args, opts)
   return M.run({ 'git', unpack(args) }, opts)
 end
 
---- Run an arbitrary command asynchronously (`gh` calls use this directly).
---- On a nonzero exit, surfaces the failure via `vim.notify` unless
---- `opts.notify_on_error == false`.
----
---- `opts.session`, if given, makes the completion a no-op (no notify, no
---- `on_exit`) once the session is torn down (`session.closed`) or once a
---- newer render has superseded it (`opts.gen ~= session.gen`). Every git/gh
---- call goes through here, so a chained callback stops at the first link
---- and can't touch wiped buffers or clobber a fresher render.
+--- Run `cmd` asynchronously; `opts.on_exit(res)` runs on the main loop.
+--- A nonzero exit is notified unless `opts.notify_on_error == false`.
+--- With `opts.session`, completion is dropped (no notify, no `on_exit`) once
+--- the session is closed or `opts.gen ~= session.gen`, so callback chains
+--- stop before touching wiped buffers or clobbering a fresher render.
 --- @param cmd string[]
 --- @param opts { cwd: string, on_exit?: fun(res: vim.SystemCompleted), notify_on_error?: boolean, session?: table, gen?: integer }
 --- @return vim.SystemObj
@@ -57,6 +53,18 @@ function M.run(cmd, opts)
       end
     end)
   end)
+end
+
+--- `on_exit` adapter for `opts.on_exit`: `on_exit(nil, stderr)` on a nonzero
+--- exit, else `on_exit(parse_fn(stdout))`.
+function M.parsed(parse_fn, on_exit)
+  return function(res)
+    if res.code ~= 0 then
+      on_exit(nil, vim.trim(res.stderr or ''))
+    else
+      on_exit(parse_fn(res.stdout or ''))
+    end
+  end
 end
 
 --- Fire `User DiffyReady` once a view (or refresh) has finished rendering.

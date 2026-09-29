@@ -79,7 +79,6 @@ T['the panel toggle hides the column (diff spans the width, ]f still works) and 
   child.type_keys('\\e')
   MiniTest.expect.equality(ui.layout(child).tree, vim.NIL)
   child.cmd('Diffy close')
-  MiniTest.expect.equality(ui.diffy_buffers(child), {})
 end
 
 T['<leader>E goes to the file tree from the diff, bringing the column back first when hidden'] = function()

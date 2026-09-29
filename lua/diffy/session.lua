@@ -9,6 +9,8 @@
 --   ns       name -> namespace id
 --   wins     name -> window handle for every managed window
 --   bufs     name -> buffer handle for every managed buffer
+--   column   names of the views stacked in the left column (layout.lua)
+--   floats   view name -> {win, preview, preview_buf} of each open float
 --   keymaps  {buf, mode, lhs} list of buffer-local keymaps set via `M.map`
 --   gen      bumped by `panels/tree.lua`'s `M.render` on every call; an
 --            async continuation started for an earlier value is stale and
@@ -118,10 +120,22 @@ local function watch_wipe(session, buf)
 end
 
 --- Register a managed window under `name` (`session.wins[name]`). Closing
---- any managed window (`:q`, `:close`, …) tears down the whole session.
-function M.register_window(session, name, win)
+--- any managed window (`:q`, `:close`, …) tears down the whole session,
+--- except `opts.transient` ones (floats), which teardown only closes.
+function M.register_window(session, name, win, opts)
   session.wins[name] = win
-  watch_close(session, win)
+  if not (opts and opts.transient) then
+    watch_close(session, win)
+  end
+end
+
+--- Stop `session.wins[name]` from tearing the session down when it closes,
+--- keeping it registered (layout.lua hides the column that way).
+function M.unwatch_window(session, name)
+  local win = session.wins[name]
+  if win then
+    unwatch_close(session, win)
+  end
 end
 
 --- Reverse of `register_window`: stop watching `session.wins[name]` for
@@ -136,11 +150,10 @@ function M.unregister_window(session, name)
   session.wins[name] = nil
 end
 
---- Register a managed buffer under `name` (`session.bufs[name]`).
---- `bufhidden=wipe` always. Pass
---- `opts.panel = true` for buffers whose own `:bwipe` should tear down the
---- whole session (tree/log); diff-content buffers get swapped constantly by
---- refreshes and must NOT trigger teardown when wiped.
+--- Register a managed buffer under `name` (`session.bufs[name]`), always
+--- `bufhidden=wipe`. `opts.panel = true` makes its `:bwipe` tear the session
+--- down (tree/log); diff-content buffers are swapped by every refresh and
+--- must not.
 function M.register_buffer(session, name, buf, opts)
   opts = opts or {}
   session.bufs[name] = buf
@@ -163,163 +176,18 @@ function M.scratch_buf(session, name)
   return buf
 end
 
-local function panel_width()
-  return require('diffy').config.panel_width
+--- Unbind `win` from the diff: a window opened while a diff window is
+--- current copies its `scrollbind`/`cursorbind`, and a bound window drags
+--- the diff's cursor along with its own.
+function M.unbind(win)
+  vim.wo[win].scrollbind = false
+  vim.wo[win].cursorbind = false
 end
 
-local PANEL_LABELS = { tree = ' Files', log = ' Commits' }
+M.PLACEHOLDER = { 'diffy: nothing loaded yet' }
 
---- Window-local look of a panel window: nothing but the rows.
-local function setup_panel_window(win, name)
-  local wo = vim.wo[win]
-  wo.number = false
-  wo.relativenumber = false
-  wo.signcolumn = 'no'
-  wo.foldcolumn = '0'
-  wo.statuscolumn = ''
-  wo.wrap = false
-  wo.list = false
-  wo.colorcolumn = ''
-  wo.spell = false
-  wo.cursorline = true
-  wo.winfixwidth = true
-  wo.statusline = PANEL_LABELS[name]
-end
-
-local function valid_win(win)
-  return win ~= nil and vim.api.nvim_win_is_valid(win)
-end
-
-local PLACEHOLDER = { 'diffy: nothing loaded yet' }
-
---- Split the tree/log column off the left edge of the tab; returns both windows.
-local function open_panel_column(tree_buf, log_buf)
-  local tree_win = vim.api.nvim_open_win(tree_buf, false, { win = -1, split = 'left', width = panel_width() })
-  local log_win = vim.api.nvim_open_win(log_buf, false, { win = tree_win, split = 'below', height = 10 })
-  return tree_win, log_win
-end
-
---- Reset window sizes: fixed-width panel column (log = min(#entries,
---- 40% of the column), tree the rest), diff area split evenly over what's
---- left (the full width while the panel column is hidden). Called on open,
---- on `R`, on `VimResized` and on panel toggle.
-function M.relayout(session)
-  local w = session.wins
-  local shown = valid_win(w.tree)
-  if not shown and not session.panel_hidden then
-    return
-  end
-  local width = panel_width()
-  if shown then
-    vim.api.nvim_win_set_width(w.tree, width)
-  end
-  local left, right = w.left, w.right
-  if valid_win(left) and valid_win(right) then
-    -- only the side-by-side pair; the conflict layout sizes its own windows
-    if vim.fn.win_screenpos(left)[1] == vim.fn.win_screenpos(right)[1] then
-      local diff_width = vim.o.columns - (shown and (width + 1) or 0)
-      vim.api.nvim_win_set_width(left, math.floor((diff_width - 1) / 2))
-    end
-  end
-  if not shown then
-    return
-  end
-  session.column_height = vim.api.nvim_win_get_height(w.tree)
-  if valid_win(w.log) then
-    session.column_height = session.column_height + vim.api.nvim_win_get_height(w.log)
-    if session.entries and #session.entries > 0 then
-      local h = math.max(1, math.min(#session.entries, math.floor(session.column_height * 0.4)))
-      vim.api.nvim_win_set_height(w.log, h)
-    end
-  end
-end
-
---- Hide the panel column without ending the session: the
---- windows' teardown watchers are dropped first and the panel buffers kept
---- (`bufhidden=hide`) so they come back unchanged.
-local function hide_panels(session)
-  if session.panel_hidden then
-    return
-  end
-  session._panel_cursor = {}
-  local to_close = {}
-  for _, name in ipairs({ 'tree', 'log' }) do
-    local win = session.wins[name]
-    if valid_win(win) then
-      session._panel_cursor[name] = vim.api.nvim_win_get_cursor(win)
-      unwatch_close(session, win)
-      vim.bo[session.bufs[name]].bufhidden = 'hide'
-      table.insert(to_close, win)
-    end
-  end
-  session.panel_hidden = true
-  for _, win in ipairs(to_close) do
-    pcall(vim.api.nvim_win_close, win, true)
-  end
-  M.relayout(session)
-end
-
---- Re-open the panel column with the same tree/log buffers and cursors.
-local function show_panels(session)
-  if not session.panel_hidden then
-    return
-  end
-  session._nav_guard = (session._nav_guard or 0) + 1
-  local tree_win, log_win = open_panel_column(session.bufs.tree, session.bufs.log)
-  session._nav_guard = session._nav_guard - 1
-  for name, win in pairs({ tree = tree_win, log = log_win }) do
-    vim.bo[session.bufs[name]].bufhidden = 'wipe'
-    M.register_window(session, name, win)
-    setup_panel_window(win, name)
-    local cur = session._panel_cursor and session._panel_cursor[name]
-    if cur then
-      pcall(vim.api.nvim_win_set_cursor, win, cur)
-    end
-  end
-  session.panel_hidden = false
-  M.relayout(session)
-  if session.tree_rows then
-    require('diffy.panels.tree').redraw(session)
-  end
-  if session.entries then
-    require('diffy.panels.log').render(session)
-  end
-end
-
-function M.toggle_panels(session)
-  if session.panel_hidden then
-    show_panels(session)
-  else
-    hide_panels(session)
-  end
-end
-
---- Show the panel column if hidden, then put the cursor in the file tree.
-local function focus_panels(session)
-  show_panels(session)
-  if valid_win(session.wins.tree) then
-    vim.api.nvim_set_current_win(session.wins.tree)
-  end
-end
-
---- Buffer-local panel keys (configurable) on `buf`: toggle the column, and
---- focus the file tree (showing the column first when hidden).
-function M.map_toggle(session, buf)
-  local keys = require('diffy').config.keymaps
-  if keys.toggle_panel and keys.toggle_panel ~= '' then
-    M.map(session, 'n', keys.toggle_panel, function()
-      M.toggle_panels(session)
-    end, { buffer = buf, nowait = true, desc = 'toggle panels' })
-  end
-  if keys.focus_panel and keys.focus_panel ~= '' then
-    M.map(session, 'n', keys.focus_panel, function()
-      focus_panels(session)
-    end, { buffer = buf, nowait = true, desc = 'focus the file tree' })
-  end
-end
-
---- Open a new session: its own tabpage with tree and log panels stacked in
---- a fixed-width left column and left/right diff windows filling the rest,
+--- Open a new session: its own tabpage with the column of views
+--- (layout.lua) on the left and left/right diff windows filling the rest,
 --- all holding placeholder buffers until content is rendered.
 --- @param opts { root?: string, range?: table }  `root` is the repo root
 ---   (absolute path); `range` is the log range spec (see panels/log.lua's
@@ -341,11 +209,13 @@ function M.open(opts)
     keymaps = {},
     gen = 0,
     closed = false,
+    column = require('diffy.layout').column_views(),
+    floats = {},
   }
 
   -- open the tab on a diffy buffer so tabnew's listed [No Name] never exists
   local left_buf = M.scratch_buf(session, 'left')
-  vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, PLACEHOLDER)
+  vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, M.PLACEHOLDER)
   vim.cmd(('tab sbuffer %d'):format(left_buf))
   session.tab = vim.api.nvim_get_current_tabpage()
 
@@ -354,30 +224,48 @@ function M.open(opts)
   M.register_window(session, 'left', left_win)
 
   local right_buf = M.scratch_buf(session, 'right')
-  vim.api.nvim_buf_set_lines(right_buf, 0, -1, false, PLACEHOLDER)
+  vim.api.nvim_buf_set_lines(right_buf, 0, -1, false, M.PLACEHOLDER)
   local right_win = vim.api.nvim_open_win(right_buf, false, { win = left_win, split = 'right' })
   M.register_buffer(session, 'right', right_buf)
   M.register_window(session, 'right', right_win)
 
-  local tree_buf = M.scratch_buf(session, 'tree')
-  local log_buf = M.scratch_buf(session, 'log')
-  local tree_win, log_win = open_panel_column(tree_buf, log_buf)
-  M.register_buffer(session, 'tree', tree_buf, { panel = true })
-  M.register_window(session, 'tree', tree_win)
-  M.register_buffer(session, 'log', log_buf, { panel = true })
-  M.register_window(session, 'log', log_win)
-
-  setup_panel_window(tree_win, 'tree')
-  setup_panel_window(log_win, 'log')
-  -- panel indentation is layout, not code scope (mini.indentscope)
-  vim.b[tree_buf].miniindentscope_disable = true
-  vim.b[log_buf].miniindentscope_disable = true
+  local layout = require('diffy.layout')
+  -- the file tree and the commit log always exist, shown or not: the
+  -- diff's navigation and the conflict list are drawn in them
+  layout.buffer(session, 'tree')
+  layout.buffer(session, 'log')
   require('diffy.highlight').setup()
-  M.relayout(session)
+  layout.open_column(session)
   vim.api.nvim_create_autocmd('VimResized', {
     group = session.augroup,
     callback = function()
-      M.relayout(session)
+      layout.relayout(session)
+    end,
+  })
+  -- A window opened from a diff window (a picker, a plugin float) copies its
+  -- scrollbind/cursorbind/diff: bound to the diff, its cursor gets dragged
+  -- to the diff's column as you type in it. Only diffy's own windows stay bound.
+  vim.api.nvim_create_autocmd('WinNew', {
+    group = session.augroup,
+    callback = function()
+      vim.schedule(function()
+        if session.closed or not (session.tab and vim.api.nvim_tabpage_is_valid(session.tab)) then
+          return
+        end
+        local own = {}
+        for _, w in pairs(session.wins) do
+          own[w] = true
+        end
+        for _, w in ipairs(vim.api.nvim_tabpage_list_wins(session.tab)) do
+          if not own[w] then
+            for _, opt in ipairs({ 'scrollbind', 'cursorbind', 'diff' }) do
+              if vim.wo[w][opt] then
+                vim.api.nvim_set_option_value(opt, false, { win = w, scope = 'local' })
+              end
+            end
+          end
+        end
+      end)
     end,
   })
 
@@ -445,9 +333,8 @@ function M.teardown(session)
   end
 end
 
--- Plugin-wide infrastructure, independent of any one session's lifetime.
--- Named without the `diffy_session_` prefix so the leak check (which looks
--- for that prefix) never flags it.
+-- Plugin-wide, independent of any session. No `diffy_session_` prefix so the
+-- leak check never flags it.
 local reaper_group = vim.api.nvim_create_augroup('diffy_reaper', { clear = true })
 
 vim.api.nvim_create_autocmd('TabClosed', {

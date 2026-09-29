@@ -8,11 +8,9 @@ local parse = require('diffy.git.parse')
 
 local M = {}
 
--- session.id -> { root, gitdir, branch }, mirroring the live `session.checkout`
--- fields for every session with an active full checkout. Kept independent of
--- `session.sessions` (which `session.teardown` may already have emptied by
--- the time `VimLeavePre` runs) so the exit handler below never depends on
--- autocmd registration order between this module and session.lua's reaper.
+-- session.id -> { root, gitdir, branch } for every active full checkout.
+-- Independent of `session.sessions` (teardown may have emptied it before
+-- `VimLeavePre` runs) so the exit handler doesn't depend on autocmd order.
 local active = {}
 
 local function state_path(gitdir)
@@ -188,13 +186,11 @@ function M.before_select(session, cb)
   end)
 end
 
---- Best-effort restore when a session tears down with a checkout still
---- active via `:tabclose`/`:q`/a wiped panel buffer (not while nvim is
---- exiting; see the `VimLeavePre` handler below). The window/tab is already
---- gone, so there is nothing left to refuse into: a dirty tree just leaves
---- the state file for `:Diffy restore`, with a warning explaining why.
--- `session` is not passed to `repo.is_clean`/`run.git`: it is already
--- closed, which would turn their callbacks into no-ops.
+--- Best-effort restore when a session tears down with a checkout active
+--- (not while exiting; see `VimLeavePre` below). Nothing is left to refuse
+--- into: a dirty tree keeps the state file for `:Diffy restore`, with a
+--- warning. `session` is not passed to git: it is already closed, which
+--- would turn the callbacks into no-ops.
 function M.leave_on_teardown(session)
   if not session.checkout then
     return
@@ -249,7 +245,7 @@ vim.api.nvim_create_autocmd('VimLeavePre', {
 function M.restore(_args)
   repo.root(vim.fn.getcwd(), function(root, err)
     if not root then
-      vim.notify('diffy: not a git repository (' .. tostring(err) .. ')', vim.log.levels.ERROR)
+      repo.notify_not_repo(err)
       run.ready({ event = 'restore' })
       return
     end

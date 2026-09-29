@@ -1,6 +1,6 @@
 -- Local review backend: comments meant to be fed to an LLM. Available in
 -- `:Diffy` and `:Diffy branch`. State lives in
--- `.git/diffy/<branch>/local.json`; `:Diffy review export` renders
+-- `.git/diffy/<branch>/local.json`; `:Diffy review submit` renders
 -- `.git/diffy/<branch>/review.md`.
 local store = require('diffy.review.store')
 local model = require('diffy.review.model')
@@ -42,14 +42,57 @@ function M.author(root)
 end
 
 local function local_json_path(session, branch)
-  return store.dir(session.gitdir, branch) .. '/local.json'
+  return store.path(session.gitdir, branch, 'local.json')
 end
 
 local function review_md_path(session, branch)
-  return store.dir(session.gitdir, branch) .. '/review.md'
+  return store.path(session.gitdir, branch, 'review.md')
 end
 
---- Persisted threads for `branch`, or `{}` if there is no state yet.
+-- The line under each comment's heading in `review.md`; the agent ticks it
+-- (`- [x] resolved`) once the comment is handled.
+local RESOLVED_BOX = '- [ ] resolved'
+
+--- Resolve the threads whose comments the agent ticked in `review.md`, and
+--- save them. Each tick counts once (`agent_resolved`), so a thread you
+--- reopen stays open; only `sent` comments count, since a new comment can
+--- reuse a deleted one's id. Returns whether anything changed.
+function M.sync(session, branch, threads)
+  local path = review_md_path(session, branch)
+  if vim.fn.filereadable(path) == 0 then
+    return false
+  end
+  local ticked, current = {}, nil
+  for _, l in ipairs(vim.fn.readfile(path)) do
+    local id = l:match('^## (c%d+) ')
+    if id or l:match('^## ') then
+      current = id
+    elseif current then
+      local mark = l:match('^%s*[-*] %[([ xX])%]%s+[Rr]esolved')
+      if mark then
+        ticked[current] = mark ~= ' '
+        current = nil
+      end
+    end
+  end
+  local changed = false
+  for _, t in ipairs(threads) do
+    for _, c in ipairs(t.comments) do
+      if ticked[c.id] and c.state == 'sent' and not c.agent_resolved then
+        c.agent_resolved = true
+        t.resolved = true
+        changed = true
+      end
+    end
+  end
+  if changed then
+    M.save(session, branch, threads)
+  end
+  return changed
+end
+
+--- Persisted threads for `branch`, or `{}` if there is no state yet, with
+--- what the agent resolved since (`M.sync`).
 function M.load(session, branch)
   local data = store.load(local_json_path(session, branch))
   if not data or not data.threads then
@@ -60,6 +103,7 @@ function M.load(session, branch)
     t.comments = t.comments or {}
     table.insert(out, t)
   end
+  M.sync(session, branch, out)
   return out
 end
 
@@ -94,15 +138,16 @@ function M.place(session, thread)
   return placement(side, thread.anchor)
 end
 
---- Where `thread` shows in the current pair, whichever file is open, or nil.
---- Its last known lines: relocating needs the file's buffer.
-function M.view_place(session, thread)
-  local side = model.pair_side(session.pair, session.head_sha, thread.anchor)
+--- Where `thread` shows in `pair` (default: the current one), whichever
+--- file is open, or nil. Its last known lines: relocating needs the file's
+--- buffer.
+function M.view_place(session, thread, pair)
+  local side = model.pair_side(pair or session.pair, session.head_sha, thread.anchor)
   return side and placement(side, thread.anchor) or nil
 end
 
 -- ---------------------------------------------------------------------
--- export
+-- submit: review.md
 
 local function quiet_git(session, args, on_exit)
   run.git(args, { cwd = session.root, session = session, notify_on_error = false, on_exit = on_exit })
@@ -264,6 +309,7 @@ local function render_comment(out, item, lines, hunks)
     out,
     ('## %s \226\128\148 %s:%s (%s) \194\183 commit %s'):format(comment.id, a.path, range, side_label, short_commit(a.commit))
   )
+  table.insert(out, RESOLVED_BOX)
   table.insert(out, '```' .. (vim.filetype.match({ filename = a.path }) or ''))
   vim.list_extend(out, numbered_excerpt(lines, a.start_line, a.end_line))
   table.insert(out, '```')
@@ -307,6 +353,8 @@ local function export_header(session, branch, base_sha, base_ref)
     '# Review of ' .. branch,
     ('%s \194\183 head: %s \194\183 range: %s'):format(base_line, head_sha:sub(1, 7), range_desc),
     '',
+    ('Tick `%s` under a comment once it is handled.'):format((RESOLVED_BOX:gsub('%[ %]', '[x]'))),
+    '',
   }
 end
 
@@ -329,13 +377,18 @@ local function upstream_base(session, cb)
   end)
 end
 
---- `:Diffy review export`: render `review.md` for every non-`sent` comment,
---- mark them `sent`, save, and copy the prompt to `+`. `cb(ok, path_or_err)`.
-function M.export(session, cb)
+--- `:Diffy review submit`: render `review.md` with `body` (the overall
+--- message, may be blank) and every non-`sent` comment, mark them `sent`,
+--- save, and copy the prompt to `+`. `cb(ok, warnings)`.
+function M.submit(session, _event, body, cb)
   local review = session.review
+  -- the ticks in the review.md about to be replaced
+  M.sync(session, review.branch, review.threads)
   local pending = unsent_comments(review.threads)
-  if #pending == 0 then
-    cb(false, 'nothing to export')
+  local message = vim.trim(body or '')
+  if #pending == 0 and message == '' then
+    vim.notify('diffy: nothing to send - no new comments and no message', vim.log.levels.WARN)
+    cb(false, {})
     return
   end
 
@@ -348,6 +401,12 @@ function M.export(session, cb)
     end)
 
     local out = {}
+    if message ~= '' then
+      table.insert(out, '## Overall')
+      table.insert(out, '')
+      vim.list_extend(out, vim.split(message, '\n', { plain = true }))
+      table.insert(out, '')
+    end
     for _, item in ipairs(pending) do
       render_comment(out, item, side_lines[side_key(item.thread.anchor)] or {}, diff_hunks[diff_key(item.thread)] or {})
     end
@@ -366,7 +425,8 @@ function M.export(session, cb)
       M.save(session, branch, review.threads)
 
       vim.fn.setreg('+', require('diffy').config.review_prompt:format(path))
-      cb(true, path)
+      vim.notify(('diffy: review written to %s, prompt copied to +'):format(path))
+      cb(true, {})
     end)
   end)
 end

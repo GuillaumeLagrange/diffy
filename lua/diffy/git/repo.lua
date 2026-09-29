@@ -10,25 +10,18 @@ local parse = require('diffy.git.parse')
 
 local M = {}
 
---- Adapts `on_exit(value, err)` to a run callback yielding trimmed stdout.
-local function trimmed_stdout(on_exit)
-  return function(res)
-    if res.code ~= 0 then
-      on_exit(nil, vim.trim(res.stderr or ''))
-    else
-      on_exit(vim.trim(res.stdout or ''), nil)
-    end
-  end
-end
-
 --- `git rev-parse --show-toplevel` for `cwd`. `on_exit(root, err)`.
 function M.root(cwd, on_exit, session)
   run.git({ 'rev-parse', '--show-toplevel' }, {
     cwd = cwd,
     session = session,
     notify_on_error = false,
-    on_exit = trimmed_stdout(on_exit),
+    on_exit = run.parsed(vim.trim, on_exit),
   })
+end
+
+function M.notify_not_repo(err)
+  vim.notify('diffy: not a git repository (' .. tostring(err) .. ')', vim.log.levels.ERROR)
 end
 
 --- Current `HEAD` sha, or `nil` on an unborn branch. `on_exit(sha, err)`.
@@ -37,7 +30,7 @@ function M.head_sha(root, on_exit, session)
     cwd = root,
     session = session,
     notify_on_error = false,
-    on_exit = trimmed_stdout(on_exit),
+    on_exit = run.parsed(vim.trim, on_exit),
   })
 end
 
@@ -47,17 +40,50 @@ function M.merge_base(root, a, b, on_exit, session)
     cwd = root,
     session = session,
     notify_on_error = false,
-    on_exit = trimmed_stdout(on_exit),
+    on_exit = run.parsed(vim.trim, on_exit),
   })
 end
 
---- `:Diffy branch` base resolution: explicit arg, else the PR base of the
---- current branch (`gh pr view`), else `origin`'s default branch
---- (`gh repo view`). `on_exit(ref, err)`.
+--- The ref to diff against for a base branch GitHub names: the local
+--- branch's upstream (usually `origin/<name>`; the local branch is often
+--- behind, which would diff against an old merge-base), else the local
+--- branch, else the one remote-tracking branch of that name, else `name`
+--- as given. `on_exit(ref)`.
+function M.base_ref(root, name, on_exit, session)
+  local function git(args, cb)
+    run.git(args, { cwd = root, session = session, notify_on_error = false, on_exit = cb })
+  end
+  git({ 'rev-parse', '--abbrev-ref', '--symbolic-full-name', name .. '@{upstream}' }, function(res)
+    local upstream = vim.trim(res.stdout or '')
+    if res.code == 0 and upstream ~= '' then
+      on_exit(upstream)
+      return
+    end
+    git({ 'show-ref', '--verify', '--quiet', 'refs/heads/' .. name }, function(local_res)
+      if local_res.code == 0 then
+        on_exit(name)
+        return
+      end
+      git({ 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/*/' .. name }, function(remote_res)
+        local refs = vim.split(vim.trim(remote_res.stdout or ''), '\n', { trimempty = true })
+        on_exit(#refs == 1 and refs[1] or name)
+      end)
+    end)
+  end)
+end
+
+--- `:Diffy branch` base resolution: explicit arg as given, else the PR base
+--- of the current branch (`gh pr view`), else `origin`'s default branch
+--- (`gh repo view`), both through `M.base_ref`. `on_exit(ref, err)`.
 function M.resolve_base(root, explicit, on_exit, session)
   if explicit and explicit ~= '' then
     on_exit(explicit, nil)
     return
+  end
+  local function found(name)
+    M.base_ref(root, name, function(ref)
+      on_exit(ref, nil)
+    end, session)
   end
   run.run({ 'gh', 'pr', 'view', '--json', 'baseRefName', '-q', '.baseRefName' }, {
     cwd = root,
@@ -66,7 +92,7 @@ function M.resolve_base(root, explicit, on_exit, session)
     on_exit = function(res)
       local base = vim.trim(res.stdout or '')
       if res.code == 0 and base ~= '' then
-        on_exit(base, nil)
+        found(base)
         return
       end
       run.run({ 'gh', 'repo', 'view', '--json', 'defaultBranchRef', '-q', '.defaultBranchRef.name' }, {
@@ -76,7 +102,7 @@ function M.resolve_base(root, explicit, on_exit, session)
         on_exit = function(res2)
           local default_branch = vim.trim(res2.stdout or '')
           if res2.code == 0 and default_branch ~= '' then
-            on_exit(default_branch, nil)
+            found(default_branch)
           else
             on_exit(nil, 'diffy: could not resolve branch base (' .. vim.trim(res2.stderr or '') .. ')')
           end
@@ -97,13 +123,7 @@ function M.status(root, on_exit, session)
     cwd = root,
     session = session,
     notify_on_error = false,
-    on_exit = function(res)
-      if res.code ~= 0 then
-        on_exit(nil, vim.trim(res.stderr or ''))
-      else
-        on_exit(parse.status_v2(res.stdout or ''), nil)
-      end
-    end,
+    on_exit = run.parsed(parse.status_v2, on_exit),
   })
 end
 
@@ -119,20 +139,14 @@ function M.is_clean(root, path, on_exit, session)
     cwd = root,
     session = session,
     notify_on_error = false,
-    on_exit = function(res)
-      if res.code ~= 0 then
-        on_exit(nil, vim.trim(res.stderr or ''))
-        return
-      end
-      local dirty = false
-      for _, e in ipairs(parse.status_v2(res.stdout or '')) do
+    on_exit = run.parsed(function(stdout)
+      for _, e in ipairs(parse.status_v2(stdout)) do
         if e.kind ~= 'untracked' and e.kind ~= 'ignored' then
-          dirty = true
-          break
+          return false
         end
       end
-      on_exit(not dirty, nil)
-    end,
+      return true
+    end, on_exit),
   })
 end
 

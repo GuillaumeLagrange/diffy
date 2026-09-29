@@ -77,12 +77,7 @@ local function set_nav_keymaps(session, buf)
   map(session, 'n', '[f', function()
     require('diffy.panels.tree').move_file(session, -1)
   end, { buffer = buf, desc = 'previous file' })
-  map(session, 'n', 'R', function()
-    if session.refresh then
-      session.refresh(session)
-    end
-  end, { buffer = buf, desc = 'rebuild' })
-  session_mod.map_toggle(session, buf)
+  require('diffy.layout').map_panel_keys(session, buf)
   require('diffy.review.ui').setup_diff_keymaps(session, buf)
 end
 
@@ -153,7 +148,7 @@ function M.restore(session)
   session_mod.register_buffer(session, name, buf)
   local win = nav_guarded(session, vim.api.nvim_open_win, buf, false, { win = other, split = name })
   session_mod.register_window(session, name, win)
-  session_mod.relayout(session)
+  require('diffy.layout').relayout(session)
 end
 
 --- The whole file on one side, coloured like its lines would be in a diff.
@@ -208,9 +203,7 @@ function M.show(session, left_spec, right_spec)
       hide_side(session, other)
     end
     open_side(session, one, one == 'left' and left_spec or right_spec)
-    local win = session.wins[one]
-    vim.wo[win].scrollbind = false
-    vim.wo[win].cursorbind = false
+    session_mod.unbind(session.wins[one])
     paint_one_sided(session, one, one == 'left' and 'DiffyFileDeleted' or 'DiffyFileAdded')
   else
     M.restore(session)
@@ -234,18 +227,19 @@ function M.clear(session)
   M.show(session, nil, nil)
 end
 
+local OUTSIDE = '(outside diff)'
+
 --- Leave diff mode because the right window navigated outside the current
---- file list: the right window keeps whatever real buffer it now
---- shows (its diffy keymaps removed, since it's no longer diffy-managed);
---- the left window becomes an "outside diff" placeholder. Selecting a
+--- file list: the right window keeps whatever real buffer it now shows (its
+--- diffy keymaps removed), the left one becomes a placeholder. Selecting a
 --- listed file again (`M.show`) restores the pair.
 function M.leave(session)
   local left, right = session.wins.left, session.wins.right
   for _, name in ipairs(SIDES) do
     local win = session.wins[name]
     if valid_win(win) then
-      vim.wo[win].scrollbind = false
-      vim.wo[win].cursorbind = false
+      session_mod.unbind(win)
+      require('diffy.review.ui').fit_gutter(win, nil)
       vim.api.nvim_win_call(win, function()
         pcall(vim.cmd, 'diffoff')
       end)
@@ -256,17 +250,17 @@ function M.leave(session)
     drop_real(session, 'right')
     vim.w[right].diffy_rev = nil
     vim.w[right].diffy_path = nil
-    vim.wo[right].winbar = '(outside diff)'
+    vim.wo[right].winbar = OUTSIDE
   end
 
   if valid_win(left) then
     local buf = session_mod.scratch_buf(session, 'left')
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '(outside diff)' })
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { OUTSIDE })
     session_mod.register_buffer(session, 'left', buf)
     vim.api.nvim_win_set_buf(left, buf)
     vim.w[left].diffy_rev = nil
     vim.w[left].diffy_path = nil
-    vim.wo[left].winbar = '(outside diff)'
+    vim.wo[left].winbar = OUTSIDE
   end
 
   session.current_path = nil

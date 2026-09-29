@@ -1,5 +1,6 @@
 -- `branch` base resolution order: explicit arg, then
--- the PR base (`gh pr view`), then origin's default branch (`gh repo view`).
+-- the PR base (`gh pr view`), then origin's default branch (`gh repo view`),
+-- the last two through the local branch's upstream.
 -- `gh` is faked via a PATH shim (no network); this is pure repo.lua logic,
 -- no UI involved.
 local repo = require('diffy.git.repo')
@@ -88,6 +89,49 @@ T['neither PR nor origin default available surfaces an error'] = function()
   end)
   MiniTest.expect.equality(result.ref, nil)
   MiniTest.expect.equality(type(result.err), 'string')
+end
+
+--- A repo whose `main` has one commit, plus a remote named `upstream`
+--- (never contacted) holding `refs`, each a remote-tracking branch at HEAD.
+--- Returns the repo dir and a `git(...)` runner in it.
+local function repo_with_remote(refs)
+  local dir = tempdir()
+  local function git(...)
+    local out = vim.fn.system(vim.list_extend({ 'git', '-C', dir }, { ... }))
+    assert(vim.v.shell_error == 0, out)
+  end
+  git('init', '-q', '-b', 'main')
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'base')
+  git('remote', 'add', 'upstream', dir .. '/nowhere')
+  for _, ref in ipairs(refs) do
+    git('update-ref', 'refs/remotes/upstream/' .. ref, 'HEAD')
+  end
+  return dir, git
+end
+
+--- `resolve` with `gh pr view` answering `base`.
+local function resolve_pr_base(root, base)
+  local result
+  with_path(fake_gh({ ('if [ "$1" = "pr" ]; then echo %q; exit 0; fi'):format(base), 'exit 1' }), function()
+    result = resolve(root, nil)
+  end)
+  return result.ref
+end
+
+T["a base branch with an upstream resolves to the upstream, whatever the remote's name"] = function()
+  local root, git = repo_with_remote({ 'main' })
+  git('branch', '-q', '--set-upstream-to=upstream/main', 'main')
+  MiniTest.expect.equality(resolve_pr_base(root, 'main'), 'upstream/main')
+end
+
+T['a local base branch without an upstream is used as it is'] = function()
+  local root = repo_with_remote({ 'main' })
+  MiniTest.expect.equality(resolve_pr_base(root, 'main'), 'main')
+end
+
+T['a base branch that only exists on a remote resolves to its remote-tracking branch'] = function()
+  local root = repo_with_remote({ 'release/v2' })
+  MiniTest.expect.equality(resolve_pr_base(root, 'release/v2'), 'upstream/release/v2')
 end
 
 return T

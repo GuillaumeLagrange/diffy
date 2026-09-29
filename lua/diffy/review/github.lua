@@ -50,7 +50,7 @@ end
 -- `pending` (pushed, then re-anchored by `:Diffy review pull`) comments are
 -- persisted; published content is always re-fetched from GitHub.
 local function pr_json_path(session)
-  return store.dir(session.gitdir, local_backend.branch(session)) .. ('/pr-%d.json'):format(session.range.pr_number)
+  return store.path(session.gitdir, local_backend.branch(session), ('pr-%d.json'):format(session.range.pr_number))
 end
 
 function M.load(session, _branch)
@@ -149,10 +149,12 @@ function M.transport(query, variables, cb)
   end)
 end
 
---- `owner`/`name` parsed from the `origin` remote URL. `cb(owner, name, err)`.
-local function owner_repo(root, cb)
+--- `owner`/`name` parsed from the `origin` remote URL. `cb(owner, name, err)`,
+--- dropped once `session` (optional) closes.
+local function owner_repo(root, cb, session)
   run.git({ 'remote', 'get-url', 'origin' }, {
     cwd = root,
+    session = session,
     notify_on_error = false,
     on_exit = function(res)
       if res.code ~= 0 then
@@ -441,6 +443,16 @@ local function source_anchor(first, exists)
   return nil
 end
 
+local function to_comment(c, state)
+  return {
+    id = c.id,
+    author = c.author and c.author.login or 'unknown',
+    body = c.body,
+    created_at = c.createdAt,
+    state = state,
+  }
+end
+
 --- Build one `Thread` from a raw `reviewThreads` node. Comments belonging to
 --- `pending_review_id` get `state = 'pending'`: GitHub already lists the
 --- viewer's unsubmitted comments in `reviewThreads`, next to submitted ones.
@@ -448,13 +460,7 @@ local function build_thread(node, exists, pending_review_id)
   local comments = {}
   for _, c in ipairs(node.comments.nodes) do
     local pending = pending_review_id and c.pullRequestReview and c.pullRequestReview.id == pending_review_id
-    table.insert(comments, {
-      id = c.id,
-      author = c.author and c.author.login or 'unknown',
-      body = c.body,
-      created_at = c.createdAt,
-      state = pending and 'pending' or 'published',
-    })
+    table.insert(comments, to_comment(c, pending and 'pending' or 'published'))
   end
   local first = node.comments.nodes[1]
   local source_commit, start_line, end_line = source_anchor(first, exists)
@@ -530,7 +536,7 @@ local function diff_pairs_needed(threads, entries, merge_base)
   return set
 end
 
-local function build_diff_cache(root, pairs_set, cb)
+local function build_diff_cache(session, pairs_set, cb)
   local keys = {}
   for k in pairs(pairs_set) do
     table.insert(keys, k)
@@ -544,7 +550,8 @@ local function build_diff_cache(root, pairs_set, cb)
   for _, key in ipairs(keys) do
     local x, y = key:match('^(.-)' .. PAIR_SEP .. '(.*)$')
     run.git({ 'diff', '-M', '-U0', x, y }, {
-      cwd = root,
+      cwd = session.root,
+      session = session,
       notify_on_error = false,
       on_exit = function(res)
         cache[key] = res.code == 0 and model.parse_diff_files(res.stdout or '') or {}
@@ -591,9 +598,11 @@ function M.place(session, thread)
   return place_at(session.review, thread, session.pair.left, session.pair.right, session.current_path)
 end
 
---- Where `thread` shows in the current pair, whichever file is open, or nil.
-function M.view_place(session, thread)
-  return place_at(session.review, thread, session.pair.left, session.pair.right, thread.anchor.path)
+--- Where `thread` shows in `pair` (default: the current one), whichever
+--- file is open, or nil.
+function M.view_place(session, thread, pair)
+  pair = pair or session.pair
+  return place_at(session.review, thread, pair.left, pair.right, thread.anchor.path)
 end
 
 --- Every commit (by subject, newest first) `thread` is visible in, plus
@@ -615,15 +624,11 @@ function M.visible_in(session, thread)
 end
 
 --- (Re)fetch everything read-related for `session` (refreshed with `R`).
---- `cb()` always runs, even on failure (a notify already fired).
---- Every continuation checks `session.closed` first: `:Diffy close` may
---- tear the session down while a fetch is in flight.
+--- `cb()` runs even on failure (a notify already fired), but not once
+--- `:Diffy close` tore the session down mid-fetch.
 function M.refresh(session, cb)
   local root = session.root
   owner_repo(root, function(owner, name, err)
-    if session.closed then
-      return
-    end
     if not owner then
       vim.notify('diffy: ' .. err, vim.log.levels.ERROR)
       cb()
@@ -639,9 +644,6 @@ function M.refresh(session, cb)
         return
       end
       repo.merge_base(root, session.range.base, session.head_sha, function(mb)
-        if session.closed then
-          return
-        end
         local shas = {}
         for _, n in ipairs(nodes) do
           local first = n.comments.nodes[1]
@@ -659,10 +661,7 @@ function M.refresh(session, cb)
           end
           merge_drafts(session, threads)
           local pairs_set = diff_pairs_needed(threads, session.entries, mb)
-          build_diff_cache(root, pairs_set, function(cache)
-            if session.closed then
-              return
-            end
+          build_diff_cache(session, pairs_set, function(cache)
             local review = session.review or {}
             review.backend = M
             review.branch = M.branch(session)
@@ -680,9 +679,9 @@ function M.refresh(session, cb)
             cb()
           end)
         end)
-      end)
+      end, session)
     end)
-  end)
+  end, session)
 end
 
 -- ---------------------------------------------------------------------
@@ -695,6 +694,7 @@ local MUTATIONS = {
   add_thread = [[mutation($r: ID!, $p: String!, $l: Int!, $s: DiffSide!, $sl: Int, $ss: DiffSide, $b: String!) { addPullRequestReviewThread(input: {pullRequestReviewId: $r, path: $p, line: $l, side: $s, startLine: $sl, startSide: $ss, body: $b}) { thread { id } } }]],
   add_reply = [[mutation($r: ID!, $t: ID!, $b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewId: $r, pullRequestReviewThreadId: $t, body: $b}) { comment { id } } }]],
   submit = [[mutation($r: ID!, $e: PullRequestReviewEvent!, $b: String) { submitPullRequestReview(input: {pullRequestReviewId: $r, event: $e, body: $b}) { pullRequestReview { id } } }]],
+  review = [[mutation($pr: ID!, $c: GitObjectID!, $e: PullRequestReviewEvent!, $b: String) { addPullRequestReview(input: {pullRequestId: $pr, commitOID: $c, event: $e, body: $b}) { pullRequestReview { id } } }]],
   resolve = [[mutation($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }]],
   unresolve = [[mutation($t: ID!) { unresolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }]],
 }
@@ -751,16 +751,14 @@ local function slice_file_section(raw_text, path)
   return nil
 end
 
---- The hunks for `path` in `files` (from `model.parse_diff_files`),
---- matching either side's name: depending on the direction of the diff,
---- `path` may be the old or the new name. `{}` if the file is unchanged.
-local function find_hunks(files, path)
-  for _, f in ipairs(files) do
-    if f.old_path == path or f.new_path == path then
-      return f.hunks, f.old_path, f.new_path
+--- `M.refresh`, then re-decorate. `cb()` as for `M.refresh`.
+local function refresh_and_decorate(session, cb)
+  M.refresh(session, function()
+    if not session.closed then
+      require('diffy.review.ui').decorate(session)
     end
-  end
-  return {}, path, path
+    cb()
+  end)
 end
 
 --- Runs the mutations for a validated push: delete any existing pending
@@ -791,10 +789,7 @@ local function push_execute(session, plan, cb)
       end
     end
     review.backend.save(session, review.branch, review.threads)
-    M.refresh(session, function()
-      if not session.closed then
-        require('diffy.review.ui').decorate(session)
-      end
+    refresh_and_decorate(session, function()
       cb(ok)
     end)
   end
@@ -911,7 +906,7 @@ local function push_execute(session, plan, cb)
         end)
       else
         raw_diff(root, { '-U0' }, d._commit, session.head_sha, function(traw)
-          local thunks = find_hunks(model.parse_diff_files(traw), anchor.path)
+          local _, thunks = model.diff_file_hunks(model.parse_diff_files(traw), anchor.path)
           local hs, he = model.map_range(thunks, d._line, d._end_line)
           if not hs then
             table.insert(plan.warnings, d.thread.id .. ": multi-line comment on another commit couldn't be tracked to HEAD")
@@ -950,16 +945,42 @@ local function push_execute(session, plan, cb)
       end
       table.insert(threads_input, input)
     end
-    M.transport(MUTATIONS.create_review, { pr = plan.pr_id, c = plan.primary_commit, t = threads_input }, function(data, err)
-      if not data then
-        vim.notify('diffy: push failed - ' .. tostring(err), vim.log.levels.ERROR)
-        cb(false)
-        return
-      end
+    local function created(review_id)
       for _, d in ipairs(plan.primary_threads) do
         d._pushed = true
       end
-      push_other(data.addPullRequestReview.pullRequestReview.id)
+      push_other(review_id)
+    end
+    M.transport(MUTATIONS.create_review, { pr = plan.pr_id, c = plan.primary_commit, t = threads_input }, function(data, err)
+      if data then
+        created(data.addPullRequestReview.pullRequestReview.id)
+        return
+      end
+      -- A big review (35 threads) creates the review and every thread, then
+      -- fails resolving the returned review with RESOURCE_LIMITS_EXCEEDED:
+      -- check what landed before calling it a failure.
+      owner_repo(root, function(owner, name)
+        local function failed()
+          vim.notify('diffy: push failed - ' .. tostring(err), vim.log.levels.ERROR)
+          -- the next push must see, and replace, whatever half-landed
+          M.refresh(session, function()
+            cb(false)
+          end)
+        end
+        if not owner then
+          failed()
+          return
+        end
+        paginate_threads(owner, name, session.range.pr_number, function(_, meta)
+          local pending = meta and meta.pending
+          local landed = pending and #pending.comments.nodes or 0
+          if pending and landed == math.min(#threads_input, 100) then
+            created(pending.id)
+          else
+            failed()
+          end
+        end)
+      end)
     end)
   end
 
@@ -1090,11 +1111,9 @@ function M.push(session, cb)
 
   run.git({ 'diff', '-z', '-M', '--name-status', merge_base, head_sha }, {
     cwd = root,
+    session = session,
     notify_on_error = false,
     on_exit = function(res)
-      if session.closed then
-        return
-      end
       local rename_map = {}
       if res.code == 0 then
         for _, rec in ipairs(parse.name_status(res.stdout or '')) do
@@ -1146,13 +1165,12 @@ function M.push(session, cb)
           end
           if anchor.side == 'old' then
             raw_diff(root, { '-U0' }, anchor.commit, merge_base, function(traw)
-              local tfiles = model.parse_diff_files(traw)
-              local thunks, _, mb_name = find_hunks(tfiles, anchor.path)
+              local mb_name, thunks = model.diff_file_hunks(model.parse_diff_files(traw), anchor.path)
               local mb_s, mb_e = model.map_range(thunks, anchor.start_line, anchor.end_line)
               if not mb_s then
                 d._invalid = "old-side comment couldn't be tracked to the merge-base"
               else
-                local vhunks = find_hunks(entry.files, mb_name)
+                local _, vhunks = model.diff_file_hunks(entry.files, mb_name)
                 if model.anchor_valid(vhunks, 'old', mb_s, mb_e) then
                   d._line, d._end_line = mb_s, mb_e
                 else
@@ -1162,7 +1180,7 @@ function M.push(session, cb)
               done()
             end)
           else
-            local vhunks = find_hunks(entry.files, anchor.path)
+            local _, vhunks = model.diff_file_hunks(entry.files, anchor.path, 'new')
             if model.anchor_valid(vhunks, 'new', anchor.start_line, anchor.end_line) then
               d._line, d._end_line = anchor.start_line, anchor.end_line
             else
@@ -1212,13 +1230,7 @@ function M.pull(session, cb)
           by_thread[t.id] = entry
           table.insert(imported, entry)
         end
-        table.insert(entry.comments, {
-          id = c.id,
-          author = c.author and c.author.login or 'unknown',
-          body = c.body,
-          created_at = c.createdAt,
-          state = 'draft',
-        })
+        table.insert(entry.comments, to_comment(c, 'draft'))
       end
     end
   end
@@ -1258,35 +1270,54 @@ function M.pull(session, cb)
   end
 end
 
---- `:Diffy review submit [comment|approve|request_changes]`: push, then
---- `submitPullRequestReview` with `event`/`body`. The refresh at the end
---- of the push reloads submitted comments as `published`. `cb(ok, warnings)`.
+--- Review events `:Diffy review submit` offers: GitHub refuses approving or
+--- requesting changes on your own PR.
+function M.verdicts(session)
+  local pr = session.review and session.review.pr
+  if pr and pr.author == M.author(session.root) then
+    return { 'COMMENT' }
+  end
+  return { 'COMMENT', 'APPROVE', 'REQUEST_CHANGES' }
+end
+
+--- `:Diffy review submit`: push the drafts, then submit the pending review
+--- with `event`/`body`; with no drafts and no pending review, a review
+--- with just `event`/`body` (approving without comments). The refresh at
+--- the end reloads submitted comments as `published`. `cb(ok, warnings)`.
 function M.submit(session, event, body, cb)
-  M.push(session, function(ok, warnings)
-    if not ok then
-      cb(false, warnings)
-      return
-    end
-    local review = session.review
-    local pending = review.pr and review.pr.pending
-    if not pending then
-      vim.notify('diffy: nothing to submit - no pending review', vim.log.levels.WARN)
-      cb(false, warnings)
-      return
-    end
-    M.transport(MUTATIONS.submit, { r = pending.id, e = event, b = body }, function(data, err)
+  local review = session.review
+  local function done(warnings)
+    return function(data, err)
       if not data then
         vim.notify('diffy: submit failed - ' .. tostring(err), vim.log.levels.ERROR)
         cb(false, warnings)
         return
       end
-      M.refresh(session, function()
-        if not session.closed then
-          require('diffy.review.ui').decorate(session)
-        end
+      refresh_and_decorate(session, function()
         cb(true, warnings)
       end)
-    end)
+    end
+  end
+  local function submit_pending(warnings)
+    local pending = review.pr and review.pr.pending
+    if pending then
+      M.transport(MUTATIONS.submit, { r = pending.id, e = event, b = body }, done(warnings))
+    else
+      M.transport(MUTATIONS.review, { pr = review.pr.id, c = session.head_sha, e = event, b = body }, done(warnings))
+    end
+  end
+
+  local roots, replies = classify_drafts(review and review.threads or {})
+  if review and review.pr and #roots == 0 and #replies == 0 then
+    submit_pending({})
+    return
+  end
+  M.push(session, function(ok, warnings)
+    if not ok then
+      cb(false, warnings)
+      return
+    end
+    submit_pending(warnings)
   end)
 end
 

@@ -1,22 +1,21 @@
 local session = require('diffy.session')
-
-local function notify_not_repo(err)
-  vim.notify('diffy: not a git repository (' .. tostring(err) .. ')', vim.log.levels.ERROR)
-end
+local repo = require('diffy.git.repo')
 
 local M = {}
 
 M.config = {
-  -- width of the tree/log column
   panel_width = 40,
+  -- views stacked in the left column, top to bottom: 'tree' (files), 'log'
+  -- (commits), 'threads' (review threads). Any other view opens in a float.
+  column = { 'tree', 'log' },
   keymaps = {
     -- buffer-local in every diffy window: hide/show the panel column
     toggle_panel = '<leader>e',
     -- … and go to the file tree, showing the column first if it's hidden
     focus_panel = '<leader>E',
   },
-  -- copied to `+` by `:Diffy review export`; %s is the absolute path of review.md
-  review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed.',
+  -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
+  review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
   -- GitHub avatars in comment headers, on terminals with the kitty graphics
   -- protocol (needs curl and ImageMagick)
   avatars = true,
@@ -24,6 +23,10 @@ M.config = {
 
 function M.setup(opts)
   M.config = vim.tbl_deep_extend('force', M.config, opts or {})
+  -- a list is replaced, not merged index by index
+  if opts and opts.column then
+    M.config.column = vim.deepcopy(opts.column)
+  end
 end
 
 --- subcommand name -> function(args: string[])
@@ -49,24 +52,41 @@ local function backend_supports(review, sub)
   return false
 end
 
---- Callback for GitHub backend calls answering `(ok, warnings)`.
+--- Callback for backend calls answering `(ok, warnings)`; `done_msg` is
+--- notified on success when given.
 local function report_remote(s, done_msg)
   return function(ok, warnings)
     for _, w in ipairs(warnings or {}) do
       vim.notify('diffy: ' .. w, vim.log.levels.WARN)
     end
-    if ok then
+    if ok and done_msg then
       vim.notify(done_msg)
     end
     review_ready(s)
   end
 end
 
-local SUBMIT_EVENTS = { comment = 'COMMENT', approve = 'APPROVE', request_changes = 'REQUEST_CHANGES' }
-local SUBMIT_TITLES = { COMMENT = 'Submit review', APPROVE = 'Approve', REQUEST_CHANGES = 'Request changes' }
+-- review events, in the order the submit prompt lists them
+local VERDICTS = {
+  { event = 'COMMENT', arg = 'comment', key = 'c', label = 'comment', title = 'Submit review' },
+  { event = 'APPROVE', arg = 'approve', key = 'a', label = 'approve', title = 'Approve' },
+  { event = 'REQUEST_CHANGES', arg = 'request_changes', key = 'r', label = 'request changes', title = 'Request changes' },
+}
+
+--- The VERDICTS entries `review`'s backend offers in session `s`, or nil
+--- when it has no review events (local review).
+local function offered_verdicts(s, review)
+  if type(review.backend.verdicts) ~= 'function' then
+    return nil
+  end
+  local events = review.backend.verdicts(s)
+  return vim.tbl_filter(function(v)
+    return vim.tbl_contains(events, v.event)
+  end, VERDICTS)
+end
 
 --- `:Diffy threads [file] [author=<name>] [state=…] [review=<id>]`: every
---- thread in the session, or the shown file's, in a picker or the quickfix.
+--- thread in the session, or the shown file's, in the threads view.
 function M.dispatch.threads(args)
   local s = current_session()
   if not s then
@@ -76,17 +96,6 @@ function M.dispatch.threads(args)
 end
 
 local review_subcommands = {}
-
-function review_subcommands.export(s, review)
-  review.backend.export(s, function(ok, result)
-    if ok then
-      vim.notify('diffy: exported review to ' .. result)
-    else
-      vim.notify('diffy: ' .. result, vim.log.levels.WARN)
-    end
-    review_ready(s)
-  end)
-end
 
 function review_subcommands.clear(s, review, ui)
   review.backend.clear(s, review.branch)
@@ -106,19 +115,46 @@ function review_subcommands.pull(s, review)
   end)
 end
 
+--- `:Diffy review submit [comment|approve|request_changes]`: a modal for
+--- the review message, then (GitHub) a key prompt for the review event,
+--- skipped when the argument names it or only one applies. The local
+--- review sends the message and the new comments to the agent instead.
 function review_subcommands.submit(s, review, ui, args)
-  local event = SUBMIT_EVENTS[args[2] or 'comment']
-  if not event then
-    vim.notify('diffy: `review submit` expects comment|approve|request_changes', vim.log.levels.WARN)
-    return
+  local verdicts = offered_verdicts(s, review)
+  local preset = args[2]
+  if preset then
+    local match = vim.tbl_filter(function(v)
+      return v.arg == preset
+    end, verdicts or {})
+    if #match == 0 then
+      local expected = vim.tbl_map(function(v)
+        return v.arg
+      end, verdicts or {})
+      vim.notify(
+        #expected > 0 and ('diffy: `review submit` expects %s'):format(table.concat(expected, '|'))
+          or ('diffy: `review submit` takes no argument for %s'):format(review.backend.name),
+        vim.log.levels.WARN
+      )
+      return
+    end
+    verdicts = match
   end
-  ui.open_submit_body(s, function(body)
-    review.backend.submit(s, event, body, report_remote(s, 'diffy: submitted'))
-  end, SUBMIT_TITLES[event])
+  local choices = verdicts and vim.tbl_map(function(v)
+    return { v.key, v.label, v.event }
+  end, verdicts)
+  local title = 'Send review to the agent'
+  if verdicts then
+    title = #verdicts == 1 and verdicts[1].title or 'Submit review'
+  end
+  ui.open_submit_body(s, function(body, event)
+    review.backend.submit(s, event, body, report_remote(s, verdicts and 'diffy: review submitted' or nil))
+  end, { title = title, action = verdicts and 'submit' or 'send', choices = choices })
 end
 
---- `:Diffy review export|clear` (local backend) and
---- `push|pull|submit` (GitHub backend).
+local REVIEW_SUBCOMMANDS = { 'clear', 'pull', 'push', 'submit' }
+
+--- `:Diffy review clear|submit` (local backend) and `push|pull|submit`
+--- (GitHub backend).
 function M.dispatch.review(args)
   local s = current_session()
   if not s then
@@ -133,7 +169,7 @@ function M.dispatch.review(args)
   local sub = args[1]
   local handler = sub and review_subcommands[sub]
   if not handler then
-    vim.notify(('diffy: `review %s` is not implemented yet'):format(sub or ''), vim.log.levels.WARN)
+    vim.notify(('diffy: `review` expects %s'):format(table.concat(REVIEW_SUBCOMMANDS, '|')), vim.log.levels.WARN)
     return
   end
   if backend_supports(review, sub) then
@@ -160,7 +196,34 @@ function M.dispatch.panel()
   if not s then
     return
   end
-  session.toggle_panels(s)
+  require('diffy.layout').toggle_column(s)
+end
+
+--- `:Diffy feedback`: describe what you don't like in a modal; `<C-s>` hands it to the
+--- `User DiffyFeedback` handlers (`data.text`), with the session as it was. Diffy doesn't store
+--- it: the handler (the user config's errlog) records it with its context.
+function M.dispatch.feedback()
+  local s = current_session()
+  if not s then
+    return
+  end
+  if #vim.api.nvim_get_autocmds({ event = 'User', pattern = 'DiffyFeedback' }) == 0 then
+    vim.notify('diffy: nothing handles feedback (no `User DiffyFeedback` autocmd)', vim.log.levels.WARN)
+    return
+  end
+  require('diffy.review.ui').open_submit_body(s, function(body)
+    local text = vim.trim(body)
+    -- after the modal's `stopinsert` took effect, so the handler sees the session's own mode
+    vim.schedule(function()
+      if text == '' then
+        vim.notify('diffy: empty feedback, nothing sent', vim.log.levels.WARN)
+      else
+        vim.api.nvim_exec_autocmds('User', { pattern = 'DiffyFeedback', data = { text = text } })
+        vim.notify('diffy: feedback sent')
+      end
+      require('diffy.git.run').ready({ session = s.id, event = 'feedback' })
+    end)
+  end, { title = 'What bothers you here?', action = 'send' })
 end
 
 local function entry_key(e)
@@ -192,7 +255,6 @@ end
 function M.build(s)
   local log_panel = require('diffy.panels.log')
   local tree_panel = require('diffy.panels.tree')
-  local repo = require('diffy.git.repo')
   local run = require('diffy.git.run')
   local selection = require('diffy.selection')
 
@@ -221,7 +283,7 @@ function M.build(s)
           s.setup_done = true
         end
         local function finish()
-          session.relayout(s)
+          require('diffy.layout').relayout(s)
           log_panel.render(s)
           tree_panel.render(s, function()
             run.ready({ session = s.id, event = 'render' })
@@ -233,6 +295,11 @@ function M.build(s)
         if s.range.kind == 'pr' then
           require('diffy.review.github').refresh(s, finish)
         else
+          -- what the agent resolved in review.md since the review was loaded
+          local review = type(s.review) == 'table' and s.review
+          if review and review.backend.sync then
+            review.backend.sync(s, review.branch, review.threads)
+          end
           finish()
         end
       end, s)
@@ -240,7 +307,6 @@ function M.build(s)
   end, s)
 end
 
---- `abspath` relative to `root` when inside it, else unchanged.
 local function relative_to(root, abspath)
   if abspath:sub(1, #root + 1) == root .. '/' then
     return abspath:sub(#root + 2)
@@ -252,19 +318,21 @@ end
 --- see panels/log.lua). The tab skeleton is created synchronously so
 --- teardown works immediately; the repo root and panels follow async.
 function M.start(spec)
-  local repo = require('diffy.git.repo')
   local selection = require('diffy.selection')
   local log_panel = require('diffy.panels.log')
   local tree_panel = require('diffy.panels.tree')
   local run = require('diffy.git.run')
 
   local s = session.open({ range = spec })
-  s.on_select = function(sess)
+  s.on_select = function(sess, done)
     require('diffy.checkout').before_select(sess, function()
       sess.pair = selection.resolve(sess.entries, sess.sel.top, sess.sel.bottom)
       log_panel.render(sess)
       tree_panel.render(sess, function()
         run.ready({ session = sess.id, event = 'select' })
+        if done then
+          done()
+        end
       end)
     end)
   end
@@ -274,7 +342,7 @@ function M.start(spec)
 
   repo.root(vim.fn.getcwd(), function(root, err)
     if not root then
-      notify_not_repo(err)
+      repo.notify_not_repo(err)
       session.teardown(s)
       return
     end
@@ -298,7 +366,6 @@ end
 --- the PR head on GitHub and the tree is clean. Log = PR commits
 --- (`merge-base(base)..HEAD`), all selected by default.
 function M.dispatch.pr(_args)
-  local repo = require('diffy.git.repo')
   local run = require('diffy.git.run')
   local github = require('diffy.review.github')
   local function refuse(reason)
@@ -307,7 +374,7 @@ function M.dispatch.pr(_args)
   end
   repo.root(vim.fn.getcwd(), function(root, err)
     if not root then
-      notify_not_repo(err)
+      repo.notify_not_repo(err)
       run.ready({ event = 'pr' })
       return
     end
@@ -323,7 +390,9 @@ function M.dispatch.pr(_args)
               refuse(reason)
               return
             end
-            M.start({ kind = 'pr', base = pr.baseRefName, pr_number = pr.number })
+            repo.base_ref(root, pr.baseRefName, function(base)
+              M.start({ kind = 'pr', base = base, pr_number = pr.number })
+            end)
           end)
         end)
       end)
@@ -381,6 +450,99 @@ function M.command(fargs)
     return
   end
   M.open(fargs)
+end
+
+local THREAD_STATES = { 'open', 'resolved', 'outdated', 'detached' }
+
+--- The current tab's session and its review backend module (without
+--- loading the review), or nil.
+local function completion_backend()
+  local s = session.current()
+  if not s or not s.range then
+    return nil, nil
+  end
+  if type(s.review) == 'table' then
+    return s, s.review.backend
+  end
+  local kind = s.range.kind
+  if kind == 'pr' then
+    return s, require('diffy.review.github')
+  elseif kind == 'default' or kind == 'branch' then
+    return s, require('diffy.review.local')
+  end
+  return s, nil
+end
+
+--- Candidates for the argument after `words` (the complete ones before it).
+local function candidates(words, arg_lead)
+  local sub = words[1]
+  if not sub then
+    local names = vim.tbl_keys(M.dispatch)
+    table.sort(names)
+    return names
+  end
+  if sub == 'review' then
+    local s, backend = completion_backend()
+    if #words == 1 then
+      return vim.tbl_filter(function(name)
+        return not backend or type(backend[name]) == 'function'
+      end, REVIEW_SUBCOMMANDS)
+    elseif #words == 2 and words[2] == 'submit' then
+      if backend and type(backend.verdicts) ~= 'function' then
+        return {}
+      end
+      local events = backend and backend.verdicts(s) or {}
+      local out = {}
+      for _, v in ipairs(VERDICTS) do
+        if not backend or vim.tbl_contains(events, v.event) then
+          table.insert(out, v.arg)
+        end
+      end
+      return out
+    end
+  elseif sub == 'threads' then
+    local key = arg_lead:match('^(%a+)=')
+    if key == 'state' then
+      return vim.tbl_map(function(v)
+        return 'state=' .. v
+      end, THREAD_STATES)
+    elseif key == 'author' then
+      local s = session.current()
+      local seen, out = {}, {}
+      for _, t in ipairs(s and type(s.review) == 'table' and s.review.threads or {}) do
+        for _, c in ipairs(t.comments) do
+          if c.author and not seen[c.author] then
+            seen[c.author] = true
+            table.insert(out, 'author=' .. c.author)
+          end
+        end
+      end
+      table.sort(out)
+      return out
+    end
+    return { 'file', 'author=', 'state=', 'review=' }
+  elseif sub == 'file' and #words == 1 then
+    return vim.fn.getcompletion(arg_lead, 'file')
+  elseif sub == 'branch' and #words == 1 then
+    local res = vim.system({ 'git', 'for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes' }, { text = true }):wait()
+    return res.code == 0 and vim.split(vim.trim(res.stdout), '\n', { trimempty = true }) or {}
+  end
+  return {}
+end
+
+--- `:Diffy` completion: subcommands, then what each takes (review
+--- subcommands and events for the current session's backend, threads
+--- filters, paths, branches).
+function M.complete(arg_lead, cmdline, cursor_pos)
+  local words = vim.split(cmdline:sub(1, cursor_pos), '%s+', { trimempty = true })
+  -- the command itself, and the word being completed
+  table.remove(words, 1)
+  if arg_lead ~= '' then
+    table.remove(words)
+  end
+  return vim.tbl_filter(function(c)
+    return c:sub(1, #arg_lead) == arg_lead
+  end, candidates(words, arg_lead))
 end
 
 --- Plain-data snapshot of every session and the recent git/gh commands, for

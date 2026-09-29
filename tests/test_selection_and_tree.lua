@@ -41,7 +41,6 @@ T['selecting Base..M2 shows f.txt with left = base content and right = M2 conten
   -- M2: line 90 holds the second edit made on main
   MiniTest.expect.equality(right_lines[1], '1')
   MiniTest.expect.equality(right_lines[90], 'main: line 90 v2')
-  -- the left winbar names a rev that resolves to the base commit
   MiniTest.expect.equality(ui.git(repo.dir, { 'rev-parse', l.left.rev }), repo.sha.Base)
 
   child.cmd('Diffy close')

@@ -44,11 +44,16 @@ local function load_buf(name)
 end
 
 -- navigation.lua's BufWinEnter handler must ignore diffy's own buffer
--- swaps; this counter lets it tell them apart from user navigation.
+-- swaps; this counter lets it tell them apart from user navigation. Another
+-- plugin's BufWinEnter error propagates out of `nvim_win_set_buf`: the
+-- counter must still drop or navigation stays off for the whole session.
 local function nav_guarded(session, fn, ...)
   session._nav_guard = (session._nav_guard or 0) + 1
-  local ret = fn(...)
+  local ok, ret = pcall(fn, ...)
   session._nav_guard = session._nav_guard - 1
+  if not ok then
+    error(ret, 0)
+  end
   return ret
 end
 
@@ -110,7 +115,10 @@ local function open_side(session, name, spec)
   if is_real then
     session.real_bufs[name] = buf
   else
-    session_mod.register_buffer(session, name, buf)
+    -- A blob is only unloaded when hidden: its number stays valid for
+    -- diffchar.vim's BufWinEnter handler, which runs after the hide and
+    -- still holds it, and for the jumplist/tag stack (`<C-o>`/`<C-t>` back).
+    session_mod.register_buffer(session, name, buf, { bufhidden = spec and spec.path and 'delete' or nil })
     session.real_bufs[name] = nil
   end
 
@@ -257,6 +265,8 @@ function M.leave(session)
     local buf = session_mod.scratch_buf(session, 'left')
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, { OUTSIDE })
     session_mod.register_buffer(session, 'left', buf)
+    -- the only diffy window left with keys: the right one's real file lost them
+    set_nav_keymaps(session, buf)
     vim.api.nvim_win_set_buf(left, buf)
     vim.w[left].diffy_rev = nil
     vim.w[left].diffy_path = nil

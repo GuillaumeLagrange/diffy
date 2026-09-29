@@ -49,7 +49,8 @@ lua/diffy/
 Conventions the code relies on:
 
 - **Sessions.** `session.open` builds the tab (`:tab sbuffer`, see below) and registers windows/buffers.
-  Every buffer diffy creates goes through `session.register_buffer` (`bufhidden=wipe`); every buffer-local
+  Every buffer diffy creates goes through `session.register_buffer` (`bufhidden=wipe`; fugitive blobs
+  `delete`, so jumplist/tag stack entries pointing at them survive); every buffer-local
   map through `session.map` (desc prefixed `diffy: `, removed on teardown or when a real file leaves a diffy
   window); every namespace through `session.namespace`. Window options are only set inside the session tab.
   `teardown` is idempotent and runs from every close path.
@@ -198,6 +199,11 @@ with the real config and `--listen`, screenshotted with `grim`:
   back to column 0 as you type; `session.lua` unbinds every window of the tab diffy doesn't own on `WinNew`.
 - `nvim_set_current_win`/`nvim_win_set_buf` don't fire `WinEnter`/`BufEnter`. `BufWinEnter` runs with the
   affected window current and only when the buffer actually changes.
+- Autocmd callbacks don't nest: buffer swaps and option changes made inside a `BufWinEnter` callback fire
+  no `BufWinEnter`/`OptionSet` for other plugins (diffchar.vim then keeps stale per-tab state), so
+  `navigation.lua` reacts on the next tick. `bufload` fires `BufWinEnter` in a hidden autocmd window.
+  Wiping a buffer drops its jumplist and tag stack entries; a new tab's diff windows inherit the previous
+  window's jumplist and tag stack (`session.open` clears them).
 - `WinClosed`/`BufWipeout` callbacks that close other windows of the same tab race `:tabclose`/`:qa`
   (spurious E444); defer them with `vim.schedule`.
 - `:bwipeout!` on an unlisted scratch buffer closes its window too (firing `WinClosed`).

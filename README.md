@@ -113,7 +113,9 @@ The right side is the real file (LSP, editable) when it shows the worktree, or H
 uncommitted changes. Otherwise both sides are read-only fugitive blobs. An added or deleted file takes the
 whole diff area on its own, coloured as added or deleted. Jumping to another file from the right side
 (go-to-definition, `gf`, `:e`) loads that file's pair if it's part of the diff; otherwise diff mode turns
-off until you come back (`<C-o>` or the tree).
+off until you come back (`<C-o>`, `<C-t>` or the tree). A jump from the left side opens in the right
+window, so `<C-o>`/`<C-t>` there bring the pair back. `<C-o>` never goes back past the start of the
+session.
 
 | Key (in either diff window) | |
 |---|---|

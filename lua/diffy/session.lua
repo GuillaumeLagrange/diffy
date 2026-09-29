@@ -150,14 +150,14 @@ function M.unregister_window(session, name)
   session.wins[name] = nil
 end
 
---- Register a managed buffer under `name` (`session.bufs[name]`), always
---- `bufhidden=wipe`. `opts.panel = true` makes its `:bwipe` tear the session
---- down (tree/log); diff-content buffers are swapped by every refresh and
---- must not.
+--- Register a managed buffer under `name` (`session.bufs[name]`),
+--- `bufhidden=wipe` unless `opts.bufhidden`. `opts.panel = true` makes its
+--- `:bwipe` tear the session down (tree/log); diff-content buffers are
+--- swapped by every refresh and must not.
 function M.register_buffer(session, name, buf, opts)
   opts = opts or {}
   session.bufs[name] = buf
-  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].bufhidden = opts.bufhidden or 'wipe'
   if opts.panel then
     watch_wipe(session, buf)
   end
@@ -228,6 +228,14 @@ function M.open(opts)
   local right_win = vim.api.nvim_open_win(right_buf, false, { win = left_win, split = 'right' })
   M.register_buffer(session, 'right', right_buf)
   M.register_window(session, 'right', right_win)
+  -- both inherit the previous tab's jumplist and tag stack: `<C-o>` there
+  -- would pull the user's pre-session buffers (a `[No Name]`) into the diff
+  for _, win in ipairs({ left_win, right_win }) do
+    vim.api.nvim_win_call(win, function()
+      vim.cmd('clearjumps')
+    end)
+    vim.fn.settagstack(win, { items = {} }, 'r')
+  end
 
   local layout = require('diffy.layout')
   -- the file tree and the commit log always exist, shown or not: the

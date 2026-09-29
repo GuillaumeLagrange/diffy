@@ -274,6 +274,35 @@ T['hovering a commented line previews it over the other diff window with its bar
   child.cmd('Diffy close')
 end
 
+T['<Esc> closes the hover card and keeps it closed on that line until the cursor leaves or <Tab>/K ask for it'] = function()
+  open_default()
+  local w = ui.wins(child)
+  -- line 3 reads `uncommitted`: room to move along it
+  write_comment(w.right, 3, 'covers two lines', 4)
+
+  child.type_keys('1G', '3G')
+  MiniTest.expect.equality(ui.thread_float(child) ~= vim.NIL, true)
+  child.type_keys('<Esc>')
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
+  -- moving along the same line doesn't bring it back
+  child.type_keys('$')
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
+  child.type_keys('j', 'k')
+  MiniTest.expect.equality(ui.thread_float(child).focused, false)
+
+  child.type_keys('<Esc>', '<Tab>')
+  MiniTest.expect.equality(ui.thread_float(child).focused, false)
+  child.type_keys('<Esc>', 'K')
+  MiniTest.expect.equality(ui.thread_float(child).focused, true)
+  child.type_keys('q')
+  -- nothing open: <Esc> is a no-op
+  child.type_keys('<Esc>', '<Esc>')
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), w.right)
+
+  child.cmd('Diffy close')
+end
+
 T['each comment in the thread float is headed by who wrote it, when, and its state; only applicable keys are offered'] = function()
   child.o.columns = 160
   open_default()

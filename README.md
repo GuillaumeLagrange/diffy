@@ -32,7 +32,7 @@ require('diffy').setup({
   },
   -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
-  avatars = true,                 -- GitHub avatars in comment headers, when the terminal can draw them
+  avatars = true,                 -- GitHub avatars in comment headers and summaries, when the terminal can draw them
 })
 ```
 
@@ -79,7 +79,9 @@ vim.api.nvim_create_autocmd('User', {
 ## The panels
 
 **Commits** (bottom). The diff always shows one contiguous selection: left is the parent of the oldest
-selected entry, right is the newest one. `Unstaged` means index → worktree, `Staged` means HEAD → index.
+selected entry, right is the newest one. `Working tree` means HEAD → worktree, index included; selected
+alone, the tree splits it into its unstaged and staged parts (see Files). With commits, it's one tree from
+the oldest commit's parent to the worktree. `J`/`K` and `]r`/`[r` treat it like a commit.
 Merge commits are dimmed and skipped. In branch and PR views, a selection reaching the oldest commit
 compares against the merge-base, like github.com, so changes merged in from the base branch don't show up.
 
@@ -92,25 +94,32 @@ then the message wrapped to fit. It closes on a non-commit row, when you leave t
 | `<CR>` | select the entry under the cursor |
 | `v`/`V` + motion, `<CR>` | select a range |
 | `a` | select everything |
-| `J` / `K` | select the next / previous commit |
+| `J` / `K` | select the next / previous entry |
 | `X` | toggle checkout mode (see below) |
 | `<Esc>` | close the commit message float |
 
 **Files** (top): status letter, path relative to its folder, `+added -removed`. The file shown in the diff
 is highlighted.
 
+With `Working tree` selected alone, the files come in two sections, `Unstaged (n)` (index → worktree, plus
+untracked files) then `Staged (n)` (HEAD → index). A file with both kinds of changes is listed in each, and
+opens that section's diff: the real file on the right for Unstaged, the index on the right for Staged. Both
+headers stay when a section is empty; with no changes at all the tree says `(no changes)`.
+
 | Key | |
 |---|---|
 | `<CR>` | open the file and move to the diff |
 | `o` | open the file, stay in the tree |
-| `za` | fold a folder |
+| `za` | fold a folder or section |
 | `gf` | open the real file in the previous tab |
-| `s` / `u` / `-` | stage / unstage / toggle the file (a rename stages both paths) |
+| `-` | move the file to the other section (stage in Unstaged, unstage in Staged) |
+| `s` / `u` | stage / unstage the file, whichever section it's in (a rename stages both paths) |
 | `S` / `U` | stage / unstage everything |
 
-Staging works only when the selection is exactly `Unstaged` or `Staged`. You can also stage hunk by hunk:
-with `Unstaged` selected the left side is the index, so `do`/`dp` or editing it and `:w` stages; with
-`Staged` selected the right side is the index.
+On a section header, `-`, `s` and `u` apply to every file of that section. After staging, the cursor
+follows the file into the section it moved to. Staging works only with `Working tree` selected alone. You
+can also stage hunk by hunk: for an Unstaged file the left side is the index, so `do`/`dp` or editing it and
+`:w` stages; for a Staged file the right side is the index.
 
 ## The diff
 
@@ -157,7 +166,7 @@ result (the real file) below. Works for merge, rebase, cherry-pick and stash pop
 ## Review
 
 Each comment draws a bar over its lines in the gutter, between the line numbers and the text, and a one-line
-summary under its last line (author, reply count, first line of the comment). The bar ends on its summary,
+summary under its last line (avatar on GitHub, author, reply count, first line of the comment). The bar ends on its summary,
 turning right across the bars still going on. A bar's colour comes from its thread's id, so it stays the
 same across files and sessions; the summary's `●` and the thread float's frame take it too. Overlapping
 ranges get bars side by side, the enclosing one on the left. The open thread's bar is heavy and its summary
@@ -167,7 +176,8 @@ aligned. Several summaries under one line are listed top to bottom by the line t
 
 Moving onto a commented line opens its leftmost thread; `<Tab>`/`<S-Tab>` cycle through the others covering
 that line, left to right. `]t`/`[t` walk every thread of the side by the line its range starts on, then the
-larger range first (the one drawn further left), then oldest first.
+larger range first (the one drawn further left), then oldest first. `<Esc>` closes the card, and it stays
+closed until the cursor leaves the line (or `<Tab>`, `K`, `]t` ask for it).
 
 The bars take over the diff windows' `statuscolumn` (fold, sign and number columns, then the bars) while
 the file has comments, and put your own back otherwise.
@@ -179,6 +189,7 @@ the file has comments, and put your own back otherwise.
 | `K` / `<CR>` | enter the thread float |
 | `]t` / `[t` | next / previous thread, by first line, larger range first, oldest first |
 | `<Tab>` / `<S-Tab>` | next / previous thread covering the cursor line, left to right, wrapping (also in the thread float) |
+| `<Esc>` | close the thread card; no preview on this line until the cursor leaves it |
 | `<leader>ds` | hide / show the summaries, keeping the bars (hover still previews) |
 | `<leader>dr` | hide / show resolved threads |
 | `<leader>dt` | hide / show comments inline altogether |
@@ -195,6 +206,24 @@ GitHub; "You" in a local review), age, and its state when it isn't published yet
 diffy), `pending` (in your unsubmitted GitHub review), `sent` (exported to the agent). The first header
 also says `outdated` or `✓ resolved`. Bodies render as markdown; suggestion blocks are labelled, empty
 ones as "remove these lines". A preview taller than half the window is cut, with a hint to press `K`.
+
+Bodies full of HTML, as bots like greptile write them, are shown as their markdown equivalent: HTML
+comments dropped, `<h2>` as `## `, `<b>`/`<em>`/`<code>` as `**`/`_`/`` ` ``, `<br>`/`<li>` as line breaks
+and items, entities (`&nbsp;`, `&amp;`, …) and backslash escapes decoded (an escape that would start a list
+or emphasis stays). Code fences are shown as written. Tables are padded so their columns line up; long
+lines wrap at words. This is display only: bodies are stored and sent as written.
+
+- **Links** show their text only; a bare URL shows as its host (and last path part when short). The URLs
+  stay behind the line: `gx` in a card opens the link under the cursor, else the line's only link, else
+  asks which one. With the mouse, `<C-LeftMouse>` or a double click on a link (or a badge, or an image
+  marker) opens it, from any card, focused or not.
+- **`<details>`** blocks are folds titled `▸ <summary>`, closed unless the HTML says `open`: `za` (or any
+  fold key) in the thread float or the `gP` card opens them, as does `<C-LeftMouse>`/a double click on the
+  title.
+- **Images** show as `[alt]`, opened by `gx`. Badges (SVG images, e.g. greptile's `P1`/`P2`, `Retrigger`,
+  `Fix in Codex`) are drawn over their marker when the terminal can draw avatars (below; ImageMagick needs
+  an SVG delegate, librsvg or its own MSVG) and they fit it; otherwise `[P0]`/`[P1]` are red, `[P2]`
+  yellow, `[P3]` blue. A heading's `Confidence Score: N/5` is green from 4, yellow at 3, red below.
 
 In the thread float, the footer lists the keys that apply: `r` reply, `e` edit the draft under the cursor,
 `dd` delete the draft under the cursor, `x` resolve/unresolve, `]t`/`[t` switch thread, `q` close. A
@@ -224,8 +253,9 @@ instead, compact and without the preview, and `:Diffy threads` moves the cursor 
 | `<C-f>` / `<C-b>` | scroll the preview |
 | `q` / `<Esc>` | close the float; leaving it for another window closes it too |
 
-Avatars need a terminal with the kitty graphics protocol, `curl` and ImageMagick. They're downloaded once
-and cached in `stdpath('cache')/diffy/avatars`; without them the headers are text only.
+Avatars and badges need a terminal with the kitty graphics protocol, `curl` and ImageMagick. They're
+downloaded once and cached in `stdpath('cache')/diffy/avatars` and `/images`; without them the headers,
+summaries and badges are text only.
 
 Local comments follow the code: after edits they're found again by their text within ±20 lines. When they
 can't be, they're in the threads view as detached.

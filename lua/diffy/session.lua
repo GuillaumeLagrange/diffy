@@ -304,6 +304,7 @@ function M.teardown(session)
   -- images are drawn on the terminal, outside any window
   if package.loaded['diffy.avatar'] then
     require('diffy.avatar').clear(session.id)
+    require('diffy.avatar').clear(session.id .. ':summaries')
   end
 
   for _, km in ipairs(session.keymaps) do

@@ -190,6 +190,85 @@ T['a thread placed on a line unchanged in the viewed commit opens the fold aroun
   child.cmd('Diffy close')
 end
 
+T['gP shows an HTML bot comment as readable text: headings, badges, folded details, links behind gx and ctrl-click'] = function()
+  if live.enabled then
+    MiniTest.skip('body rendering: recorded-fixture only')
+  end
+  child.lua([[
+    local pr = _G.__fake_state.reads[2].repository.pullRequest
+    pr.body = table.concat({
+      '<!-- greptile_summary -->',
+      '<h2><a href="https://example.com/retrigger"><picture><source srcset="https://example.com/r.svg"><img alt="Retrigger" src="https://example.com/r.svg" align="right"></picture></a>Confidence Score: 4/5</h2>',
+      '',
+      '1. <img alt="P2" src="https://example.com/p2.svg" align="top">&nbsp;**Repeated debug\\-info work** <a href="https://example.com/discussion">▶</a>',
+      '',
+      '<details><summary>Fix with agent prompt</summary>',
+      '',
+      '`````markdown',
+      'Fix it: https://example.com/long?prompt=abc',
+      '`````',
+      '',
+      '</details>',
+    }, '\n')
+    _G.__opened = {}
+    vim.ui.open = function(url) table.insert(_G.__opened, url) end
+  ]])
+  open_pr()
+  open_file('f.txt')
+  child.api.nvim_set_current_win(wins().right)
+  child.type_keys('gP')
+
+  -- the rows on screen: a closed fold shows its fold text
+  local rows = child.lua_get([[(function()
+    local out, l, last = {}, 1, vim.api.nvim_buf_line_count(0)
+    while l <= last do
+      local closed = vim.fn.foldclosedend(l)
+      if closed ~= -1 then
+        table.insert(out, vim.fn.foldtextresult(l))
+        l = closed + 1
+      else
+        table.insert(out, vim.fn.getline(l))
+        l = l + 1
+      end
+    end
+    return out
+  end)()]])
+  MiniTest.expect.equality(vim.list_slice(rows, 2, 6), {
+    ' ## Confidence Score: 4/5  [Retrigger]',
+    ' ',
+    ' 1. [P2] **Repeated debug-info work** ▶',
+    ' ',
+    ' ▸ Fix with agent prompt',
+  })
+  MiniTest.expect.equality(#rows, 6)
+  MiniTest.expect.equality(table.concat(rows, '\n'):find('http', 1, true), nil)
+
+  child.api.nvim_win_set_cursor(0, { 4, 0 })
+  child.type_keys('gx')
+  MiniTest.expect.equality(child.lua_get('_G.__opened'), { 'https://example.com/discussion' })
+
+  -- ctrl-click on the ▶ link opens it; on a fold title, opens the fold
+  local function ctrl_click(lnum, col)
+    child.lua(
+      [[
+      local lnum, col = ...
+      local p = vim.fn.screenpos(0, lnum, col)
+      vim.api.nvim_input_mouse('left', 'press', 'C', 0, p.row - 1, p.col - 1)
+    ]],
+      { lnum, col }
+    )
+    vim.wait(50)
+  end
+  local line4 = child.fn.getline(4)
+  ctrl_click(4, line4:find('▶', 1, true))
+  MiniTest.expect.equality(child.lua_get('_G.__opened'), { 'https://example.com/discussion', 'https://example.com/discussion' })
+  ctrl_click(6, 3)
+  MiniTest.expect.equality(child.fn.foldclosed(6), -1)
+
+  child.type_keys('q')
+  child.cmd('Diffy close')
+end
+
 T['<CR> in the threads view opens an outdated thread where it was written: its commit, or everything up to it'] = function()
   if live.enabled then
     MiniTest.skip('placement: recorded-fixture only')

@@ -24,6 +24,7 @@ local highlight = require('diffy.highlight')
 local avatar = require('diffy.avatar')
 local prompt = require('diffy.prompt')
 local layout = require('diffy.layout')
+local render = require('diffy.review.render')
 
 local M = {}
 
@@ -97,7 +98,7 @@ end
 --- be told apart. A resolved one reads `✓ author +N: …`, dimmed. `mode`
 --- (see `paint`): 'open' draws the whole line bold in the lane colour,
 --- 'near' in the lane colour.
-local function summary_chunks(thread, width, mode)
+local function summary_chunks(thread, width, mode, url)
   local first = thread.comments[1]
   local head = (first and first.author or 'unknown') .. (#thread.comments > 1 and (' +%d'):format(#thread.comments - 1) or '')
   local icon = thread.resolved and '✓' or '●'
@@ -110,16 +111,19 @@ local function summary_chunks(thread, width, mode)
   elseif mode == 'near' then
     hl = thread.resolved and text_hl or icon_hl
   end
-  local chunks = {
-    { icon .. ' ', dot_hl or icon_hl },
-    { head, hl or text_hl },
-  }
+  local chunks = { { icon .. ' ', dot_hl or icon_hl } }
+  local slot = url ~= nil and avatar.ready(url)
+  if slot then
+    -- placed over by `draw_summary_avatars`, two cells in from the text start
+    table.insert(chunks, { '   ', 'Normal' })
+  end
+  table.insert(chunks, { head, hl or text_hl })
   local line = first and vim.split(first.body or '', '\n', { plain = true })[1] or ''
-  local room = width - vim.fn.strdisplaywidth(icon .. ' ' .. head) - 2
+  local room = width - vim.fn.strdisplaywidth(icon .. ' ' .. head) - 2 - (slot and 3 or 0)
   if line ~= '' and room >= 8 then
     table.insert(chunks, { ': ' .. highlight.truncate(line, room), hl or (thread.resolved and text_hl or 'Comment') })
   end
-  return chunks
+  return chunks, slot
 end
 
 --- The current window, or the diff window under it when it's the thread
@@ -271,6 +275,8 @@ function M.fit_gutter(win, g)
   end
 end
 
+local schedule_avatars, track_avatars
+
 --- (Re)draw the summary virt_lines recorded by `M.decorate`, highlighting
 --- the open thread and the others covering the cursor line, and thicken
 --- the open thread's bar.
@@ -297,9 +303,18 @@ local function paint(session)
   for _, d in ipairs(review._draw) do
     if vim.api.nvim_buf_is_valid(d.buf) then
       local vlines = {}
-      for _, t in ipairs(d.threads) do
+      d.slots = {}
+      for i, t in ipairs(d.threads) do
         local mode = (t == open and 'open') or (relevant[t] and 'near') or nil
-        table.insert(vlines, (d.buf == covered and t == open) and { { '', 'Normal' } } or summary_chunks(t, d.width, mode))
+        if d.buf == covered and t == open then
+          table.insert(vlines, { { '', 'Normal' } })
+        else
+          local first = t.comments[1]
+          local url = first and first.author and review.backend.avatar_url and review.backend.avatar_url(first.author) or nil
+          local chunks, slot = summary_chunks(t, d.width, mode, url)
+          d.slots[i] = slot and url or nil
+          table.insert(vlines, chunks)
+        end
       end
       for _ = #vlines + 1, d.n do
         table.insert(vlines, { { '', 'Normal' } })
@@ -455,7 +470,15 @@ local function setup_hover(session)
       if not M.side_of(session, win) then
         return
       end
-      local threads = M.threads_at(session, win, vim.api.nvim_win_get_cursor(win)[1])
+      local line = vim.api.nvim_win_get_cursor(win)[1]
+      local off = review._hover_off
+      if off and (off.win ~= win or off.line ~= line) then
+        review._hover_off = nil
+      elseif off then
+        paint(session)
+        return
+      end
+      local threads = M.threads_at(session, win, line)
       local open = review._open
       if #threads == 0 then
         if open then
@@ -664,7 +687,12 @@ function M.decorate(session)
         end
       end
     end
-    avatar.request(urls, function() end)
+    avatar.request(urls, function()
+      if not session.closed then
+        paint(session)
+        schedule_avatars(session)
+      end
+    end)
   end
 
   -- keep the open thread open if it's still placed, re-anchored to its new spot
@@ -678,6 +706,8 @@ function M.decorate(session)
     end
   end
   paint(session)
+  track_avatars(session)
+  schedule_avatars(session)
   layout.refresh(session, 'threads')
   run.ready({ session = session.id, event = 'review' })
 end
@@ -793,20 +823,6 @@ local function ago(t)
   return os.date('%Y', e) == os.date('%Y') and day or ('%s, %s'):format(day, os.date('%Y', e))
 end
 
---- A body as github.com shows it: without HTML comments, the web UI's CRs
---- or surrounding blank lines.
-local function body_lines(body)
-  local text = (body or ''):gsub('\r', ''):gsub('<!%-%-.-%-%->', '')
-  local lines = vim.split(text, '\n', { plain = true })
-  while #lines > 0 and vim.trim(lines[#lines]) == '' do
-    table.remove(lines)
-  end
-  while #lines > 0 and vim.trim(lines[1]) == '' do
-    table.remove(lines, 1)
-  end
-  return lines
-end
-
 local BADGES = {
   draft = { 'draft', 'DiffyThreadDraft' },
   pending = { 'pending', 'DiffyThreadPending' },
@@ -862,6 +878,8 @@ end
 --- as they are. Returns the headers.
 local function fill_cards(session, buf, comments, opts)
   local lines, heads, code, labels = vim.list_extend({}, opts.preamble or {}), {}, {}, {}
+  local marks = {}
+  render.reset(buf)
   for i, c in ipairs(comments) do
     local badges = {}
     if BADGES[c.state] then
@@ -878,28 +896,20 @@ local function fill_cards(session, buf, comments, opts)
       url = opts.people and opts.avatar_url and c.author and opts.avatar_url(c.author) or nil,
     })
     table.insert(lines, '')
-    local fence
-    for _, l in ipairs(body_lines(c.body)) do
-      local marker = l:match('^%s*(```+)') or l:match('^%s*(~~~+)')
-      if fence then
-        if marker and marker:sub(1, 1) == fence.char and #marker >= fence.len and vim.trim(l):match('^[`~]+$') then
-          if fence.label then
-            fence.label.empty = fence.empty
-          end
-          fence = nil
-        else
-          table.insert(code, { row = #lines, suggestion = fence.label ~= nil })
-          fence.empty = false
-        end
-      elseif marker then
-        local info = vim.trim(vim.trim(l):sub(#marker + 1))
-        fence = { char = marker:sub(1, 1), len = #marker, empty = true }
-        if info == 'suggestion' then
-          -- under the line before the fence: fence lines are concealed
-          fence.label = { row = #lines - 1 }
-          table.insert(labels, fence.label)
-        end
-      end
+    local body = render.body(c.body)
+    local base = #lines
+    render.add(buf, body, base, 1)
+    for _, cl in ipairs(body.code) do
+      table.insert(code, { row = base + cl.row, suggestion = cl.suggestion })
+    end
+    for _, lb in ipairs(body.labels) do
+      -- the row above the body is the card's header
+      table.insert(labels, { row = base + lb.row, empty = lb.empty })
+    end
+    for _, m in ipairs(body.marks) do
+      table.insert(marks, { row = base + m.row, col = m.col + 1, end_col = m.end_col + 1, hl = m.hl })
+    end
+    for _, l in ipairs(body.lines) do
       -- one cell of padding; markdown allows up to three before any block
       table.insert(lines, ' ' .. l)
     end
@@ -921,6 +931,9 @@ local function fill_cards(session, buf, comments, opts)
     local text = lb.empty and ' Suggested change: remove these lines' or ' Suggested change'
     vim.api.nvim_buf_set_extmark(buf, ns, lb.row, 0, { virt_lines = { { { text, 'DiffyThreadSuggestion' } } } })
   end
+  for _, m in ipairs(marks) do
+    vim.api.nvim_buf_set_extmark(buf, ns, m.row, m.col, { end_col = m.end_col, hl_group = m.hl, priority = 200 })
+  end
   pcall(vim.treesitter.start, buf, 'markdown')
   return heads
 end
@@ -933,9 +946,6 @@ local function draw_avatars(session)
     avatar.clear(session.id)
     return
   end
-  -- a float anchored to a buffer line only moves when its window scrolls on
-  -- redraw: measure after it
-  vim.cmd('redraw')
   local items = {}
   for _, h in ipairs(cards.heads) do
     if h.slot then
@@ -946,15 +956,114 @@ local function draw_avatars(session)
       end
     end
   end
+  vim.list_extend(items, render.image_items(cards.win, vim.api.nvim_win_get_buf(cards.win)))
   avatar.place(session.id, items)
 end
 
-local function schedule_avatars(session)
+-- the cell rectangles of the current tab's floats, which cover summaries
+local function float_rects()
+  local rects = {}
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local cfg = vim.api.nvim_win_get_config(w)
+    if cfg.relative ~= '' then
+      local info = vim.fn.getwininfo(w)[1]
+      -- a possible border: one cell around
+      table.insert(rects, {
+        top = info.winrow - 1,
+        bottom = info.winrow + info.winbar + info.height,
+        left = info.wincol - 1,
+        right = info.wincol + info.width,
+      })
+    end
+  end
+  return rects
+end
+
+--- Draw the avatars reserved in the summary virt_lines (`d.slots`, set by
+--- `paint`) of the diff windows, where those rows are on screen.
+local function draw_summary_avatars(session)
+  local owner = session.id .. ':summaries'
+  local review = session.review
+  if not (review and review._draw and review.inline) or vim.api.nvim_get_current_tabpage() ~= session.tab then
+    avatar.clear(owner)
+    return
+  end
+  local items, rects = {}, nil
+  for _, name in ipairs({ 'left', 'right' }) do
+    local win = session.wins[name]
+    if win and vim.api.nvim_win_is_valid(win) then
+      local buf = vim.api.nvim_win_get_buf(win)
+      local info = vim.fn.getwininfo(win)[1]
+      local top = info.winrow + info.winbar
+      local bottom = top + info.height - 1
+      for _, d in ipairs(review._draw) do
+        if d.buf == buf and d.slots and next(d.slots)
+          and vim.api.nvim_win_call(win, function() return vim.fn.foldclosed(d.line) end) == -1 then
+          local pos = vim.fn.screenpos(win, d.line, 1)
+          if pos.row > 0 then
+            local h = vim.api.nvim_win_text_height(win, { start_row = d.line - 1, end_row = d.line - 1 })
+            -- virt_lines come right under the line's own rows, before fillers
+            local base = pos.row + h.all - h.fill
+            for i, url in pairs(d.slots) do
+              local row, col = base + i - 1, pos.col + 2
+              if row >= top and row <= bottom then
+                rects = rects or float_rects()
+                local hidden = false
+                for _, r in ipairs(rects) do
+                  hidden = hidden or (row >= r.top and row <= r.bottom and col + 2 >= r.left and col <= r.right)
+                end
+                if not hidden then
+                  table.insert(items, { url = url, row = row, col = col })
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  avatar.place(owner, items)
+end
+
+schedule_avatars = function(session)
   vim.schedule(function()
     if not session.closed then
+      -- a float anchored to a buffer line only moves when its window
+      -- scrolls on redraw: measure after it
+      local review = session.review
+      local any = review and review._cards ~= nil
+      for _, d in ipairs(not any and review and review._draw or {}) do
+        any = any or (d.slots and next(d.slots)) ~= nil
+      end
+      if any then
+        vim.cmd('redraw')
+      end
       draw_avatars(session)
+      draw_summary_avatars(session)
     end
   end)
+end
+
+-- images sit at screen cells: follow the windows, leave with the tab
+track_avatars = function(session)
+  local review = session.review
+  if review._avatar_track then
+    return
+  end
+  review._avatar_track = true
+  vim.api.nvim_create_autocmd({ 'WinScrolled', 'WinResized', 'VimResized', 'TabEnter' }, {
+    group = session.augroup,
+    callback = function()
+      schedule_avatars(session)
+    end,
+  })
+  vim.api.nvim_create_autocmd('TabLeave', {
+    group = session.augroup,
+    callback = function()
+      avatar.clear(session.id)
+      avatar.clear(session.id .. ':summaries')
+    end,
+  })
 end
 
 --- Make `win` (showing `buf`, filled by `fill_cards`) the card window whose
@@ -962,22 +1071,7 @@ end
 local function show_avatars(session, win, buf, heads)
   local review = session.review
   review._cards = { win = win, heads = heads }
-  if not review._avatar_track then
-    review._avatar_track = true
-    -- images sit at screen cells: follow the window, leave with the tab
-    vim.api.nvim_create_autocmd({ 'WinScrolled', 'WinResized', 'VimResized', 'TabEnter' }, {
-      group = session.augroup,
-      callback = function()
-        schedule_avatars(session)
-      end,
-    })
-    vim.api.nvim_create_autocmd('TabLeave', {
-      group = session.augroup,
-      callback = function()
-        avatar.clear(session.id)
-      end,
-    })
-  end
+  track_avatars(session)
   local urls = {}
   for _, h in ipairs(heads) do
     if h.url then
@@ -996,6 +1090,17 @@ local function show_avatars(session, win, buf, heads)
     end
     schedule_avatars(session)
   end)
+  local images = {}
+  for _, im in ipairs(render.images(buf)) do
+    table.insert(images, im.url)
+  end
+  avatar.request(images, function()
+    local cards = review._cards
+    if cards and cards.win == win and vim.api.nvim_buf_is_valid(buf) then
+      render.paint_images(buf, card_ns(session))
+      schedule_avatars(session)
+    end
+  end, { image = true })
   schedule_avatars(session)
 end
 
@@ -1346,6 +1451,8 @@ local function close_float(session)
   review._open = nil
   hide_avatars(session, open.float)
   close_win(open.float)
+  -- summary avatars it covered show again
+  schedule_avatars(session)
 end
 
 --- Close the open thread (if any); focus goes back to its diff window when
@@ -1420,6 +1527,7 @@ end
 function M.show_thread(session, thread, opts)
   opts = opts or {}
   local review = session.review
+  review._hover_off = nil
   local backend = review.backend
   local place = thread._place
   local src = place and session.wins[place.win]
@@ -1476,6 +1584,7 @@ function M.show_thread(session, thread, opts)
   vim.wo[fwin].winhighlight = highlight.card_hl(thread)
   vim.wo[fwin].conceallevel = 2
   vim.wo[fwin].concealcursor = 'nc'
+  render.attach(session, fwin, buf)
   if opts.focus then
     vim.api.nvim_set_current_win(fwin)
   end
@@ -1888,12 +1997,28 @@ function M.setup_diff_keymaps(session, buf)
   map(session, 'n', 'gP', function()
     M.open_pr_description(session)
   end, { buffer = buf, desc = 'review: PR description' })
+  render.map_click(session, buf)
   map(session, 'n', '<Tab>', function()
     M.cycle_line(session, 1)
   end, { buffer = buf, desc = 'review: next thread on this line' })
   map(session, 'n', '<S-Tab>', function()
     M.cycle_line(session, -1)
   end, { buffer = buf, desc = 'review: previous thread on this line' })
+  map(session, 'n', '<Esc>', function()
+    M.dismiss(session)
+  end, { buffer = buf, desc = 'review: close the thread card, no hover on this line' })
+end
+
+--- `<Esc>` in a diff window: close the open thread card and keep hover from
+--- reopening one until the cursor leaves its line.
+function M.dismiss(session)
+  local review = session.review
+  if not (review and review._open) then
+    return
+  end
+  local win = vim.api.nvim_get_current_win()
+  review._hover_off = { win = win, line = vim.api.nvim_win_get_cursor(win)[1] }
+  M.close_thread(session)
 end
 
 -- ---------------------------------------------------------------------
@@ -1931,6 +2056,7 @@ function M.open_pr_description(session)
   }))
   vim.wo[win].conceallevel = 2
   vim.wo[win].concealcursor = 'nc'
+  render.attach(session, win, buf)
   -- as tall as its wrapped text allows; the frame's two rows count
   local function place()
     local w = width()

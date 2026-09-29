@@ -430,6 +430,7 @@ local function preview(session, buf, win)
   wo.wrap, wo.linebreak, wo.breakindent = true, true, true
   wo.conceallevel, wo.concealcursor = 2, 'nvic'
   wo.winhighlight = highlight.card_hl(t)
+  require('diffy.review.render').attach(session, win, buf)
   local where = e.line and ('%s:%d'):format(t.anchor.path, e.line) or t.anchor.path
   vim.api.nvim_win_set_config(win, { title = { { ' ' .. where .. ' ', 'DiffyThreadHeader' } }, title_pos = 'left' })
   vim.api.nvim_win_set_cursor(win, { 1, 0 })

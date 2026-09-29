@@ -1,10 +1,12 @@
--- GitHub avatars drawn with the kitty graphics protocol, as direct
--- placements at screen cells (kitty, ghostty, wezterm, zellij >= 0.45).
--- Unicode placeholders would scroll with the text, but zellij drops them.
+-- Images drawn with the kitty graphics protocol, as direct placements at
+-- screen cells (kitty, ghostty, wezterm, zellij >= 0.45): GitHub avatars
+-- and the small images of comment bodies (badges). Unicode placeholders
+-- would scroll with the text, but zellij drops them.
 --
--- Avatars are downloaded once per URL, cut round by ImageMagick and cached
--- in stdpath('cache')/diffy/avatars. Without a graphics-capable TUI, curl
--- or ImageMagick, `ready` stays false and callers keep their text layout.
+-- Images are downloaded once per URL, converted by ImageMagick (avatars
+-- cut round, SVGs rasterised) and cached in stdpath('cache')/diffy/avatars
+-- or /images. Without a graphics-capable TUI, curl or ImageMagick, `ready`
+-- stays false and callers keep their text layout.
 local M = {}
 
 -- above what other plugins pick for their own images
@@ -92,14 +94,30 @@ local function detect(cb)
   send(('\27_Gi=%d,s=1,v=1,a=q,t=d,f=24;AAAA\27\\\27[c'):format(QUERY_ID))
 end
 
-local function cache_path(url)
-  local dir = vim.fn.stdpath('cache') .. '/diffy/avatars'
+local function cache_path(url, kind)
+  local dir = vim.fn.stdpath('cache') .. '/diffy/' .. (kind == 'image' and 'images' or 'avatars')
   vim.fn.mkdir(dir, 'p')
   return ('%s/%s.png'):format(dir, vim.fn.sha256(url))
 end
 
+--- Width / height of the PNG at `path`, from its IHDR chunk.
+local function aspect(path)
+  local f = io.open(path, 'rb')
+  local head = f and f:read(24)
+  if f then
+    f:close()
+  end
+  if not head or #head < 24 then
+    return nil
+  end
+  local w = head:byte(17) * 2 ^ 24 + head:byte(18) * 2 ^ 16 + head:byte(19) * 2 ^ 8 + head:byte(20)
+  local h = head:byte(21) * 2 ^ 24 + head:byte(22) * 2 ^ 16 + head:byte(23) * 2 ^ 8 + head:byte(24)
+  return h > 0 and w / h or nil
+end
+
 local function finish(img, ok)
   img.status = ok and 'ready' or 'failed'
+  img.aspect = ok and aspect(img.path) or nil
   local cbs = img.waiters
   img.waiters = {}
   for _, cb in ipairs(cbs) do
@@ -116,12 +134,19 @@ local function fetch(url, img)
         finish(img, false)
       end)
     end
-    local size, r = 64, 31.5
-    vim.system({
-      magick(), src, '-resize', ('%dx%d^'):format(size, size), '-gravity', 'center', '-extent', ('%dx%d'):format(size, size),
-      '(', '-size', ('%dx%d'):format(size, size), 'xc:black', '-fill', 'white', '-draw', ('circle %s,%s %s,0'):format(r, r, r), ')',
-      '-alpha', 'off', '-compose', 'CopyOpacity', '-composite', 'PNG32:' .. img.path,
-    }, {}, function(cv)
+    local cmd
+    if img.kind == 'image' then
+      -- one text row tall, drawn at twice that for sharpness
+      cmd = { magick(), '-background', 'none', '-density', '192', src, '-resize', 'x40', 'PNG32:' .. img.path }
+    else
+      local size, r = 64, 31.5
+      cmd = {
+        magick(), src, '-resize', ('%dx%d^'):format(size, size), '-gravity', 'center', '-extent', ('%dx%d'):format(size, size),
+        '(', '-size', ('%dx%d'):format(size, size), 'xc:black', '-fill', 'white', '-draw', ('circle %s,%s %s,0'):format(r, r, r), ')',
+        '-alpha', 'off', '-compose', 'CopyOpacity', '-composite', 'PNG32:' .. img.path,
+      }
+    end
+    vim.system(cmd, {}, function(cv)
       os.remove(src)
       vim.schedule(function()
         finish(img, cv.code == 0)
@@ -130,16 +155,21 @@ local function fetch(url, img)
   end)
 end
 
---- True when `url`'s avatar can be drawn right now.
+--- True when `url`'s image can be drawn right now.
 function M.ready(url)
   local img = url and images[url]
   return support == true and img ~= nil and img.status == 'ready'
 end
 
+--- Width / height of `url`'s image once ready.
+function M.aspect(url)
+  return M.ready(url) and images[url].aspect or nil
+end
+
 --- Make `urls` drawable; `cb()` runs once some are (cached ones right after
 --- detection), then again as each download lands. Never runs when images
---- can't be drawn.
-function M.request(urls, cb)
+--- can't be drawn. `opts.image`: any image, not an avatar.
+function M.request(urls, cb, opts)
   if #urls == 0 then
     return
   end
@@ -151,10 +181,11 @@ function M.request(urls, cb)
     for _, url in ipairs(urls) do
       local img = images[url]
       if not img then
-        img = { path = cache_path(url), waiters = {} }
+        img = { path = cache_path(url, opts and opts.image and 'image'), kind = opts and opts.image and 'image' or 'avatar', waiters = {} }
         images[url] = img
         if vim.uv.fs_stat(img.path) then
           img.status = 'ready'
+          img.aspect = aspect(img.path)
         else
           img.status = 'fetching'
           fetch(url, img)

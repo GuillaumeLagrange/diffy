@@ -374,7 +374,7 @@ function M.setup(session)
   end, { buffer = buf, desc = 'select previous commit' })
   map(session, 'n', 'X', function()
     require('diffy.checkout').toggle(session)
-  end, { buffer = buf, desc = 'full checkout' })
+  end, { buffer = buf, desc = 'toggle checkout mode' })
   require('diffy.layout').map_panel_keys(session, buf)
 end
 
@@ -393,7 +393,9 @@ M.view = {
     if not (session.entries and #session.entries > 0) then
       return EMPTY_HEIGHT
     end
-    return math.max(1, math.min(#session.entries, math.floor(room * 0.4)))
+    -- checkout mode shows its marker in the log's winbar, one row of the height
+    local winbar = session.checkout and 1 or 0
+    return math.max(1, math.min(#session.entries, math.floor(room * 0.4))) + winbar
   end,
 }
 

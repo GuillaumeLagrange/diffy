@@ -89,7 +89,7 @@ compares against the merge-base, like github.com, so changes merged in from the 
 | `v`/`V` + motion, `<CR>` | select a range |
 | `a` | select everything |
 | `J` / `K` | select the next / previous commit |
-| `X` | full checkout of the selected commit (see below) |
+| `X` | toggle checkout mode (see below) |
 
 **Files** (top): status letter, path relative to its folder, `+added -removed`. The file shown in the diff
 is highlighted.
@@ -132,9 +132,13 @@ statusline shows. diffy sets `b:diffy_title` (`a1b2c3d: src/foo.lua`) on those b
 lualine_c = { { 'filename', path = 1, fmt = function(name) return vim.b.diffy_title or name end } },
 ```
 
-**Full checkout.** `X` on a single commit checks it out (detached) so the right side becomes real files with
-LSP. Leaving it (selecting something else, `X` again, closing the session) checks your branch out again.
-It refuses when you have tracked changes. If nvim dies in between, the next `:Diffy` offers `:Diffy restore`.
+**Checkout mode.** `X` turns checkout mode on: the selected commit is checked out (detached; your branch
+itself when it is the branch head) so the right side becomes real files with LSP. Moving the selection
+(`<CR>`, `J`/`K`, `]r`/`[r`, threads) checks out the new commit; a range or the working tree puts your branch
+back until you select a single commit again. The log's winbar shows `⎇ checkout <sha>` while it is on.
+`X` again or closing the session checks your branch out again. Entering refuses when you have tracked
+changes; if you edit a file while in the mode, moving the selection warns and keeps the current checkout.
+If nvim dies in between, the next `:Diffy` offers `:Diffy restore`.
 
 **Conflicts.** `:Diffy conflicts`, or opening a `U` file, shows ours, base and theirs on top and the
 result (the real file) below. Works for merge, rebase, cherry-pick and stash pop.

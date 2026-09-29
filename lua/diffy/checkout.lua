@@ -1,7 +1,8 @@
--- Full checkout of a single log commit onto the real worktree, so its right
--- side gets a real, LSP-navigable buffer. Writes a recovery state file before
--- touching HEAD and restores the original branch when the user leaves it
--- (selecting elsewhere, `X` again, closing the tab, exit).
+-- Checkout mode (`X`): while on, the single selected log commit is checked
+-- out onto the real worktree (the branch itself for its head, multi-commit or
+-- worktree selections), so its right side is a real, LSP-navigable buffer.
+-- Writes a recovery state file while HEAD is detached and restores the
+-- original branch when the mode ends (`X` again, closing the tab, exit).
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
@@ -71,23 +72,87 @@ local function current_branch(root, cb, session)
   })
 end
 
-local function render_tree(session)
+local function winbar(session)
+  local win = session.wins and session.wins.log
+  if not (win and vim.api.nvim_win_is_valid(win)) then
+    return
+  end
+  local co = session.checkout
+  local bar = co and ('⎇ checkout ' .. (co.commit and co.commit:sub(1, 7) or co.branch)) or ''
+  if vim.wo[win].winbar ~= bar then
+    vim.wo[win].winbar = bar
+    require('diffy.layout').relayout(session)
+  end
+end
+
+local function redraw(session)
+  winbar(session)
   require('diffy.panels.tree').render(session, function()
     run.ready({ session = session.id, event = 'checkout' })
   end)
 end
 
---- `X` on the single selected commit: check out its tree onto the real
---- worktree so its right side becomes a real file. Refuses if the
---- tree has tracked changes; HEAD is left untouched in that case.
-function M.enter(session)
+-- Commit the mode should have checked out for the current selection; nil
+-- means the branch (multi-commit selection, worktree entries, branch head).
+local function target(session)
   local sel = session.sel
   local entry = sel and sel.top == sel.bottom and session.entries[sel.top]
-  if not entry or entry.kind ~= 'commit' then
-    vim.notify('diffy: `X` needs a single selected commit', vim.log.levels.WARN)
+  if not entry or entry.kind ~= 'commit' or entry.sha == session.checkout.head then
+    return nil
+  end
+  return entry.sha
+end
+
+local function refusal(clean, err)
+  return clean == nil and ('git status failed: ' .. err) or 'tracked changes present, commit or stash them first'
+end
+
+-- Move HEAD to `sha` (nil: the branch). `cb(ok)`; a dirty tree refuses so
+-- edits made in the checked-out files are never carried or lost.
+local function switch(session, sha, cb)
+  local co = session.checkout
+  if sha == co.commit then
+    cb(true)
     return
   end
+  repo.is_clean(session.root, nil, function(clean, err)
+    if not clean then
+      vim.notify('diffy: keeping the current checkout — ' .. refusal(clean, err), vim.log.levels.WARN)
+      cb(false)
+      return
+    end
+    local function done(ok)
+      if ok then
+        co.commit = sha
+        session.checkout_sha = sha
+        -- the right side's real files changed on disk under loaded buffers
+        vim.cmd('silent! checktime')
+      end
+      cb(ok)
+    end
+    if not sha then
+      checkout_branch(session.root, session.gitdir, co.branch, session, done)
+      return
+    end
+    write_state(session.gitdir, { branch = co.branch, head = co.head, commit = sha })
+    run.git({ 'checkout', '--quiet', '--detach', sha }, {
+      cwd = session.root,
+      session = session,
+      on_exit = function(res)
+        if res.code ~= 0 and not co.commit then
+          delete_state(session.gitdir)
+        elseif res.code ~= 0 then
+          write_state(session.gitdir, { branch = co.branch, head = co.head, commit = co.commit })
+        end
+        done(res.code == 0)
+      end,
+    })
+  end, session)
+end
 
+--- `X` with the mode off: turn checkout mode on, checking out the selected
+--- commit (or keeping the branch). Refuses with tracked changes.
+function M.enter(session)
   repo.is_clean(session.root, nil, function(clean, err)
     if not clean then
       local why = clean == nil and ('git status failed: ' .. err) or 'commit or stash tracked changes first'
@@ -96,63 +161,58 @@ function M.enter(session)
       return
     end
     current_branch(session.root, function(branch)
-      local state = { branch = branch or session.head_sha, head = session.head_sha, commit = entry.sha }
-      write_state(session.gitdir, state)
-      run.git({ 'checkout', '--quiet', '--detach', entry.sha }, {
-        cwd = session.root,
-        session = session,
-        on_exit = function(res)
-          if res.code ~= 0 then
-            delete_state(session.gitdir)
-            run.ready({ session = session.id, event = 'checkout' })
-            return
-          end
-          session.checkout = { branch = state.branch, head = state.head, commit = state.commit, sel_idx = sel.top }
-          session.checkout_sha = entry.sha
-          active[session.id] = { root = session.root, gitdir = session.gitdir, branch = state.branch }
-          render_tree(session)
-        end,
-      })
+      local sel = session.sel or { top = 1, bottom = 1 }
+      session.checkout = { branch = branch or session.head_sha, head = session.head_sha, sel = { top = sel.top, bottom = sel.bottom } }
+      active[session.id] = { root = session.root, gitdir = session.gitdir, branch = session.checkout.branch }
+      switch(session, target(session), function()
+        redraw(session)
+      end)
     end, session)
   end, session)
 end
 
---- Leave the checked-out commit (`X` again, moving the log selection away,
---- closing the tab): restore the saved branch and delete the state file.
---- `cb(ok)`; on `false` (tree became dirty since the checkout) HEAD stays on
---- the checked-out commit and nothing is deleted.
+--- Turn checkout mode off (`X` again, closing the tab): restore the saved
+--- branch and delete the state file. `cb(ok)`; on `false` (tree became dirty
+--- since the checkout) HEAD stays on the checked-out commit.
 function M.leave(session, cb)
-  if not session.checkout then
+  local co = session.checkout
+  if not co then
     cb(true)
+    return
+  end
+  local function off()
+    session.checkout = nil
+    session.checkout_sha = nil
+    active[session.id] = nil
+    cb(true)
+  end
+  if not co.commit then
+    off()
     return
   end
   repo.is_clean(session.root, nil, function(clean, err)
     if not clean then
-      local why = clean == nil and ('git status failed: ' .. err)
-        or 'tracked changes present, commit or stash them first'
-      vim.notify('diffy: cannot leave the checked-out commit — ' .. why, vim.log.levels.ERROR)
+      vim.notify('diffy: cannot leave the checked-out commit — ' .. refusal(clean, err), vim.log.levels.ERROR)
       cb(false)
       return
     end
-    checkout_branch(session.root, session.gitdir, session.checkout.branch, session, function(ok)
-      if not ok then
+    checkout_branch(session.root, session.gitdir, co.branch, session, function(ok)
+      if ok then
+        vim.cmd('silent! checktime')
+        off()
+      else
         cb(false)
-        return
       end
-      session.checkout = nil
-      session.checkout_sha = nil
-      active[session.id] = nil
-      cb(true)
     end)
   end, session)
 end
 
---- `X`: enter or leave the checkout of the currently selected commit.
+--- `X`: toggle checkout mode.
 function M.toggle(session)
   if session.checkout then
     M.leave(session, function(ok)
       if ok then
-        render_tree(session)
+        redraw(session)
       end
     end)
   else
@@ -160,28 +220,31 @@ function M.toggle(session)
   end
 end
 
---- Hook for `session.on_select` (init.lua): if a checkout is active and the
---- new selection is no longer that same single commit, leave it first.
---- `cb()` runs once it is safe to render the new selection; on refusal the
---- selection snaps back to the checked-out commit and `cb` is not called.
+--- Hook for `session.on_select` (init.lua): in checkout mode, check out what
+--- the new selection needs before it is drawn. `cb()` runs once HEAD matches;
+--- on refusal (dirty tree) the selection snaps back and `cb` is not called.
 function M.before_select(session, cb)
   local co = session.checkout
   if not co then
     cb()
     return
   end
-  local sel = session.sel
-  if sel.top == sel.bottom and sel.top == co.sel_idx then
+  local sha = target(session)
+  if sha == co.commit then
+    co.sel = { top = session.sel.top, bottom = session.sel.bottom }
     cb()
     return
   end
-  M.leave(session, function(ok)
+  switch(session, sha, function(ok)
     if ok then
+      co.sel = { top = session.sel.top, bottom = session.sel.bottom }
+      winbar(session)
+      run.ready({ session = session.id, event = 'checkout' })
       cb()
     else
-      session.sel = { top = co.sel_idx, bottom = co.sel_idx }
+      session.sel = { top = co.sel.top, bottom = co.sel.bottom }
       require('diffy.panels.log').render(session)
-      run.ready({ session = session.id, event = 'select' })
+      run.ready({ session = session.id, event = 'checkout' })
     end
   end)
 end
@@ -192,7 +255,8 @@ end
 --- warning. `session` is not passed to git: it is already closed, which
 --- would turn the callbacks into no-ops.
 function M.leave_on_teardown(session)
-  if not session.checkout then
+  if not (session.checkout and session.checkout.commit) then
+    active[session.id] = nil
     return
   end
   local root, gitdir, co = session.root, session.gitdir, session.checkout

@@ -376,6 +376,7 @@ function M.setup(session)
     require('diffy.checkout').toggle(session)
   end, { buffer = buf, desc = 'toggle checkout mode' })
   require('diffy.layout').map_panel_keys(session, buf)
+  require('diffy.panels.commitmsg').setup(session)
 end
 
 -- rows before there are entries (and in `:Diffy conflicts`, which has none)

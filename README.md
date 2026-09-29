@@ -83,6 +83,10 @@ selected entry, right is the newest one. `Unstaged` means index → worktree, `S
 Merge commits are dimmed and skipped. In branch and PR views, a selection reaching the oldest commit
 compares against the merge-base, like github.com, so changes merged in from the base branch don't show up.
 
+Resting the cursor on a commit shows its full message in a float beside the log: short sha, author, date,
+then the message wrapped to fit. It closes on a non-commit row, when you leave the log, or on `<Esc>`
+(until you move to another row).
+
 | Key | |
 |---|---|
 | `<CR>` | select the entry under the cursor |
@@ -90,6 +94,7 @@ compares against the merge-base, like github.com, so changes merged in from the 
 | `a` | select everything |
 | `J` / `K` | select the next / previous commit |
 | `X` | toggle checkout mode (see below) |
+| `<Esc>` | close the commit message float |
 
 **Files** (top): status letter, path relative to its folder, `+added -removed`. The file shown in the diff
 is highlighted.

@@ -125,6 +125,13 @@ session.
 | `<leader>e` | hide / show the panel column |
 | `<leader>E` | go to the file tree, bringing the column back first if it's hidden |
 
+**Statusline.** A blob side's buffer name is a `fugitive://…/.git//<sha>/<path>` URI, which is what a
+statusline shows. diffy sets `b:diffy_title` (`a1b2c3d: src/foo.lua`) on those buffers; with lualine:
+
+```lua
+lualine_c = { { 'filename', path = 1, fmt = function(name) return vim.b.diffy_title or name end } },
+```
+
 **Full checkout.** `X` on a single commit checks it out (detached) so the right side becomes real files with
 LSP. Leaving it (selecting something else, `X` again, closing the session) checks your branch out again.
 It refuses when you have tracked changes. If nvim dies in between, the next `:Diffy` offers `:Diffy restore`.

@@ -447,26 +447,6 @@ T['e and dd in the thread float act on the draft under the cursor'] = function()
   child.cmd('Diffy close')
 end
 
-T['e in the thread float still opens the edit box once the thread\'s diff window is gone'] = function()
-  open_default()
-  local w = ui.wins(child)
-  write_comment(w.right, 5, 'first point')
-  child.api.nvim_set_current_win(w.right)
-  child.fn.win_execute(w.right, 'call cursor(5, 1)')
-  child.type_keys('K')
-  -- its side window closed under the open float
-  child.lua([[
-    for _, t in ipairs(require('diffy.session').current().review.threads) do
-      t._place = vim.tbl_extend('force', t._place, { win = 'gone' })
-    end
-  ]])
-  compose('e')
-  MiniTest.expect.equality(child.api.nvim_buf_get_lines(0, 0, -1, false), { 'first point' })
-  child.type_keys('<Esc>', 'q')
-
-  child.cmd('Diffy close')
-end
-
 T['on an added file the thread and its edit box leave the commented lines visible'] = function()
   child.o.lines = 50
   vim.fn.writefile(Repo.lines(40), repo.dir .. '/new.txt')

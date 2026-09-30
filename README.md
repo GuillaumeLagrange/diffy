@@ -110,6 +110,8 @@ headers stay when a section is empty; with no changes at all the tree says `(no 
 |---|---|
 | `<CR>` | open the file and move to the diff |
 | `o` | open the file, stay in the tree |
+| `]f` / `[f` | next / previous file |
+| `]r` / `[r` | next / previous commit |
 | `za` | fold a folder or section |
 | `gf` | open the real file in the previous tab |
 | `-` | move the file to the other section (stage in Unstaged, unstage in Staged) |

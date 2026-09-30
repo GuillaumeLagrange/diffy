@@ -80,6 +80,25 @@ T[']r from the commit before the merge lands on the commit after it, skipping it
   child.cmd('Diffy close')
 end
 
+T[']r/[r in the file tree move the commit selection instead of nvim\'s spell motion'] = function()
+  open_branch()
+  ui.select_log_row(child, 5)
+  child.api.nvim_set_current_win(ui.wins(child).tree)
+  child.v.errmsg = ''
+  -- unmapped, ]r is nvim's next rare word: E756 with 'spell' off
+  ui.arm_ready(child, 'select')
+  child.type_keys(']r')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(child.v.errmsg, '')
+  MiniTest.expect.equality(selected(), { 'C1' })
+
+  ui.arm_ready(child, 'select')
+  child.type_keys('[r')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(selected(), { 'Rename' })
+  child.cmd('Diffy close')
+end
+
 T['the log always lists every entry, sized min(#entries, 40% of the column), focused or not'] = function()
   child.o.lines = 40
   open_branch()

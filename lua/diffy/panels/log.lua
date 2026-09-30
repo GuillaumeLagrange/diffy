@@ -193,8 +193,8 @@ function M.default_selection(entries, spec)
     return { top = top, bottom = top }
   end
   local first_commit = 1
-  if spec.kind == 'branch' then
-    first_commit = 2 -- past the working tree
+  if spec.kind == 'branch' and #entries > 1 then
+    first_commit = 2 -- past the working tree, unless the branch has no commits
   end
   local top = selection.first_selectable(entries)
   local bottom = selection.last_selectable(entries)

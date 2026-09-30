@@ -47,4 +47,19 @@ T['all commits of :Diffy branch diff against the merge-base; the oldest commit a
   child.cmd('Diffy close')
 end
 
+T['a branch with no commits past its base shows the working tree'] = function()
+  repo:destroy()
+  repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(10) }):branch('feat')
+  vim.fn.writefile(Repo.lines(11), repo.dir .. '/f.txt')
+  child.fn.chdir(repo.dir)
+
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch main')
+  ui.wait_ready(child)
+
+  MiniTest.expect.equality(child.lua_get('require("diffy").debug_state().sessions[1].sel'), { top = 1, bottom = 1 })
+  MiniTest.expect.equality(child.v.errmsg, '')
+  child.cmd('Diffy close')
+end
+
 return T

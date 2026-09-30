@@ -172,6 +172,33 @@ T['stacked threads pad both sides to the larger count and open one at a time, sw
   child.cmd('Diffy close')
 end
 
+T['a thread inside a long added block opens level with its line, not below the filler rows'] = function()
+  local lines = vim.fn.readfile(repo.dir .. '/f.txt')
+  for k = 60, 1, -1 do
+    table.insert(lines, 6, 'new' .. k)
+  end
+  vim.fn.writefile(lines, repo.dir .. '/f.txt')
+  child.o.columns, child.o.lines = 160, 40
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 40, 'deep in the block')
+  -- the left window's top rows are all filler
+  child.fn.win_execute(w.right, 'normal! 30Gzt')
+  child.api.nvim_set_current_win(w.right)
+  child.fn.win_execute(w.right, 'call cursor(39, 1)')
+  arm_ready_raw('thread')
+  child.type_keys('j')
+  ui.wait_ready_raw(child)
+
+  MiniTest.expect.equality(ui.thread_float(child).over, 'left')
+  -- the card's top frame on the commented line's screen row
+  local row = child.fn.screenpos(w.right, 40, 1).row
+  local text = table.concat(child.get_screenshot().text[row])
+  MiniTest.expect.equality(text:find('╭', 1, true) ~= nil, true)
+
+  child.cmd('Diffy close')
+end
+
 --- The thread float's frame on screen, over the left diff window: `{ width
 --- = text columns inside the frame, left = gap between the window's text
 --- and the frame, right = gap after it }`, read from the drawn corners.

@@ -397,16 +397,11 @@ local function beside(session, src_win, first, last, height, edges)
   local width = math.max(10, math.min(CARD_WIDTH, text_width - 2))
   local margin = math.max(0, math.floor((text_width - width - 2) / 2))
   if target == other then
-    local w0 = vim.fn.line('w0', target)
-    local text_top = vim.fn.screenpos(target, w0, 1).row
     height = math.max(1, math.min(height, h - edges))
     local pos = vim.fn.screenpos(src_win, first, 1)
-    local row = 0
-    if pos.row > 0 and text_top > 0 then
-      row = pos.row - text_top
-    end
-    -- `bufpos` anchors col 0 at the first text column, past the gutter
-    return { relative = 'win', win = target, bufpos = { w0 - 1, 0 }, row = math.max(0, math.min(row, h - height - edges)), col = margin, width = width, height = height }
+    -- window rows, not `bufpos` at w0: the top may be filler rows above w0
+    local row = pos.row > 0 and pos.row - info.winrow - info.winbar or 0
+    return { relative = 'win', win = target, row = math.max(0, math.min(row, h - height - edges)), col = info.textoff + margin, width = width, height = height }
   end
 
   -- relative to the window itself: row 0 is its first text row (under the

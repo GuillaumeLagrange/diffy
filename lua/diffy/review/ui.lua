@@ -753,13 +753,20 @@ function M.toggle_resolved(session)
   vim.notify(('diffy: %d resolved thread%s %s'):format(n, n == 1 and '' or 's', review.hide_resolved and 'hidden' or 'shown'))
 end
 
---- Diff window and range (first, last line) where `thread` is drawn in the current view.
+--- Diff window and range (first, last line) where `thread` is drawn in the
+--- current view; unplaced, the window its float was opened from, never the
+--- float itself.
 local function thread_anchor(session, thread)
   local p = thread._place
   if p and session.wins[p.win] and vim.api.nvim_win_is_valid(session.wins[p.win]) then
     return session.wins[p.win], p.start_line, p.end_line
   end
-  return vim.api.nvim_get_current_win(), thread.anchor.start_line, thread.anchor.end_line
+  local open = session.review._open
+  local win = open and open.thread == thread and open.src
+  if not (win and vim.api.nvim_win_is_valid(win)) then
+    win = vim.api.nvim_get_current_win()
+  end
+  return win, thread.anchor.start_line, thread.anchor.end_line
 end
 
 -- ---------------------------------------------------------------------

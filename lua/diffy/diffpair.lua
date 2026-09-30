@@ -101,6 +101,8 @@ local function open_side(session, name, spec)
     is_real = false
   elseif spec.rev == 'WORKTREE' then
     buf = load_buf(session.root .. '/' .. spec.path)
+    -- `bufadd` leaves it unlisted; list it like `:edit` so tools treat it as a file buffer
+    vim.bo[buf].buflisted = true
     is_real = true
   else
     buf = load_buf(vim.fn.FugitiveFind(fugitive_object(spec.rev, spec.path), session.gitdir))

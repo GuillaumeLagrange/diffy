@@ -156,4 +156,16 @@ T['closing one of two session tabs leaves the other working'] = function()
   MiniTest.expect.equality(l.right.path, 'f.txt')
 end
 
+T['the worktree side is a listed buffer, like :edit would open'] = function()
+  vim.fn.writefile({ 'changed' }, repo.dir .. '/f.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  ui.open_tree_row(child, 'f.txt', 'o', 'open_row')
+  MiniTest.expect.equality(ui.layout(child).right.rev, 'worktree')
+  local right = ui.wins(child).right
+  -- sidekick's {this} only sends file + position for listed file buffers
+  MiniTest.expect.equality(child.lua_get(('vim.bo[vim.api.nvim_win_get_buf(%d)].buflisted'):format(right)), true)
+end
+
 return T

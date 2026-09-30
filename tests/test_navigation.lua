@@ -169,6 +169,42 @@ T['jumping to another listed file swaps both sides and highlights the tree'] = f
   child.cmd('Diffy close')
 end
 
+--- The right window's folds: `{ foldclosed(1), foldclosed(30) }`. b.txt only
+--- changes line 1, so lines 8-30 are one closed fold.
+local function right_folds()
+  return child.lua_get(
+    '{ vim.fn.win_execute(...,"echo foldclosed(1)"), vim.fn.win_execute(...,"echo foldclosed(30)") }',
+    { ui.wins(child).right }
+  )
+end
+
+T['a jump from the real file diffs the new pair alone, not against the hidden file'] = function()
+  open()
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  child.cmd('edit ' .. path('b.txt'))
+  expect_pair('b.txt')
+  eq(right_folds(), { '\n-1', '\n8' })
+  child.cmd('Diffy close')
+end
+
+T['a picker jump re-setting foldmethod keeps the diff folds'] = function()
+  open()
+  local right = ui.wins(child).right
+  child.api.nvim_set_current_win(right)
+  -- snacks' jump: `:buffer`, then a scheduled `foldmethod=expr` to "fix folds"
+  child.lua(
+    [[
+    vim.cmd('edit ' .. ...)
+    vim.schedule(function() vim.opt.foldmethod = 'expr' end)
+  ]],
+    { path('b.txt') }
+  )
+  expect_pair('b.txt')
+  eq(wo(right, 'foldmethod'), 'diff')
+  eq(right_folds(), { '\n-1', '\n8' })
+  child.cmd('Diffy close')
+end
+
 T['jumping outside the file list leaves diff mode with a placeholder, and <C-o> restores the pair'] = function()
   open()
   child.api.nvim_set_current_win(ui.wins(child).right)

@@ -193,13 +193,16 @@ end
 function M.show(session, left_spec, right_spec)
   -- Swap buffers with diff off: a window still in diff mode diffs the new
   -- buffer against the old pair mid-swap, and diff plugins' BufWinEnter
-  -- handlers (diffchar.vim) error on the half-updated state.
+  -- handlers (diffchar.vim) error on the half-updated state. `!` also drops
+  -- hidden buffers from the diff: a real file a jump swapped out while in
+  -- diff mode stays diffed, marking every line of the new pair as changed.
   for _, name in ipairs(SIDES) do
     local win = session.wins[name]
-    if valid_win(win) and vim.wo[win].diff then
+    if valid_win(win) then
       vim.api.nvim_win_call(win, function()
-        vim.cmd('diffoff')
+        vim.cmd('diffoff!')
       end)
+      break
     end
   end
   local ns = session.ns.one_sided

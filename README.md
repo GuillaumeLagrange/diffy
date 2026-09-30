@@ -188,7 +188,7 @@ the file has comments, and put your own back otherwise.
 |---|---|
 | `gc` | comment on the line (visual mode: on the range); `<C-s>` or `:w` saves, `q` cancels |
 | move onto a commented line | preview its leftmost thread, over the other diff window |
-| `K` / `<CR>` | enter the thread float |
+| `K` / `<CR>` | enter the thread float; `K` off a commented line is LSP hover (or `keywordprg`) as usual |
 | `]t` / `[t` | next / previous thread, by first line, larger range first, oldest first |
 | `<Tab>` / `<S-Tab>` | next / previous thread covering the cursor line, left to right, wrapping (also in the thread float) |
 | `<Esc>` | close the thread card; no preview on this line until the cursor leaves it |

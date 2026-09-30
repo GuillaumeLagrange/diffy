@@ -221,6 +221,29 @@ T['the thread float is centred over the other side, at most 100 wide, and refitt
   child.cmd('Diffy close')
 end
 
+T['K opens the thread on a commented line and falls through to the buffer\'s K elsewhere'] = function()
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'here')
+  child.cmd([[command! -nargs=1 KwProbe let g:kw = <q-args>]])
+  child.api.nvim_set_current_win(w.right)
+  child.bo.keywordprg = ':KwProbe'
+  child.fn.win_execute(w.right, 'call cursor(8, 1)')
+  child.type_keys('K')
+  MiniTest.expect.equality(child.g.kw, child.fn.expand('<cword>'))
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
+
+  child.g.kw = nil
+  child.fn.win_execute(w.right, 'call cursor(5, 1)')
+  arm_ready_raw('thread')
+  child.type_keys('K')
+  ui.wait_ready_raw(child)
+  MiniTest.expect.equality(ui.thread_float(child).focused, true)
+  MiniTest.expect.equality(child.g.kw, vim.NIL)
+  child.type_keys('q')
+  child.cmd('Diffy close')
+end
+
 T['hovering a commented line previews it over the other diff window with its bar at full weight'] = function()
   open_default()
   local w = ui.wins(child)

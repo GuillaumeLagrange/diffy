@@ -1977,8 +1977,15 @@ function M.setup_diff_keymaps(session, buf)
     M.compose(session, 'v')
   end, { buffer = buf, nowait = true, desc = 'review: new comment on range' })
   map(session, 'n', 'K', function()
-    M.open_thread(session)
-  end, { buffer = buf, desc = 'review: open thread' })
+    local win = vim.api.nvim_get_current_win()
+    if #M.threads_at(session, win, vim.api.nvim_win_get_cursor(win)[1]) > 0 then
+      return M.open_thread(session)
+    end
+    if #vim.lsp.get_clients({ bufnr = buf, method = 'textDocument/hover' }) > 0 then
+      return vim.lsp.buf.hover()
+    end
+    vim.cmd.normal({ (vim.v.count > 0 and vim.v.count or '') .. 'K', bang = true })
+  end, { buffer = buf, desc = 'review: open thread, else hover' })
   map(session, 'n', '<CR>', function()
     M.open_thread(session)
   end, { buffer = buf, desc = 'review: open thread' })

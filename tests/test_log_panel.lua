@@ -51,6 +51,19 @@ T[':Diffy branch lists the working tree and the branch commits, with only the me
   child.cmd('Diffy close')
 end
 
+T[']f/[f in the log move through the files instead of gf on the sha under the cursor'] = function()
+  open_branch()
+  local w = ui.wins(child)
+  child.api.nvim_set_current_win(w.log)
+  child.fn.win_execute(w.log, 'call cursor(3, 1)')
+  child.v.errmsg = ''
+  -- unmapped, ]f is nvim's gf on the short sha: E447
+  child.type_keys(']f', '[f')
+  MiniTest.expect.equality(child.v.errmsg, '')
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), w.log)
+  child.cmd('Diffy close')
+end
+
 T[']r from the commit before the merge lands on the commit after it, skipping it'] = function()
   open_branch()
   ui.select_log_row(child, 5)

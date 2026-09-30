@@ -319,6 +319,15 @@ local function paint(session)
       for _ = #vlines + 1, d.n do
         table.insert(vlines, { { '', 'Normal' } })
       end
+      -- the buffer may have changed since `M.decorate` (a worktree edit or
+      -- `:e`): hang the summaries where their extmark moved, within the buffer
+      if d.id then
+        local pos = vim.api.nvim_buf_get_extmark_by_id(d.buf, ns, d.id, {})
+        if pos[1] then
+          d.line = pos[1] + 1
+        end
+      end
+      d.line = math.min(d.line, vim.api.nvim_buf_line_count(d.buf))
       d.id = vim.api.nvim_buf_set_extmark(d.buf, ns, d.line - 1, 0, { id = d.id, virt_lines = vlines })
     end
   end

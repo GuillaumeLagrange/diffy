@@ -900,6 +900,21 @@ T["deleting an anchor's lines detaches it and lists it in :Diffy threads"] = fun
   child.cmd('Diffy close')
 end
 
+T["moving the cursor after the worktree buffer shrank under a summary doesn't error"] = function()
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 28, 'about line 28')
+
+  -- like `:e` reloading a shorter file: no render in between
+  child.api.nvim_buf_set_lines(child.api.nvim_win_get_buf(w.right), 10, -1, false, {})
+  child.v.errmsg = ''
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('gg', 'j')
+  MiniTest.expect.equality(child.v.errmsg, '')
+
+  child.cmd('Diffy close')
+end
+
 T[':Diffy completes subcommands, then what the session review and threads take'] = function()
   local function complete(line)
     return child.fn.getcompletion(line, 'cmdline')

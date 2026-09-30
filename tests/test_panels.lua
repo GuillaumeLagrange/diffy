@@ -81,6 +81,18 @@ T['the panel toggle hides the column (diff spans the width, ]f still works) and 
   child.cmd('Diffy close')
 end
 
+T['diff-window keys are mapped on the placeholders, before the first render'] = function()
+  repo = Repo.new():commit('Base', { ['a.txt'] = Repo.lines(5, 'a') })
+  child.fn.chdir(repo.dir)
+  child.lua([[_G.s = require('diffy.session').open({ root = vim.fn.getcwd() })]])
+  child.api.nvim_set_current_win(child.lua_get('_G.s.wins.left'))
+  child.v.errmsg = ''
+  -- unmapped, ]f is nvim's gf on the word "diffy": E447
+  child.type_keys(']f', '[f')
+  MiniTest.expect.equality(child.v.errmsg, '')
+  child.cmd('Diffy close')
+end
+
 T['<leader>E goes to the file tree from the diff, bringing the column back first when hidden'] = function()
   repo = Repo.new():commit('Base', { ['a.txt'] = Repo.lines(5, 'a') })
   vim.fn.writefile({ 'a1', 'changed' }, repo.dir .. '/a.txt')

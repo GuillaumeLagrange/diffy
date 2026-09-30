@@ -244,6 +244,10 @@ function M.open(opts)
   layout.buffer(session, 'log')
   require('diffy.highlight').setup()
   layout.open_column(session)
+  -- unmapped placeholders turn `]f` into nvim's `gf` on "diffy" (E447)
+  local diffpair = require('diffy.diffpair')
+  diffpair.set_nav_keymaps(session, left_buf)
+  diffpair.set_nav_keymaps(session, right_buf)
   vim.api.nvim_create_autocmd('VimResized', {
     group = session.augroup,
     callback = function()

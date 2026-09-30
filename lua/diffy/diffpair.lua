@@ -68,7 +68,8 @@ local function drop_real(session, name)
   end
 end
 
-local function set_nav_keymaps(session, buf)
+--- The diff windows' buffer-local keys (`]f`, `]r`, panel keys, review keys).
+function M.set_nav_keymaps(session, buf)
   local map = session_mod.map
   map(session, 'n', ']r', function()
     require('diffy.panels.log').move_selection(session, 1)
@@ -122,7 +123,7 @@ local function open_side(session, name, spec)
     session.real_bufs[name] = nil
   end
 
-  set_nav_keymaps(session, buf)
+  M.set_nav_keymaps(session, buf)
 
   vim.w[win].diffy_rev = spec and spec.rev or nil
   vim.w[win].diffy_path = spec and spec.path or nil
@@ -272,7 +273,7 @@ function M.leave(session)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, { OUTSIDE })
     session_mod.register_buffer(session, 'left', buf)
     -- the only diffy window left with keys: the right one's real file lost them
-    set_nav_keymaps(session, buf)
+    M.set_nav_keymaps(session, buf)
     vim.api.nvim_win_set_buf(left, buf)
     vim.w[left].diffy_rev = nil
     vim.w[left].diffy_path = nil

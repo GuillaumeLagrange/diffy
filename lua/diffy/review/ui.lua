@@ -601,6 +601,8 @@ function M.decorate(session)
       M.fit_gutter(w, nil)
     end
     review._draw = nil
+    -- the summaries' images sit on the terminal, not in the buffer
+    schedule_avatars(session)
     layout.refresh(session, 'threads')
     run.ready({ session = session.id, event = 'review' })
     return

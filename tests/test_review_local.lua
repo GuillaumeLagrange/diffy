@@ -625,6 +625,57 @@ T['resolved threads read ✓ inline, <leader>dr hides them and <leader>ds keeps 
   child.cmd('Diffy close')
 end
 
+T['<leader>dt off deletes the summary avatars from the terminal, on draws them again'] = function()
+  child.o.columns = 160
+  -- a kitty terminal: answers the graphics query, records what it's sent
+  child.lua([[
+    local png = vim.fn.tempname() .. '.png'
+    vim.fn.system({ 'magick', '-size', '4x4', 'xc:red', 'PNG32:' .. png })
+    local url = 'https://example.test/me.png'
+    local path = vim.fn.stdpath('cache') .. '/diffy/avatars/' .. vim.fn.sha256(url) .. '.png'
+    vim.fn.mkdir(vim.fs.dirname(path), 'p')
+    vim.uv.fs_copyfile(png, path)
+    require('diffy.review.local').avatar_url = function() return url end
+    vim.api.nvim_list_uis = function() return { { stdout_tty = true } } end
+    _G.sent = {}
+    vim.api.nvim_ui_send = function(data)
+      table.insert(_G.sent, data)
+      local id = data:match('^\27_Gi=(%d+),s=1,v=1,a=q')
+      if id then
+        vim.schedule(function()
+          vim.api.nvim_exec_autocmds('TermResponse', { data = { sequence = '\27_Gi=' .. id .. ';OK\27\\' } })
+        end)
+      end
+    end
+  ]])
+  -- placements the terminal holds: `a=p` adds one, `a=d,d=i` deletes it
+  local function shown(n)
+    return vim.wait(3000, function()
+      return child.lua_get([[(function()
+        local live = {}
+        for _, data in ipairs(_G.sent) do
+          for p in data:gmatch('a=p,i=%d+,p=(%d+)') do live[p] = true end
+          for p in data:gmatch('a=d,d=i,i=%d+,p=(%d+)') do live[p] = nil end
+        end
+        return vim.tbl_count(live)
+      end)()]]) == n
+    end, 20)
+  end
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'with a face')
+  -- off the commented line: no hover card whose closing redraws the images
+  child.type_keys('1G')
+  MiniTest.expect.equality(shown(1), true)
+
+  child.type_keys('\\dt')
+  MiniTest.expect.equality(shown(0), true)
+  child.type_keys('\\dt')
+  MiniTest.expect.equality(shown(1), true)
+
+  child.cmd('Diffy close')
+end
+
 T['overlapping comment ranges get side-by-side bars that keep their column and their colour'] = function()
   child.o.lines, child.o.columns = 40, 160
   open_default()

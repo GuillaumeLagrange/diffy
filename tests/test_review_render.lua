@@ -21,6 +21,19 @@ local function link_texts(res)
   return out
 end
 
+--- The marks that aren't the link underlines, and the text the link marks cover.
+local function split_marks(res)
+  local badges, links = {}, {}
+  for _, m in ipairs(res.marks) do
+    if m.hl == 'DiffyThreadLink' then
+      table.insert(links, res.lines[m.row + 1]:sub(m.col + 1, m.end_col))
+    else
+      table.insert(badges, m)
+    end
+  end
+  return badges, links
+end
+
 T["a greptile summary reads as a heading, one marked item per issue and a folded prompt, without URLs"] = function()
   local prompt = 'https://app.greptile.com/ide/claude-code?prompt=%23%23%23%20Issue%201%0Apackages'
   local res = body({
@@ -76,11 +89,13 @@ T["a greptile summary reads as a heading, one marked item per issue and a folded
     { '▶', 'https://github.com/o/r/pull/1#discussion_r2' },
     { '929c9d5', 'https://github.com/o/r/commit/929c9d5' },
   })
-  -- the score and the badge coloured by how bad they are
-  eq(res.marks, {
+  -- the score and the badge coloured by how bad they are; every link underlined
+  local badges, link_marks = split_marks(res)
+  eq(badges, {
     { row = 0, col = 21, end_col = 24, hl = 'DiagnosticOk' },
     { row = 6, col = 3, end_col = 7, hl = 'DiagnosticWarn' },
   })
+  eq(link_marks, { '[Retrigger]', '[Fix All in Claude Code]', '▶', '929c9d5' })
   eq(vim.tbl_map(function(im)
     return { im.row, res.lines[im.row + 1]:sub(im.col + 1, im.end_col) }
   end, res.images), { { 0, '[Retrigger]' }, { 4, '[Fix All in Claude Code]' }, { 6, '[P2]' } })
@@ -129,7 +144,23 @@ T['links show their text; bare URLs a short label; fragment-only links none'] = 
     { '↗', 'https://e.com/x' },
     { 'e.com', 'https://e.com' },
   })
-  eq(res.marks, { { row = 1, col = 0, end_col = 4, hl = 'DiagnosticError' } })
+  local badges, link_marks = split_marks(res)
+  eq(badges, { { row = 1, col = 0, end_col = 4, hl = 'DiagnosticError' } })
+  eq(link_marks, { 'the docs', 'github.com/…/12345', '↗', 'e.com' })
+end
+
+T['an HTML button written one tag per indented line is one linked marker, not a code block'] = function()
+  local res = body({
+    '<a href="https://app.codspeed.io/o/r?utm_content=button">',
+    '  <picture>',
+    '    <source media="(prefers-color-scheme: dark)" srcset="https://codspeed.io/open-dark.svg">',
+    '    <img alt="Open in CodSpeed" src="https://codspeed.io/open-light.svg" width="169" height="32">',
+    '  </picture>',
+    '</a>',
+  })
+  eq(res.lines, { '[Open in CodSpeed]' })
+  eq(link_texts(res), { { '[Open in CodSpeed]', 'https://app.codspeed.io/o/r?utm_content=button' } })
+  eq(#res.images, 1)
 end
 
 T['a non-SVG image is a marker opened by gx, not drawn'] = function()

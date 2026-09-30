@@ -213,13 +213,14 @@ and items, entities (`&nbsp;`, `&amp;`, …) and backslash escapes decoded (an e
 or emphasis stays). Code fences are shown as written. Tables are padded so their columns line up; long
 lines wrap at words. This is display only: bodies are stored and sent as written.
 
-- **Links** show their text only; a bare URL shows as its host (and last path part when short). The URLs
-  stay behind the line: `gx` in a card opens the link under the cursor, else the line's only link, else
-  asks which one. With the mouse, `<C-LeftMouse>` or a double click on a link (or a badge, or an image
-  marker) opens it, from any card, focused or not.
-- **`<details>`** blocks are folds titled `▸ <summary>`, closed unless the HTML says `open`: `za` (or any
-  fold key) in the thread float or the `gP` card opens them, as does `<C-LeftMouse>`/a double click on the
-  title.
+- **Links** show their text only, underlined (`DiffyThreadLink`); a bare URL shows as its host (and last
+  path part when short). The URLs stay behind the line: in a card, `<CR>` or `gx` opens the link under the
+  cursor (`gx` falls back to the line's only link, else asks which one). With the mouse, `<C-LeftMouse>` or
+  a double click on a link (or a badge, or an image marker) opens it, from any card, focused or not. HTML
+  buttons (an `<a>` around an image, like "Open in CodSpeed") are one linked marker.
+- **`<details>`** blocks are folds titled `▸ <summary>`, closed unless the HTML says `open`: `<CR>`, `za`
+  (or any fold key) in the thread float or the `gP` card opens them, as does `<C-LeftMouse>`/a double click
+  on the title.
 - **Images** show as `[alt]`, opened by `gx`. Badges (SVG images, e.g. greptile's `P1`/`P2`, `Retrigger`,
   `Fix in Codex`) are drawn over their marker when the terminal can draw avatars (below; ImageMagick needs
   an SVG delegate, librsvg or its own MSVG) and they fit it; otherwise `[P0]`/`[P1]` are red, `[P2]`
@@ -318,6 +319,7 @@ All set with `default = true`, so a colorscheme or your config can override any 
 | `DiffyThreadDraft` / `DiffyThreadPending` / `DiffyThreadSent` | `DiagnosticWarn` / `DiagnosticInfo` / `Comment` | comment states |
 | `DiffyThreadResolved` / `DiffyThreadOutdated` | `DiagnosticOk` / `DiagnosticWarn` | thread states |
 | `DiffyThreadCodeBar` / `DiffyThreadSuggestion` | `Comment` / `Added` | code block bar / suggestion bar and label |
+| `DiffyThreadLink` | `Underlined` | link text in cards |
 | `DiffyThreadKey` / `DiffyThreadHint` | `Special` / `Comment` | footer keys / their labels |
 
 ## Tests

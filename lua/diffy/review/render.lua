@@ -105,7 +105,7 @@ local function tokenize(s, tokens)
       break
     end
     local inner = s:sub(open_end + 1, close - 1)
-    local t = { url = attr(a, 'href'), inner = inner }
+    local t = { url = attr(a, 'href'), inner = vim.trim(inner) }
     local lone = tokens[tonumber(inner:match('^%s*' .. OPEN .. '(%d+)' .. CLOSE .. '%s*$') or 0)]
     if lone and lone.img and lone.right then
       lone.right, t.right = false, true
@@ -306,6 +306,15 @@ end
 ---   for suggestion fences, `row` being the line before the fence (-1: above the body)
 function M.body(body)
   local text = (body or ''):gsub('\r', ''):gsub('<!%-%-.-%-%->', '')
+  -- an HTML button (`<a>` around a `<picture>`/`<img>`, one tag per indented
+  -- line) is tokenized per line: fold it onto one, without the indent that
+  -- would make it a code block
+  text = text:gsub('<a%s[^>]*>%s*<picture.-</picture>%s*</a>', function(m)
+    return (m:gsub('%s*\n%s*', ' '))
+  end)
+  text = text:gsub('<picture[^>]*>.-</picture>', function(m)
+    return (m:gsub('%s*\n%s*', ' '))
+  end)
   local src = split_blocks(vim.split(text, '\n', { plain = true }))
   local out = {} -- rendered line objects
   local res = { links = {}, marks = {}, images = {}, folds = {}, code = {}, labels = {} }
@@ -438,6 +447,9 @@ function M.body(body)
     res.lines[r] = line.text
     if #line.links > 0 then
       res.links[r - 1] = line.links
+      for _, l in ipairs(line.links) do
+        table.insert(res.marks, { row = r - 1, col = l.col, end_col = l.end_col, hl = 'DiffyThreadLink' })
+      end
     end
     for _, m in ipairs(line.marks) do
       table.insert(res.marks, { row = r - 1, col = m.col, end_col = m.end_col, hl = m.hl })
@@ -653,9 +665,19 @@ function M.attach(session, win, buf)
     end
   end)
   wo.foldenable = true
-  require('diffy.session').map(session, 'n', 'gx', function()
+  local map = require('diffy.session').map
+  map(session, 'n', 'gx', function()
     open_link(win, buf)
   end, { buffer = buf, desc = 'open link' })
+  -- like a click: the link under the cursor, else the fold title's fold
+  map(session, 'n', '<CR>', function()
+    local cur = vim.api.nvim_win_get_cursor(0)
+    if link_at(buf, cur[1], cur[2]) then
+      open_link(win, buf)
+    elseif vim.fn.foldlevel(cur[1]) > 0 then
+      vim.cmd('normal! za')
+    end
+  end, { buffer = buf, desc = 'open the link or fold under the cursor' })
   M.map_click(session, buf)
 end
 

@@ -30,6 +30,7 @@ local LINKS = {
   DiffyThreadOutdated = 'DiagnosticWarn',
   DiffyThreadCodeBar = 'Comment',
   DiffyThreadSuggestion = 'Added',
+  DiffyThreadLink = 'Underlined',
   DiffyThreadAuthor1 = 'Identifier',
   DiffyThreadAuthor2 = 'DiagnosticHint',
   DiffyThreadAuthor3 = 'Constant',

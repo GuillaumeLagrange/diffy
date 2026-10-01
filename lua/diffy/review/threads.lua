@@ -304,7 +304,7 @@ local function render(session)
               path = e.thread.anchor.path
               table.insert(chunk_lines, {
                 { '  ' },
-                { highlight.truncate_left(path, width - 2), path == session.current_path and { 'DiffyDirectory', 'DiffyCurrentFileName' } or 'DiffyDirectory' },
+                { highlight.truncate_path(path, width - 2), path == session.current_path and { 'DiffyDirectory', 'DiffyCurrentFileName' } or 'DiffyDirectory' },
               })
               rows[#chunk_lines] = { kind = 'file', path = path, entry = e, group = g.key }
             end

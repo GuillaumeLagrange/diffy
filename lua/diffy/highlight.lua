@@ -140,8 +140,7 @@ function M.truncate(s, width)
   return table.concat(out) .. '…'
 end
 
---- Like `truncate`, but keeps the end of `s` ('…' first): for paths,
---- whose file name is the part worth seeing.
+--- Like `truncate`, but keeps the end of `s` ('…' first).
 function M.truncate_left(s, width)
   if vim.fn.strdisplaywidth(s) <= width then
     return s
@@ -160,6 +159,20 @@ function M.truncate_left(s, width)
     w = w + cw
   end
   return '…' .. table.concat(out)
+end
+
+--- Fit a path to `width` cells keeping the start of its last component:
+--- the leading directories are cut first ('…' first), then the end of
+--- the name itself ('…' last).
+function M.truncate_path(s, width)
+  if vim.fn.strdisplaywidth(s) <= width then
+    return s
+  end
+  local name = s:match('[^/]*$')
+  if vim.fn.strdisplaywidth(name) + 1 > width then
+    return M.truncate(name, width)
+  end
+  return M.truncate_left(s, width)
 end
 
 --- Usable text width of `win` (window width minus number/sign columns).

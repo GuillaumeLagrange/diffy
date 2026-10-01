@@ -114,10 +114,38 @@ T['<leader>e hides the column leaving the cursor in the diff, and shows it again
   child.cmd('Diffy close')
 end
 
-T['a long path under nested dirs renders as one row fitting the panel, status and counts visible'] = function()
-  local long = 'nvim/diffy/lua/diffy/a_rather_long_directory_name/init_with_an_extremely_long_file_name.lua'
-  repo = Repo.new():commit('Base', { [long] = Repo.lines(5), ['nvim/diffy/lua/diffy/other.lua'] = Repo.lines(5) })
+--- The text of every float in the current tab other than the diffy windows
+--- shown before (`except`), `{ { text = …, row = …, col = … } }`.
+local function floats(except)
+  return child.lua(
+    [[
+    local out = {}
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local cfg = vim.api.nvim_win_get_config(w)
+      if cfg.relative ~= '' and not vim.tbl_contains(..., w) then
+        local pos = vim.api.nvim_win_get_position(w)
+        table.insert(out, {
+          text = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, -1, false)[1],
+          row = pos[1], col = pos[2],
+        })
+      end
+    end
+    return out
+  ]],
+    { except or {} }
+  )
+end
+
+T['a long path under nested dirs renders as one row fitting the panel, the start of the file name visible'] = function()
+  local dir = 'nvim/diffy/lua/diffy/a_rather_long_directory_name/with_more/nested_levels/'
+  local long = dir .. 'init_with_an_extremely_long_file_name.lua'
+  repo = Repo.new():commit('Base', {
+    [long] = Repo.lines(5),
+    [dir .. 'short.lua'] = Repo.lines(5),
+    ['nvim/diffy/lua/diffy/other.lua'] = Repo.lines(5),
+  })
   vim.fn.writefile({ '1', 'changed', '3', '4', '5' }, repo.dir .. '/' .. long)
+  vim.fn.writefile({ '1', 'changed', '3', '4', '5' }, repo.dir .. '/' .. dir .. 'short.lua')
   vim.fn.writefile({ '1', '2', 'changed', '4', '5' }, repo.dir .. '/nvim/diffy/lua/diffy/other.lua')
   child.fn.chdir(repo.dir)
 
@@ -127,20 +155,76 @@ T['a long path under nested dirs renders as one row fitting the panel, status an
   local width = child.api.nvim_win_get_width(ui.wins(child).tree)
   local lines = ui.layout(child).tree
 
-  -- the section header, the dir header, the long file (relative to its own
-  -- chain), the sibling, the empty Staged section
-  MiniTest.expect.equality(#lines, 5)
+  -- the section header, the root dir chain, the long dir chain, its two
+  -- files, the sibling, the empty Staged section
+  MiniTest.expect.equality(#lines, 7)
   MiniTest.expect.equality(lines[2], '  nvim/diffy/lua/diffy/')
-  local row = lines[3]
-  -- truncated from the left with '…', keeping the file name, status and counts
-  MiniTest.expect.equality(row:match('^    M \226\128\166') ~= nil, true)
-  MiniTest.expect.equality(row:match('long_file_name%.lua +%+1 %-1$') ~= nil, true)
-  MiniTest.expect.equality(row:find('a_rather', 1, true), nil)
-  MiniTest.expect.equality(lines[4]:match('^    M other%.lua +%+1 %-1$') ~= nil, true)
+  -- a dir chain too long keeps its last dir whole, cutting what leads to it
+  MiniTest.expect.equality(lines[3]:match('^    \226\128\166[%w_/]*/nested_levels/$') ~= nil, true)
+  -- a file name too long keeps its start, cut at the end
+  MiniTest.expect.equality(lines[4]:match('^      M init_with_an_[%w_]*\226\128\166 +%+1 %-1$') ~= nil, true)
+  MiniTest.expect.equality(lines[5]:match('^      M short%.lua +%+1 %-1$') ~= nil, true)
+  MiniTest.expect.equality(lines[6]:match('^    M other%.lua +%+1 %-1$') ~= nil, true)
   for _, l in ipairs(lines) do
     MiniTest.expect.equality(child.fn.strdisplaywidth(l) <= width, true)
   end
+  child.cmd('Diffy close')
+end
 
+T['resting the tree cursor on a cut row shows it whole over the row, gone on an uncut row or out of the tree'] = function()
+  local long = 'src/a_rather_long_directory_name/init_with_an_extremely_long_file_name.lua'
+  repo = Repo.new():commit('Base', { [long] = Repo.lines(5), ['src/short.lua'] = Repo.lines(5) })
+  vim.fn.writefile({ '1', 'changed', '3', '4', '5' }, repo.dir .. '/' .. long)
+  vim.fn.writefile({ '1', 'changed', '3', '4', '5' }, repo.dir .. '/src/short.lua')
+  child.fn.chdir(repo.dir)
+
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  local w = ui.wins(child)
+  local before = child.api.nvim_tabpage_list_wins(0)
+  local lines = ui.layout(child).tree
+  local lnum
+  for i, l in ipairs(lines) do
+    if l:find('init_with', 1, true) then
+      lnum = i
+    end
+  end
+  MiniTest.expect.equality(lines[lnum]:find('file_name.lua', 1, true), nil)
+
+  child.api.nvim_set_current_win(w.tree)
+  child.fn.win_execute(w.tree, 'call cursor(1, 1)')
+  child.type_keys(('%dG'):format(lnum))
+  local shown = floats(before)
+  MiniTest.expect.equality(#shown, 1)
+  MiniTest.expect.equality(shown[1].text, '    M a_rather_long_directory_name/init_with_an_extremely_long_file_name.lua +1 -1')
+  local tree_pos = child.api.nvim_win_get_position(w.tree)
+  MiniTest.expect.equality({ shown[1].row, shown[1].col }, { tree_pos[1] + lnum - 1, tree_pos[2] })
+
+  -- the uncut sibling row: nothing over it
+  child.type_keys('j')
+  MiniTest.expect.equality(child.api.nvim_get_current_line():find('short.lua', 1, true) ~= nil, true)
+  MiniTest.expect.equality(floats(before), {})
+
+  -- back on the cut row, then out of the tree
+  child.type_keys('k')
+  MiniTest.expect.equality(#floats(before), 1)
+  child.type_keys('<C-w>l')
+  child.lua(
+    [[
+    local before = ...
+    vim.wait(1000, function()
+      for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        if not vim.tbl_contains(before, w) then
+          return false
+        end
+      end
+      return true
+    end, 10)
+  ]],
+    { before }
+  )
+  MiniTest.expect.equality(floats(before), {})
   child.cmd('Diffy close')
 end
 

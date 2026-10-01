@@ -98,7 +98,9 @@ then the message wrapped to fit. It closes on a non-commit row, when you leave t
 | `<Esc>` | close the commit message float; with none shown, whatever `<Esc>` is mapped to outside diffy |
 
 **Files** (top): status letter, path relative to its folder, `+added -removed`. The file shown in the diff
-is highlighted.
+is highlighted. A path too long for the panel loses its leading folders first (`…ers/name.lua`), then the end
+of the name itself (`a_long_na…`); with the cursor on a cut row, the whole row is drawn over it, past the
+panel's edge.
 
 With `Working tree` selected alone, the files come in two sections, `Unstaged (n)` (index → worktree, plus
 untracked files) then `Staged (n)` (HEAD → index). A file with both kinds of changes is listed in each, and

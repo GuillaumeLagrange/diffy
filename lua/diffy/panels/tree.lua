@@ -228,17 +228,20 @@ local function dirname(path)
   return path:match('^(.*)/[^/]*$') or ''
 end
 
---- One display row fitted to `width` cells: `text` plus highlight
---- spans `{start_col, end_col, group}` (byte columns).
+--- One display row fitted to `width` cells (untruncated without one):
+--- `text`, highlight spans `{start_col, end_col, group}` (byte columns),
+--- for a file the byte range of its name, and whether fitting cut anything.
 local function row_line(row, width)
   local indent = ('  '):rep(row.depth)
   if row.kind == 'dir' then
-    local text = hl.truncate(indent .. row.name .. '/', width)
-    return text, { { #indent, #text, 'DiffyDirectory' } }
+    local name = width and hl.truncate_path(row.name, math.max(1, width - #indent - 1)) or row.name
+    local text = indent .. name .. '/'
+    return text, { { #indent, #text, 'DiffyDirectory' } }, nil, name ~= row.name
   end
   if row.kind == 'section' then
-    local text = hl.truncate(('%s (%d)'):format(row.label, row.count), width)
-    return text, { { 0, #text, 'DiffyLabel' } }
+    local full = ('%s (%d)'):format(row.label, row.count)
+    local text = width and hl.truncate(full, width) or full
+    return text, { { 0, #text, 'DiffyLabel' } }, nil, text ~= full
   end
   local e = row.entry
   local counts = ''
@@ -246,22 +249,29 @@ local function row_line(row, width)
     counts = ('+%d -%d'):format(e.added or 0, e.removed or 0)
   end
   local head = indent .. e.status .. ' '
-  local avail = width - vim.fn.strdisplaywidth(head) - (counts ~= '' and (#counts + 1) or 0)
+  local avail = width and (width - vim.fn.strdisplaywidth(head) - (counts ~= '' and (#counts + 1) or 0)) or math.huge
   local new_rel = relative(e.path, row.base)
   local name = new_rel
+  local moved = false
   if (e.status == 'R' or e.status == 'C') and e.old_path then
     if dirname(e.old_path) == dirname(e.path) then
       local dir = relative(dirname(e.path), row.base)
       dir = (dir == '' or dir == row.base) and '' or (dir .. '/')
       name = dir .. basename(e.old_path) .. ' → ' .. basename(e.path)
     else
-      local full = relative(e.old_path, row.base) .. ' → ' .. new_rel
-      name = vim.fn.strdisplaywidth(full) <= avail and full or new_rel
+      name, moved = relative(e.old_path, row.base) .. ' → ' .. new_rel, true
     end
   end
-  name = hl.truncate_left(name, math.max(1, avail))
+  local full_name = name
+  if width then
+    -- a move that doesn't fit shows its new path only
+    if moved and vim.fn.strdisplaywidth(name) > avail then
+      name = new_rel
+    end
+    name = hl.truncate_path(name, math.max(1, avail))
+  end
   local left = head .. name
-  local pad = math.max(1, width - vim.fn.strdisplaywidth(left) - #counts)
+  local pad = width and math.max(1, width - vim.fn.strdisplaywidth(left) - #counts) or 1
   local text = counts ~= '' and (left .. (' '):rep(pad) .. counts) or left
   local spans = { { #indent, #indent + #e.status, hl.STATUS[e.status] or 'DiffyChanged' } }
   if counts ~= '' then
@@ -269,8 +279,7 @@ local function row_line(row, width)
     table.insert(spans, { #text - #counts, plus_end, 'DiffyAdded' })
     table.insert(spans, { plus_end + 1, #text, 'DiffyRemoved' })
   end
-  row.name_col = { #head, #left }
-  return text, spans
+  return text, spans, { #head, #left }, name ~= full_name
 end
 
 --- Per-file real-file/dirty context built from `session.status_entries`.
@@ -561,6 +570,67 @@ local function tree_width(session)
   return hl.panel_width(session.wins.tree, session.tree_width)
 end
 
+--- The untruncated text of the tree cursor's row when the panel cuts it: a
+--- one-line float laid over the row while the tree window is current.
+local function hover(session)
+  local session_mod = require('diffy.session')
+  local win = session.wins.tree
+  local row, lnum
+  if win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_get_current_win() == win then
+    lnum = vim.api.nvim_win_get_cursor(win)[1]
+    row = (session.tree_rows or {})[lnum]
+  end
+  local full = row and row.full
+  local pos = full and vim.fn.screenpos(win, lnum, 1)
+  local fwin = session.wins.tree_hover
+  if not (pos and pos.row > 0) then
+    session_mod.unregister_window(session, 'tree_hover')
+    session.bufs.tree_hover = nil
+    if fwin and vim.api.nvim_win_is_valid(fwin) then
+      pcall(vim.api.nvim_win_close, fwin, true)
+    end
+    return
+  end
+  local cfg = {
+    relative = 'editor',
+    row = pos.row - 1,
+    col = pos.col - 1,
+    width = math.max(1, math.min(vim.fn.strdisplaywidth(full.text), vim.o.columns - pos.col + 1)),
+    height = 1,
+    style = 'minimal',
+    focusable = false,
+    zindex = 60,
+  }
+  local hbuf = session.bufs.tree_hover
+  if not (fwin and vim.api.nvim_win_is_valid(fwin) and hbuf and vim.api.nvim_buf_is_valid(hbuf)) then
+    hbuf = session_mod.scratch_buf(session, 'tree_hover')
+    session_mod.register_buffer(session, 'tree_hover', hbuf)
+    fwin = vim.api.nvim_open_win(hbuf, false, cfg)
+    session_mod.register_window(session, 'tree_hover', fwin, { transient = true })
+    session_mod.unbind(fwin)
+    vim.wo[fwin].diff = false
+    vim.wo[fwin].wrap = false
+    -- it covers the cursor row
+    vim.wo[fwin].winhighlight = 'NormalFloat:CursorLine'
+  else
+    vim.api.nvim_win_set_config(fwin, cfg)
+  end
+  vim.bo[hbuf].modifiable = true
+  vim.api.nvim_buf_set_lines(hbuf, 0, -1, false, { full.text })
+  vim.bo[hbuf].modifiable = false
+  local ns = session_mod.namespace(session, 'tree_hover')
+  vim.api.nvim_buf_clear_namespace(hbuf, ns, 0, -1)
+  local spans = vim.list_extend({}, full.spans)
+  if is_current(session, row) and full.name_col then
+    table.insert(spans, { full.name_col[1], full.name_col[2], 'DiffyCurrentFileName' })
+  end
+  for _, sp in ipairs(spans) do
+    if sp[2] > sp[1] then
+      vim.api.nvim_buf_set_extmark(hbuf, ns, 0, sp[1], { end_col = sp[2], hl_group = sp[3] })
+    end
+  end
+end
+
 --- Re-render the current rows fitted to the tree window's width (no git).
 function M.redraw(session)
   local buf = session.bufs.tree
@@ -568,8 +638,13 @@ function M.redraw(session)
   session.tree_width = width
   local lines, all_spans = {}, {}
   for i, row in ipairs(session.tree_rows) do
-    local text, spans = row_line(row, width)
-    lines[i], all_spans[i] = text, spans
+    local text, spans, name_col, cut = row_line(row, width)
+    lines[i], all_spans[i], row.name_col = text, spans, name_col
+    row.full = nil
+    if cut then
+      local ftext, fspans, fname_col = row_line(row)
+      row.full = { text = ftext, spans = fspans, name_col = fname_col }
+    end
   end
   if #lines == 0 then
     lines = { '(no changes)' }
@@ -594,6 +669,7 @@ function M.redraw(session)
     vim.wo[win].foldlevel = 99
   end
   M.mark_current(session)
+  hover(session)
 end
 
 local function file_rows(session)
@@ -814,6 +890,33 @@ function M.setup(session)
       local win = session.wins.tree
       if session.tree_rows and win and vim.api.nvim_win_is_valid(win) and tree_width(session) ~= session.tree_width then
         M.redraw(session)
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd({ 'CursorMoved', 'WinEnter' }, {
+    group = session.augroup,
+    buffer = buf,
+    callback = function()
+      hover(session)
+    end,
+  })
+  vim.api.nvim_create_autocmd({ 'WinLeave', 'BufLeave' }, {
+    group = session.augroup,
+    buffer = buf,
+    callback = function()
+      -- the tree window is still current here
+      vim.schedule(function()
+        if not session.closed then
+          hover(session)
+        end
+      end)
+    end,
+  })
+  vim.api.nvim_create_autocmd({ 'WinScrolled', 'WinResized', 'VimResized' }, {
+    group = session.augroup,
+    callback = function()
+      if session.wins.tree_hover then
+        hover(session)
       end
     end,
   })

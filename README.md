@@ -198,7 +198,7 @@ the file has comments, and put your own back otherwise.
 | `<leader>ds` | hide / show the summaries, keeping the bars (hover still previews) |
 | `<leader>dr` | hide / show resolved threads |
 | `<leader>dt` | hide / show comments inline altogether |
-| `<leader>dC` | the threads view: every thread, the file in the diff first (`:Diffy threads`) |
+| `<leader>dc` | the threads view: every thread, the file in the diff first (`:Diffy threads`) |
 | `gP` | PR description and conversation (`:Diffy pr`) |
 
 Threads open as a framed card over the other diff window; on an added or deleted file, where there is only

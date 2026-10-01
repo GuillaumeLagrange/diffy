@@ -1,4 +1,4 @@
--- `:Diffy threads` (`<leader>dC`): every thread of the review, grouped by
+-- `:Diffy threads` (`<leader>dc`): every thread of the review, grouped by
 -- where it stands (`GROUPS`), then by file, the file in the diff first. A
 -- layout.lua view: in a float over the diff with the thread under the
 -- cursor previewed beside it, or compact in the column when

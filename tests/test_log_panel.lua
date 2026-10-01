@@ -51,6 +51,23 @@ T[':Diffy branch lists the working tree and the branch commits, with only the me
   child.cmd('Diffy close')
 end
 
+T[':Diffy branch selects the working tree with the commits, so the right side has uncommitted changes'] = function()
+  local f = vim.fn.readfile(repo.dir .. '/f.txt')
+  f[2] = 'staged edit'
+  vim.fn.writefile(f, repo.dir .. '/f.txt')
+  ui.git(repo.dir, { 'add', 'f.txt' })
+  f[3] = 'unstaged edit'
+  vim.fn.writefile(f, repo.dir .. '/f.txt')
+  open_branch()
+
+  MiniTest.expect.equality(selected(), all_entries)
+  ui.open_tree_row(child, 'f.txt', '<CR>', 'open_row')
+  local right = ui.layout(child).right
+  MiniTest.expect.equality({ right.text[2], right.text[3] }, { 'staged edit', 'unstaged edit' })
+
+  child.cmd('Diffy close')
+end
+
 T[']f/[f in the log move through the files instead of gf on the sha under the cursor'] = function()
   open_branch()
   local w = ui.wins(child)

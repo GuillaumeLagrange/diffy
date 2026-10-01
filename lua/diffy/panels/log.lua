@@ -176,8 +176,8 @@ function M.build_entries(root, spec, cb, session)
 end
 
 --- Default selection for `spec` over `entries`: the working tree
---- alone for `:Diffy`, all commits (excluding the working tree) for
---- `:Diffy branch`, everything for an explicit range.
+--- alone for `:Diffy`, everything (working tree included) for
+--- `:Diffy branch` and an explicit range.
 function M.default_selection(entries, spec)
   if #entries == 0 then
     return nil
@@ -192,17 +192,10 @@ function M.default_selection(entries, spec)
     end
     return { top = top, bottom = top }
   end
-  local first_commit = 1
-  if spec.kind == 'branch' and #entries > 1 then
-    first_commit = 2 -- past the working tree, unless the branch has no commits
-  end
   local top = selection.first_selectable(entries)
   local bottom = selection.last_selectable(entries)
   if not top or not bottom then
-    return { top = first_commit, bottom = #entries }
-  end
-  if top < first_commit then
-    top = first_commit
+    return { top = 1, bottom = #entries }
   end
   return { top = top, bottom = bottom }
 end

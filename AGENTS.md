@@ -32,7 +32,8 @@ lua/diffy/
   panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), selection keys
   panels/commitmsg.lua  full commit message float beside the column while the log cursor rests on a commit
   panels/tree.lua       files view: tree rows (Unstaged/Staged sections for the working tree), staging keys, file navigation
-  diffpair.lua          the two diff windows: buffers, diff mode, winbars, b:diffy_title, shared keys
+  diffpair.lua          the two diff windows: buffers, diff mode, winbars, b:diffy_title, shared keys,
+                        edits (redecorate on change, rebuild on write)
   navigation.lua        BufWinEnter on the diff windows, reacted to on the next tick: swap the pair when you
                         jump to another file; a left-window jump is moved to the right window
   checkout.lua          X checkout mode (the selected commit stays checked out as you move), checkout.json, restore

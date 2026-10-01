@@ -289,4 +289,39 @@ function M.leave(session)
   require('diffy.panels.tree').mark_current(session)
 end
 
+--- Follow edits to the files the pair shows: the review decorations move
+--- with the text as it changes, and a write rebuilds like `R` (the tree's
+--- counts and sections). The conflict view manages its own windows.
+function M.track_edits(session)
+  local function shown(buf)
+    if session.conflict_active then
+      return false
+    end
+    for _, name in ipairs(SIDES) do
+      local win = session.wins[name]
+      if valid_win(win) and vim.w[win].diffy_path and vim.api.nvim_win_get_buf(win) == buf then
+        return true
+      end
+    end
+    return false
+  end
+  -- TextChanged doesn't fire for what insert mode typed
+  vim.api.nvim_create_autocmd({ 'TextChanged', 'InsertLeave' }, {
+    group = session.augroup,
+    callback = function(args)
+      if shown(args.buf) then
+        require('diffy.review.ui').decorate(session)
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd('BufWritePost', {
+    group = session.augroup,
+    callback = function(args)
+      if shown(args.buf) and session.refresh then
+        session.refresh(session)
+      end
+    end,
+  })
+end
+
 return M

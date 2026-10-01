@@ -280,6 +280,7 @@ function M.build(s)
           log_panel.setup(s)
           tree_panel.setup(s)
           require('diffy.navigation').setup(s)
+          require('diffy.diffpair').track_edits(s)
           s.setup_done = true
         end
         local function finish()

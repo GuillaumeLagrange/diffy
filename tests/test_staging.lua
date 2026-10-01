@@ -195,6 +195,39 @@ T['an unstaged-section file shows index/worktree, and writing the left buffer st
   child.cmd('Diffy close')
 end
 
+T['writing either diff side refreshes the tree: the worktree file its counts, the index its Staged row'] = function()
+  repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(20) })
+  local edited = Repo.lines(20)
+  edited[5] = 'edited5'
+  vim.fn.writefile(edited, repo.dir .. '/f.txt')
+  child.fn.chdir(repo.dir)
+
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(line_in('Unstaged', '+1 -1') ~= nil, true)
+
+  local w = ui.wins(child)
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('15G', 'o', 'typed', '<Esc>')
+  ui.arm_ready(child, 'render')
+  child.cmd('write')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(line_in('Unstaged', '+2 -1') ~= nil, true)
+  MiniTest.expect.equality(line_in('Staged', 'f.txt'), nil)
+
+  child.api.nvim_set_current_win(w.left)
+  child.fn.win_execute(w.left, 'call cursor(5, 1)')
+  child.type_keys('do')
+  ui.arm_ready(child, 'render')
+  child.cmd('write')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(line_in('Staged', '+1 -1') ~= nil, true)
+  MiniTest.expect.equality(line_in('Unstaged', '+1 -0') ~= nil, true)
+
+  child.cmd('Diffy close')
+end
+
 T['`-` moves a file to the other section and the cursor follows it'] = function()
   repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(5), ['g.txt'] = Repo.lines(5) })
   vim.fn.writefile({ 'changed' }, repo.dir .. '/g.txt')

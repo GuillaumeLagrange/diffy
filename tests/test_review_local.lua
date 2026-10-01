@@ -963,6 +963,25 @@ T['editing lines above an anchor moves it with its excerpt'] = function()
   child.cmd('Diffy close')
 end
 
+T["typing a line above a thread moves its bar along with its summary, the other side's padding following"] = function()
+  child.o.lines = 50
+  child.o.columns = 160
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 20, 'about line 20')
+
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('10G', 'o', 'typed', '<Esc>')
+
+  MiniTest.expect.equality(vim.tbl_map(function(v) return v.line end, ui.threads_visible(child, 'right')), { 21 })
+  local bars = ui.thread_bars(child, 'right')
+  MiniTest.expect.equality({ bars['20'], bars['21'] ~= nil, bars['21+1'] ~= nil }, { nil, true, true })
+  child.fn.win_execute(w.right, 'call cursor(25, 1)')
+  MiniTest.expect.equality(ui.aligned(child), true)
+
+  child.cmd('Diffy close')
+end
+
 T["deleting an anchor's lines detaches it and lists it in :Diffy threads"] = function()
   open_default()
   local w = ui.wins(child)

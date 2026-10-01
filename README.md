@@ -126,7 +126,9 @@ can also stage hunk by hunk: for an Unstaged file the left side is the index, so
 ## The diff
 
 The right side is the real file (LSP, editable) when it shows the worktree, or HEAD for a file with no
-uncommitted changes. Otherwise both sides are read-only fugitive blobs. An added or deleted file takes the
+uncommitted changes. Otherwise both sides are read-only fugitive blobs. Comment bars and summaries follow
+your edits as you make them; `:w` on either side refreshes like `R`, so the tree's counts and sections stay
+current. An added or deleted file takes the
 whole diff area on its own, coloured as added or deleted. Jumping to another file from the right side
 (go-to-definition, `gf`, `:e`, a picker) loads that file's pair if it's part of the diff; otherwise diff mode turns
 off until you come back (`<C-o>`, `<C-t>` or the tree). A jump from the left side opens in the right

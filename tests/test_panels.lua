@@ -93,6 +93,30 @@ T['diff-window keys are mapped on the placeholders, before the first render'] = 
   child.cmd('Diffy close')
 end
 
+T['a count on ]f/[f moves that many files, stopping at the first/last'] = function()
+  repo = Repo.new():commit('Base', { ['a.txt'] = Repo.lines(5, 'a'), ['b.txt'] = Repo.lines(5, 'b'), ['c.txt'] = Repo.lines(5, 'c') })
+  for _, f in ipairs({ 'a', 'b', 'c' }) do
+    vim.fn.writefile({ f .. '1', 'changed' }, repo.dir .. '/' .. f .. '.txt')
+  end
+  child.fn.chdir(repo.dir)
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  MiniTest.expect.equality(ui.layout(child).right.path, 'a.txt')
+
+  ui.arm_ready(child, 'open_row')
+  child.type_keys('2]f')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(ui.layout(child).right.path, 'c.txt')
+
+  ui.arm_ready(child, 'open_row')
+  child.type_keys('5[f')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(ui.layout(child).right.path, 'a.txt')
+  child.cmd('Diffy close')
+end
+
 T['<leader>e hides the column leaving the cursor in the diff, and shows it again with the cursor in the file tree'] = function()
   repo = Repo.new():commit('Base', { ['a.txt'] = Repo.lines(5, 'a') })
   vim.fn.writefile({ 'a1', 'changed' }, repo.dir .. '/a.txt')

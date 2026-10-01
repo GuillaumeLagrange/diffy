@@ -619,6 +619,11 @@ T['threads stacked on a line are drawn oldest first; the hover opens the leftmos
   MiniTest.expect.equality(shown(), 'third')
   child.type_keys('[t', '[t')
   MiniTest.expect.equality(shown(), 'first')
+  -- a count steps that many threads, stopping at the last/first
+  child.type_keys('2]t')
+  MiniTest.expect.equality(shown(), 'third')
+  child.type_keys('5[t')
+  MiniTest.expect.equality(shown(), 'first')
 
   child.cmd('Diffy close')
 end

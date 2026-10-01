@@ -317,22 +317,31 @@ function M.select(session, top, bottom, done)
 end
 
 --- `J`/`K` (also `]r`/`[r` from the diff windows): collapse the current
---- selection to a single entry and move it to the next/previous non-merge
---- entry (`delta = 1` moves toward older commits, `-1` toward newer).
+--- selection to a single entry and move it `delta` non-merge entries
+--- (positive toward older commits, negative toward newer), stopping at the
+--- first/last one.
 function M.move_selection(session, delta)
   local sel = session.sel
   if not sel then
     return
   end
-  local idx = delta > 0 and sel.bottom or sel.top
-  local i = idx + delta
-  while i >= 1 and i <= #session.entries and is_merge(session.entries[i]) do
-    i = i + delta
+  local step = delta > 0 and 1 or -1
+  local target
+  local i = delta > 0 and sel.bottom or sel.top
+  for _ = 1, math.abs(delta) do
+    i = i + step
+    while i >= 1 and i <= #session.entries and is_merge(session.entries[i]) do
+      i = i + step
+    end
+    if i < 1 or i > #session.entries then
+      break
+    end
+    target = i
   end
-  if i < 1 or i > #session.entries then
+  if not target then
     return
   end
-  session.sel = { top = i, bottom = i }
+  session.sel = { top = target, bottom = target }
   session.on_select(session)
 end
 
@@ -369,10 +378,10 @@ function M.setup(session)
     require('diffy.checkout').toggle(session)
   end, { buffer = buf, desc = 'toggle checkout mode' })
   map(session, 'n', ']f', function()
-    require('diffy.panels.tree').move_file(session, 1)
+    require('diffy.panels.tree').move_file(session, vim.v.count1)
   end, { buffer = buf, desc = 'next file' })
   map(session, 'n', '[f', function()
-    require('diffy.panels.tree').move_file(session, -1)
+    require('diffy.panels.tree').move_file(session, -vim.v.count1)
   end, { buffer = buf, desc = 'previous file' })
   require('diffy.layout').map_panel_keys(session, buf)
   require('diffy.panels.commitmsg').setup(session)

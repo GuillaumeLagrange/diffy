@@ -147,6 +147,9 @@ session.
 | `R` | refresh everything: git state, panels, window sizes |
 | `<leader>e` | hide the panel column, the cursor staying where it is; or show it and go to the file tree |
 
+The `]`/`[` keys (`]f`, `]r`, `]t`, `]x`, here and in the panels) take a count: `3]f` moves three files
+down, `2[r` two commits back, stopping at the first/last one.
+
 **Statusline.** A blob side's buffer name is a `fugitive://…/.git//<sha>/<path>` URI, which is what a
 statusline shows. diffy sets `b:diffy_title` (`a1b2c3d: src/foo.lua`) on those buffers; with lualine:
 

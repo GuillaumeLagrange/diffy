@@ -796,8 +796,8 @@ function M.select_at_cursor(session, opts)
   run.ready({ session = session.id, event = 'open_row' })
 end
 
---- `]f`/`[f` (also from the diff windows): move to and open the
---- next/previous file entry.
+--- `]f`/`[f` (also from the diff windows): move `delta` file entries
+--- (a count, signed), stopping at the first/last one, and open it.
 function M.move_file(session, delta)
   local files = file_rows(session)
   if #files == 0 then
@@ -810,13 +810,9 @@ function M.move_file(session, delta)
       break
     end
   end
-  local next_pos
-  if pos then
-    next_pos = pos + delta
-  else
-    next_pos = delta > 0 and 1 or #files
-  end
-  if next_pos < 1 or next_pos > #files then
+  local from = pos or (delta > 0 and 0 or #files + 1)
+  local next_pos = math.max(1, math.min(#files, from + delta))
+  if next_pos == pos then
     return
   end
   local lnum = files[next_pos]
@@ -856,16 +852,16 @@ function M.setup(session)
     M.select_at_cursor(session)
   end, { buffer = buf, desc = 'open pair' })
   map(session, 'n', ']f', function()
-    M.move_file(session, 1)
+    M.move_file(session, vim.v.count1)
   end, { buffer = buf, desc = 'next file' })
   map(session, 'n', '[f', function()
-    M.move_file(session, -1)
+    M.move_file(session, -vim.v.count1)
   end, { buffer = buf, desc = 'previous file' })
   map(session, 'n', ']r', function()
-    require('diffy.panels.log').move_selection(session, 1)
+    require('diffy.panels.log').move_selection(session, vim.v.count1)
   end, { buffer = buf, desc = 'next commit' })
   map(session, 'n', '[r', function()
-    require('diffy.panels.log').move_selection(session, -1)
+    require('diffy.panels.log').move_selection(session, -vim.v.count1)
   end, { buffer = buf, desc = 'previous commit' })
   map(session, 'n', 'gf', function()
     M.open_real_file(session)

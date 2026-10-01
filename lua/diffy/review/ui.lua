@@ -1659,10 +1659,10 @@ function M.show_thread(session, thread, opts)
     M.close_thread(session)
   end, { buffer = buf, desc = 'close thread' })
   map(session, 'n', ']t', function()
-    M.next_thread(session, 1)
+    M.next_thread(session, vim.v.count1)
   end, { buffer = buf, desc = 'next thread' })
   map(session, 'n', '[t', function()
-    M.next_thread(session, -1)
+    M.next_thread(session, -vim.v.count1)
   end, { buffer = buf, desc = 'previous thread' })
   map(session, 'n', '<Tab>', function()
     M.cycle_line(session, 1)
@@ -1896,8 +1896,9 @@ function M.goto_thread(session, thread, revealed)
   M.show_thread(session, thread)
 end
 
---- The thread `]t` (`delta` 1) or `[t` (-1) opens from the current window,
---- and the diff window it's in; nil past the first/last one.
+--- The thread `]t` (`delta` > 0) or `[t` (< 0) opens from the current
+--- window, `|delta|` threads away and stopping at the first/last one, and
+--- the diff window it's in; nil when there's none that way.
 local function step_target(session, delta)
   local review = session.review
   if not review then
@@ -1912,31 +1913,33 @@ local function step_target(session, delta)
   if open and open.src == win then
     for i, t in ipairs(order) do
       if t == open.thread then
-        return order[i + delta], win
+        local j = math.max(1, math.min(#order, i + delta))
+        return j ~= i and order[j] or nil, win
       end
     end
     return nil
   end
   local lnum = vim.api.nvim_win_get_cursor(win)[1]
+  local ahead = {}
   if delta > 0 then
     for _, t in ipairs(order) do
       if t._place.start_line > lnum then
-        return t, win
+        table.insert(ahead, t)
       end
     end
   else
     for i = #order, 1, -1 do
       if order[i]._place.start_line < lnum then
-        return order[i], win
+        table.insert(ahead, order[i])
       end
     end
   end
-  return nil
+  return ahead[math.min(#ahead, math.abs(delta))], win
 end
 
---- `]t`/`[t` (from a diff window or the thread float): open the next or
---- previous thread of that window, one at a time, stacked threads included,
---- moving the diff cursor to it. No-op past the first/last one.
+--- `]t`/`[t` (from a diff window or the thread float): open the thread
+--- `delta` threads away in that window (a count, signed), stacked threads
+--- included, moving the diff cursor to it. Stops at the first/last one.
 function M.next_thread(session, delta)
   local target, win = step_target(session, delta)
   if not target then
@@ -1999,10 +2002,10 @@ function M.setup_diff_keymaps(session, buf)
     M.open_thread(session)
   end, { buffer = buf, desc = 'review: open thread' })
   map(session, 'n', ']t', function()
-    M.next_thread(session, 1)
+    M.next_thread(session, vim.v.count1)
   end, { buffer = buf, desc = 'review: next thread' })
   map(session, 'n', '[t', function()
-    M.next_thread(session, -1)
+    M.next_thread(session, -vim.v.count1)
   end, { buffer = buf, desc = 'review: previous thread' })
   map(session, 'n', '<leader>dt', function()
     M.toggle_inline(session)

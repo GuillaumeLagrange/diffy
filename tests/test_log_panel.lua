@@ -97,6 +97,28 @@ T[']r from the commit before the merge lands on the commit after it, skipping it
   child.cmd('Diffy close')
 end
 
+T['a count on ]r/[r moves that many commits, skipping the merge and stopping at the last'] = function()
+  open_branch()
+  ui.select_log_row(child, 2)
+  child.api.nvim_set_current_win(ui.wins(child).right)
+
+  ui.arm_ready(child, 'select')
+  child.type_keys('2]r')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(selected(), { 'Delete' })
+
+  ui.arm_ready(child, 'select')
+  child.type_keys('3]r')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(selected(), { 'C1' })
+
+  ui.arm_ready(child, 'select')
+  child.type_keys('2[r')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(selected(), { 'Delete' })
+  child.cmd('Diffy close')
+end
+
 T[']r/[r in the file tree move the commit selection instead of nvim\'s spell motion'] = function()
   open_branch()
   ui.select_log_row(child, 5)

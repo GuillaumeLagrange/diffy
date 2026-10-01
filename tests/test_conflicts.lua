@@ -141,6 +141,12 @@ T[']x skips a markdown heading underline and stops on each real marker'] = funct
   end
   MiniTest.expect.equality(seen, { '<<<<<<< HEAD', '=======', '>>>>>>> feature' })
 
+  child.fn.win_execute(w.result, 'call cursor(1, 1)')
+  child.type_keys('3]x')
+  MiniTest.expect.equality(child.api.nvim_get_current_line(), '>>>>>>> feature')
+  child.type_keys('2[x')
+  MiniTest.expect.equality(child.api.nvim_get_current_line(), '<<<<<<< HEAD')
+
   child.cmd('Diffy close')
 end
 

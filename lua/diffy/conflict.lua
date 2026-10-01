@@ -169,10 +169,14 @@ local function set_result_keymaps(session, buf)
   map(session, 'n', 'ghb', take('base'), { buffer = buf, desc = 'take base hunk' })
   map(session, 'n', 'ght', take('theirs'), { buffer = buf, desc = 'take theirs hunk' })
   map(session, 'n', ']x', function()
-    vim.fn.search(MARKER_PAT)
+    for _ = 1, vim.v.count1 do
+      vim.fn.search(MARKER_PAT)
+    end
   end, { buffer = buf, desc = 'next conflict marker' })
   map(session, 'n', '[x', function()
-    vim.fn.search(MARKER_PAT, 'b')
+    for _ = 1, vim.v.count1 do
+      vim.fn.search(MARKER_PAT, 'b')
+    end
   end, { buffer = buf, desc = 'previous conflict marker' })
   require('diffy.layout').map_panel_keys(session, buf)
 end
@@ -305,16 +309,17 @@ local function path_at_cursor(session)
   return (session.conflict_paths or {})[lnum]
 end
 
---- `]f`/`[f` in the dedicated conflicts tree: move to and open the
---- next/previous conflicted file.
+--- `]f`/`[f` in the dedicated conflicts tree: move `delta` conflicted
+--- files (a count, signed), stopping at the first/last one, and open it.
 local function move(session, delta)
   local paths = session.conflict_paths or {}
   if #paths == 0 then
     return
   end
   local cur = index_of(paths, session.conflict_path)
-  local nxt = cur and (cur + delta) or (delta > 0 and 1 or #paths)
-  if nxt < 1 or nxt > #paths then
+  local from = cur or (delta > 0 and 0 or #paths + 1)
+  local nxt = math.max(1, math.min(#paths, from + delta))
+  if nxt == cur then
     return
   end
   if vim.api.nvim_win_is_valid(session.wins.tree) then
@@ -345,10 +350,10 @@ local function setup_conflicts_tree(session)
     end
   end, { buffer = buf, desc = 'mark resolved' })
   map(session, 'n', ']f', function()
-    move(session, 1)
+    move(session, vim.v.count1)
   end, { buffer = buf, desc = 'next conflict' })
   map(session, 'n', '[f', function()
-    move(session, -1)
+    move(session, -vim.v.count1)
   end, { buffer = buf, desc = 'previous conflict' })
   map(session, 'n', 'gf', function()
     local p = path_at_cursor(session)

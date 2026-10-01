@@ -254,7 +254,7 @@ instead, compact and without the preview, and `:Diffy threads` moves the cursor 
 
 | Key (in the threads view) | |
 |---|---|
-| `<CR>` | go to the thread: its file, its line, into its float. An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). Resolved or hidden threads are shown again. On a group header: fold / unfold; on a file header: its first thread |
+| `<CR>` | go to the thread: its file, the cursor on its first line, the thread hovered there (that one, when several share the line; `K` enters it). An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). Resolved or hidden threads are shown again. On a group header: fold / unfold; on a file header: its first thread |
 | `<Tab>` | fold / unfold the group under the cursor |
 | `x` | resolve / unresolve the thread under the cursor |
 | `m` | only threads you started / everyone's (GitHub) |

@@ -470,7 +470,7 @@ local function preview(session, buf, win)
 end
 
 --- Into the thread: the float closes, the diff shows it (switching the
---- selection when this one doesn't) and its float opens.
+--- selection when this one doesn't) and hovers it.
 local function jump(session, t)
   if layout.host(session, 'threads') == 'float' then
     layout.close_float(session, 'threads')

@@ -157,7 +157,7 @@ T['placement tracks a thread across commits (shown at head/its own view) and hid
   end
   MiniTest.expect.equality(ui.threads_view(child).preview[1], 'Shown in: 786410a')
 
-  -- <CR> on it from head selects P1, the commit it shows in, and enters it
+  -- <CR> on it from head selects P1, the commit it shows in, and hovers it
   ui.arm_ready_raw(child, 'thread')
   child.type_keys('<CR>')
   ui.wait_ready_raw(child)
@@ -166,7 +166,7 @@ T['placement tracks a thread across commits (shown at head/its own view) and hid
   MiniTest.expect.equality(#selected, 1)
   MiniTest.expect.equality(selected[1]:find('786410a', 1, true) ~= nil, true)
   local float = ui.thread_float(child)
-  MiniTest.expect.equality(float.focused, true)
+  MiniTest.expect.equality(float.focused, false)
   MiniTest.expect.equality(table.concat(float.text, '\n'):find('B2', 1, true) ~= nil, true)
 
   child.cmd('Diffy close')
@@ -289,9 +289,14 @@ T['<CR> in the threads view opens an outdated thread where it was written: its c
     ui.arm_ready_raw(child, 'thread')
     child.type_keys('<CR>')
     ui.wait_ready_raw(child)
-    local float = ui.thread_float(child)
-    MiniTest.expect.equality(float.focused, true)
-    MiniTest.expect.equality(table.concat(float.text, '\n'):find(id, 1, true) ~= nil, true)
+    -- landing on the line hovers OUT2 there before the selection switches
+    local function shows()
+      local f = ui.thread_float(child)
+      return f ~= vim.NIL and table.concat(f.text, '\n'):find(id, 1, true) ~= nil and f
+    end
+    vim.wait(2000, shows, 10)
+    local float = shows()
+    MiniTest.expect.equality(float and float.focused, false)
     -- commit ids, the first word of each subject (the log cuts them)
     return vim.tbl_map(function(s)
       return s:match('^%S+')

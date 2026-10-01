@@ -1705,6 +1705,17 @@ function M.show_thread(session, thread, opts)
       M.set_resolved(session, thread, not thread.resolved)
     end, { buffer = buf, desc = 'resolve/unresolve thread' })
   end
+  local toggle = require('diffy').config.keymaps.toggle_panel
+  if toggle and toggle ~= '' then
+    map(session, 'n', toggle, function()
+      local showing = session.panel_hidden
+      require('diffy.layout').toggle_column(session)
+      -- the cursor went to the column: the float doesn't follow it
+      if showing then
+        M.close_thread(session)
+      end
+    end, { buffer = buf, nowait = true, desc = 'toggle panels' })
+  end
 
   paint(session)
   run.ready({ session = session.id, event = 'thread' })
@@ -1824,7 +1835,8 @@ local function reveal(session, thread, sel)
 end
 
 --- Jump to `thread` from anywhere in the session: open its file in the
---- diff, put the cursor on it and enter it. Shows what it takes to see it:
+--- diff, put the cursor on its first line and hover it there (that thread,
+--- even when others share the line). Shows what it takes to see it:
 --- resolved threads, inline comments, and a selection that shows it (for
 --- an outdated thread, the view it was written in); says why when none
 --- can.
@@ -1881,7 +1893,7 @@ function M.goto_thread(session, thread, revealed)
   end
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_win_set_cursor(win, { place.start_line, 0 })
-  M.show_thread(session, thread, { focus = true })
+  M.show_thread(session, thread)
 end
 
 --- The thread `]t` (`delta` 1) or `[t` (-1) opens from the current window,

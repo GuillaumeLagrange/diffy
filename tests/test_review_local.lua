@@ -878,7 +878,7 @@ T[':Diffy threads lists every thread in a float by file, the one in the diff fir
   MiniTest.expect.equality(ui.threads_view(child), vim.NIL)
   MiniTest.expect.equality(ui.log_subjects(child, ui.rows_with(child, 'log', 'DiffySelection')), { 'Working tree' })
   local float = ui.thread_float(child)
-  MiniTest.expect.equality(float.focused, true)
+  MiniTest.expect.equality(float.focused, false)
   MiniTest.expect.equality(table.concat(float.text, '\n'):find('about f', 1, true) ~= nil, true)
 
   child.cmd('Diffy close')
@@ -942,7 +942,55 @@ T['config.column puts the threads view in the column, compact, kept by :Diffy pa
   MiniTest.expect.equality(view.float, false)
   press_on_row('in the column', '<CR>', 'thread')
   MiniTest.expect.equality(ui.threads_view(child).float, false)
+  MiniTest.expect.equality(ui.thread_float(child).focused, false)
+
+  child.cmd('Diffy close')
+end
+
+T['<CR> in the threads view goes to the thread\'s line and hovers that thread, not the others on the line'] = function()
+  child.o.columns = 160
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'first thread')
+  write_comment(w.right, 5, 'second thread')
+  write_comment(w.right, 9, 'elsewhere')
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('1G')
+
+  threads('Diffy threads')
+  press_on_row('second thread', '<CR>', 'thread')
+  MiniTest.expect.equality(ui.threads_view(child), vim.NIL)
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), w.right)
+  MiniTest.expect.equality(child.api.nvim_win_get_cursor(w.right)[1], 5)
+  local float = ui.thread_float(child)
+  MiniTest.expect.equality(float.focused, false)
+  MiniTest.expect.equality(table.concat(float.text, '\n'):find('second thread', 1, true) ~= nil, true)
+  -- the next keystroke's hover check keeps it
+  child.type_keys('$')
+  MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('second thread', 1, true) ~= nil, true)
+  child.type_keys('K')
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
+
+  child.cmd('Diffy close')
+end
+
+T['<leader>e in the thread float hides the column, or shows it and goes to the file tree'] = function()
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'a thread')
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('1G', '5G', 'K')
+  local float = ui.thread_float(child)
+  MiniTest.expect.equality(float.focused, true)
+
+  child.type_keys('\\e')
+  MiniTest.expect.equality(ui.layout(child).tree, vim.NIL)
+  MiniTest.expect.equality(ui.thread_float(child).focused, true)
+
+  child.type_keys('\\e')
+  MiniTest.expect.equality(ui.layout(child).tree ~= vim.NIL, true)
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), ui.wins(child).tree)
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
 
   child.cmd('Diffy close')
 end

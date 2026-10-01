@@ -115,7 +115,8 @@ T['<leader>e hides the column leaving the cursor in the diff, and shows it again
 end
 
 --- The text of every float in the current tab other than the diffy windows
---- shown before (`except`), `{ { text = …, row = …, col = … } }`.
+--- shown before (`except`), with the screen cell its text starts at,
+--- `{ { text = …, row = …, col = … } }` (1-based).
 local function floats(except)
   return child.lua(
     [[
@@ -123,10 +124,10 @@ local function floats(except)
     for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       local cfg = vim.api.nvim_win_get_config(w)
       if cfg.relative ~= '' and not vim.tbl_contains(..., w) then
-        local pos = vim.api.nvim_win_get_position(w)
+        local pos = vim.fn.screenpos(w, 1, 1)
         table.insert(out, {
           text = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, -1, false)[1],
-          row = pos[1], col = pos[2],
+          row = pos.row, col = pos.col,
         })
       end
     end
@@ -159,8 +160,8 @@ T['a long path under nested dirs renders as one row fitting the panel, the start
   -- files, the sibling, the empty Staged section
   MiniTest.expect.equality(#lines, 7)
   MiniTest.expect.equality(lines[2], '  nvim/diffy/lua/diffy/')
-  -- a dir chain too long keeps its last dir whole, cutting what leads to it
-  MiniTest.expect.equality(lines[3]:match('^    \226\128\166[%w_/]*/nested_levels/$') ~= nil, true)
+  -- a dir chain too long shortens the dirs leading to its last one, none hidden
+  MiniTest.expect.equality(lines[3], '    a/with_more/nested_levels/')
   -- a file name too long keeps its start, cut at the end
   MiniTest.expect.equality(lines[4]:match('^      M init_with_an_[%w_]*\226\128\166 +%+1 %-1$') ~= nil, true)
   MiniTest.expect.equality(lines[5]:match('^      M short%.lua +%+1 %-1$') ~= nil, true)
@@ -171,6 +172,22 @@ T['a long path under nested dirs renders as one row fitting the panel, the start
   child.cmd('Diffy close')
 end
 
+T['a path too long shortens its directories to one letter, outermost first, before cutting the name'] = function()
+  local fit = function(s, width)
+    return child.lua('return require("diffy.highlight").truncate_path(...)', { s, width })
+  end
+  local path = 'packages/api/prisma/migrations/20261001_agent_version/migration.sql'
+  MiniTest.expect.equality(fit(path, #path), path)
+  MiniTest.expect.equality(fit(path, #path - 1), 'p/api/prisma/migrations/20261001_agent_version/migration.sql')
+  MiniTest.expect.equality(fit(path, 44), 'p/a/p/m/20261001_agent_version/migration.sql')
+  MiniTest.expect.equality(fit(path, 43), 'p/a/p/m/2/migration.sql')
+  -- no room left for the whole name: its end is cut, every directory kept
+  MiniTest.expect.equality(fit(path, 18), 'p/a/p/m/2/migrati…')
+  -- not even a few letters of the name next to the directories: they give way
+  MiniTest.expect.equality(fit(path, 12), '…/migration…')
+  MiniTest.expect.equality(fit('.github/workflows/release.yml', 20), '.g/w/release.yml')
+end
+
 T['resting the tree cursor on a cut row shows it whole over the row, gone on an uncut row or out of the tree'] = function()
   local long = 'src/a_rather_long_directory_name/init_with_an_extremely_long_file_name.lua'
   repo = Repo.new():commit('Base', { [long] = Repo.lines(5), ['src/short.lua'] = Repo.lines(5) })
@@ -178,6 +195,8 @@ T['resting the tree cursor on a cut row shows it whole over the row, gone on an 
   vim.fn.writefile({ '1', 'changed', '3', '4', '5' }, repo.dir .. '/src/short.lua')
   child.fn.chdir(repo.dir)
 
+  -- the user's config frames every float by default
+  child.o.winborder = 'rounded'
   ui.arm_ready(child, 'render')
   child.cmd('Diffy')
   ui.wait_ready(child)
@@ -195,11 +214,14 @@ T['resting the tree cursor on a cut row shows it whole over the row, gone on an 
   child.api.nvim_set_current_win(w.tree)
   child.fn.win_execute(w.tree, 'call cursor(1, 1)')
   child.type_keys(('%dG'):format(lnum))
+  child.cmd('redraw')
   local shown = floats(before)
   MiniTest.expect.equality(#shown, 1)
   MiniTest.expect.equality(shown[1].text, '    M a_rather_long_directory_name/init_with_an_extremely_long_file_name.lua +1 -1')
-  local tree_pos = child.api.nvim_win_get_position(w.tree)
-  MiniTest.expect.equality({ shown[1].row, shown[1].col }, { tree_pos[1] + lnum - 1, tree_pos[2] })
+  local row_pos = child.fn.screenpos(w.tree, lnum, 1)
+  MiniTest.expect.equality({ shown[1].row, shown[1].col }, { row_pos.row, row_pos.col })
+  -- laid on the row alone: the rows around it stay visible
+  MiniTest.expect.equality(child.fn.screenstring(row_pos.row - 1, row_pos.col + 4), lines[lnum - 1]:sub(5, 5))
 
   -- the uncut sibling row: nothing over it
   child.type_keys('j')

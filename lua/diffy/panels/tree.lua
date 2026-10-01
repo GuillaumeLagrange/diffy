@@ -598,6 +598,8 @@ local function hover(session)
     width = math.max(1, math.min(vim.fn.strdisplaywidth(full.text), vim.o.columns - pos.col + 1)),
     height = 1,
     style = 'minimal',
+    -- the user's 'winborder' would frame it a cell off the row it covers
+    border = 'none',
     focusable = false,
     zindex = 60,
   }

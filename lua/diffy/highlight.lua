@@ -140,39 +140,41 @@ function M.truncate(s, width)
   return table.concat(out) .. '…'
 end
 
---- Like `truncate`, but keeps the end of `s` ('…' first).
-function M.truncate_left(s, width)
-  if vim.fn.strdisplaywidth(s) <= width then
-    return s
-  end
-  if width <= 0 then
-    return ''
-  end
-  local chars = vim.fn.split(s, '\\zs')
-  local out, w = {}, 0
-  for i = #chars, 1, -1 do
-    local cw = vim.fn.strdisplaywidth(chars[i])
-    if w + cw > width - 1 then
-      break
-    end
-    table.insert(out, 1, chars[i])
-    w = w + cw
-  end
-  return '…' .. table.concat(out)
+-- what a cut name keeps at least before the directories give way to '…/'
+local MIN_NAME = 5
+
+local function abbreviate(dir)
+  -- `.github` -> `.g`: the dot alone says nothing
+  local dot = dir:sub(1, 1) == '.' and '.' or ''
+  return dot .. vim.fn.strcharpart(dir:sub(#dot + 1), 0, 1)
 end
 
---- Fit a path to `width` cells keeping the start of its last component:
---- the leading directories are cut first ('…' first), then the end of
---- the name itself ('…' last).
+--- Fit a path to `width` cells: its directories shrink to their first
+--- character, outermost first (`a/b/long_dir/name`); still too long, the
+--- end of the last component is cut (`a/b/c/na…`); only when that leaves
+--- the name under `MIN_NAME` cells do the directories become '…/'.
 function M.truncate_path(s, width)
-  if vim.fn.strdisplaywidth(s) <= width then
+  local sw = vim.fn.strdisplaywidth
+  if sw(s) <= width then
     return s
   end
-  local name = s:match('[^/]*$')
-  if vim.fn.strdisplaywidth(name) + 1 > width then
-    return M.truncate(name, width)
+  local dirs = vim.split(s, '/', { plain = true })
+  local name = table.remove(dirs)
+  for i, dir in ipairs(dirs) do
+    dirs[i] = abbreviate(dir)
+    local out = table.concat(dirs, '/') .. '/' .. name
+    if sw(out) <= width then
+      return out
+    end
   end
-  return M.truncate_left(s, width)
+  local prefix = #dirs > 0 and (table.concat(dirs, '/') .. '/') or ''
+  if width - sw(prefix) >= MIN_NAME then
+    return prefix .. M.truncate(name, width - sw(prefix))
+  end
+  if #dirs > 0 and width - 2 >= MIN_NAME then
+    return '…/' .. M.truncate(name, width - 2)
+  end
+  return M.truncate(name, width)
 end
 
 --- Usable text width of `win` (window width minus number/sign columns).

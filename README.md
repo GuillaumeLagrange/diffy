@@ -113,11 +113,11 @@ headers stay when a section is empty; with no changes at all the tree says `(no 
 
 | Key | |
 |---|---|
-| `<CR>` | open the file and move to the diff |
-| `o` | open the file, stay in the tree |
+| `<CR>` | open the file and move to the diff; on a folder or section header, fold / unfold it |
+| `o` | open the file, stay in the tree; on a header, fold / unfold it |
 | `]f` / `[f` | next / previous file |
 | `]r` / `[r` | next / previous commit |
-| `za` | fold a folder or section |
+| `za` (any fold key) | fold / unfold the folder or section under the cursor; folds stay as you change the selection |
 | `gf` | open the real file in the previous tab |
 | `-` | move the file to the other section (stage in Unstaged, unstage in Staged) |
 | `s` / `u` | stage / unstage the file, whichever section it's in (a rename stages both paths) |

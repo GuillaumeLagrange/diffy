@@ -437,19 +437,109 @@ T['nested directories group under collapsible headers, single-child chains flatt
   MiniTest.expect.equality(lines[f1]:match('^(%s*)'), '    ')
   MiniTest.expect.equality(lines[f3]:match('^(%s*)'), '  ')
 
-  -- foldmethod=indent starts a fold at the first *indented* line, not the
-  -- shallower header above it - za on "  b/c/" folds it and its files,
-  -- leaving "a/" visible above the closed fold
-  local child_line = exact_line(lines, '  b/c/')
-  MiniTest.expect.equality(child_line ~= nil, true)
-  child.api.nvim_set_current_win(w.tree)
-  child.fn.win_execute(w.tree, ('call cursor(%d, 1)'):format(child_line))
-  child.type_keys('za')
-  local closed = child.lua_get(
-    ('vim.api.nvim_win_call(%d, function() return vim.fn.foldclosed(%d) end)'):format(w.tree, child_line)
-  )
-  MiniTest.expect.equality(closed, child_line)
+  child.cmd('Diffy close')
+end
 
+--- The tree as drawn: a closed fold is one row, its header's text then `…`.
+local function shown_tree()
+  return child.lua_get(([[vim.api.nvim_win_call(%d, function()
+    local out, l, last = {}, 1, vim.fn.line('$')
+    while l <= last do
+      local stop = vim.fn.foldclosedend(l)
+      if stop ~= -1 then
+        table.insert(out, vim.fn.getline(l) .. ' …')
+        l = stop + 1
+      else
+        table.insert(out, vim.fn.getline(l))
+        l = l + 1
+      end
+    end
+    return out
+  end)]]):format(ui.wins(child).tree))
+end
+
+--- Put the tree cursor on the row reading `text` and type `keys`.
+local function keys_on(text, keys)
+  local w = ui.wins(child)
+  child.api.nvim_set_current_win(w.tree)
+  child.api.nvim_win_set_cursor(w.tree, { exact_line(tree(), text), 0 })
+  child.type_keys(keys)
+end
+
+local function nested_repo()
+  repo = Repo.new()
+    :commit('Base', { ['top.txt'] = Repo.lines(1) })
+    :commit('Add', {
+      ['a/b/c/file1.txt'] = Repo.lines(1),
+      ['a/b/c/file2.txt'] = Repo.lines(1),
+      ['a/d/file3.txt'] = Repo.lines(1),
+      ['a/e.txt'] = Repo.lines(1),
+      ['z/one.txt'] = Repo.lines(1),
+      ['z/two.txt'] = Repo.lines(1),
+    })
+  child.fn.chdir(repo.dir)
+  ui.arm_ready(child, 'render')
+  child.cmd(('Diffy %s..%s'):format(repo.sha.Base, repo.sha.Add))
+  ui.wait_ready(child)
+end
+
+T['za on a folder folds only that folder, top-level folders included'] = function()
+  nested_repo()
+  keys_on('  b/c/', 'za')
+  MiniTest.expect.equality(shown_tree(), {
+    'a/',
+    '  b/c/ …',
+    '  A d/file3.txt                   +1 -0',
+    '  A e.txt                         +1 -0',
+    'z/',
+    '  A one.txt                       +1 -0',
+    '  A two.txt                       +1 -0',
+  })
+  keys_on('z/', 'za')
+  MiniTest.expect.equality(shown_tree()[5], 'z/ …')
+  MiniTest.expect.equality(#shown_tree(), 5)
+  child.cmd('Diffy close')
+end
+
+T['<CR> and o on a folder fold and unfold it, folds staying across re-renders'] = function()
+  nested_repo()
+  keys_on('a/', '<CR>')
+  MiniTest.expect.equality(shown_tree(), {
+    'a/ …',
+    'z/',
+    '  A one.txt                       +1 -0',
+    '  A two.txt                       +1 -0',
+  })
+  -- the cursor stays in the tree
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), ui.wins(child).tree)
+
+  -- a resize redraws the tree; R re-renders it
+  child.cmd('vertical resize +3')
+  MiniTest.expect.equality(shown_tree()[1], 'a/ …')
+  ui.arm_ready(child, 'render')
+  child.type_keys('R')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(shown_tree()[1], 'a/ …')
+
+  keys_on('a/', 'o')
+  MiniTest.expect.equality(shown_tree()[2], '  b/c/')
+  child.cmd('Diffy close')
+end
+
+T['za on a section header folds the section'] = function()
+  repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(5), ['g.txt'] = Repo.lines(5) })
+  vim.fn.writefile({ 'staged' }, repo.dir .. '/g.txt')
+  ui.git(repo.dir, { 'add', 'g.txt' })
+  vim.fn.writefile({ 'unstaged' }, repo.dir .. '/f.txt')
+  child.fn.chdir(repo.dir)
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+
+  keys_on('Unstaged (1)', 'za')
+  local shown = shown_tree()
+  MiniTest.expect.equality({ shown[1], shown[2] }, { 'Unstaged (1) …', 'Staged (1)' })
+  MiniTest.expect.equality(shown[3]:match('^  M g%.txt'), '  M g.txt')
   child.cmd('Diffy close')
 end
 

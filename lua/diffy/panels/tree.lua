@@ -1,9 +1,9 @@
 -- The file tree panel: the diff between the current selection's
--- (left, right) as a nested directory tree (collapsible on
--- `za`, chains of single-child dirs flattened into one row), with rename
--- pairs, +n/-m counts and the staging keys (`s`/`u`/`-`/`S`/`U`). The
--- working tree alone shows as two sections, Unstaged and Staged, each file
--- row carrying its section's pair.
+-- (left, right) as a nested directory tree (each folder header folding its
+-- rows on `za`/`<CR>`, chains of single-child dirs flattened into one row),
+-- with rename pairs, +n/-m counts and the staging keys (`s`/`u`/`-`/`S`/`U`).
+-- The working tree alone shows as two sections, Unstaged and Staged, each
+-- file row carrying its section's pair.
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
@@ -153,12 +153,10 @@ end
 --- only content is one subdirectory is merged into `chain` (no row of its
 --- own); a directory whose only content is one file is skipped entirely (the
 --- file is shown directly, with its path relative to the enclosing header);
---- everything else gets one collapsible header row for the accumulated
---- `chain` (empty at the root, so the root itself never gets a header)
---- followed by its children, one depth deeper - `foldmethod=indent` then
---- folds exactly that header's children on `za`, at every nesting level.
---- `base` is the full path of the nearest enclosing header ('' at root):
---- file rows display their path relative to it.
+--- everything else gets one header row for the accumulated `chain` (empty at
+--- the root, so the root itself never gets a header) followed by its
+--- children, one depth deeper. `base` is the full path of the nearest
+--- enclosing header ('' at root): file rows display their path relative to it.
 local function layout(node, path, chain, base, depth, rows)
   local items = node_items(node)
   if #items == 0 then
@@ -175,7 +173,7 @@ local function layout(node, path, chain, base, depth, rows)
   end
   local child_depth, child_base = depth, base
   if chain ~= '' then
-    table.insert(rows, { kind = 'dir', name = chain, depth = depth })
+    table.insert(rows, { kind = 'dir', name = chain, path = path, depth = depth })
     child_depth, child_base = depth + 1, path
   end
   for _, it in ipairs(items) do
@@ -188,13 +186,18 @@ local function layout(node, path, chain, base, depth, rows)
 end
 
 --- Group a flat, path-sorted entry list into display rows, `depth` deep,
---- file rows tagged with `pair` (a section's pair, or nil).
-local function group_rows(entries, depth, pair, rows)
+--- file rows tagged with `pair` (a section's pair, or nil), header rows with
+--- a `key` naming their fold across renders (`section`'s label prefixed).
+local function group_rows(entries, depth, pair, rows, section)
   rows = rows or {}
   local first = #rows + 1
   layout(build_tree(entries), '', '', '', depth or 0, rows)
   for i = first, #rows do
-    rows[i].pair = rows[i].kind == 'file' and pair or nil
+    local row = rows[i]
+    row.pair = row.kind == 'file' and pair or nil
+    if row.kind == 'dir' then
+      row.key = (section or '') .. '/' .. row.path
+    end
   end
   return rows
 end
@@ -211,8 +214,8 @@ local function section_rows(unstaged, staged)
     { label = 'Unstaged', pair = selection.UNSTAGED, entries = unstaged },
     { label = 'Staged', pair = selection.STAGED, entries = staged },
   }) do
-    table.insert(rows, { kind = 'section', label = s.label, count = #s.entries, pair = s.pair, depth = 0 })
-    group_rows(s.entries, 1, s.pair, rows)
+    table.insert(rows, { kind = 'section', label = s.label, count = #s.entries, pair = s.pair, depth = 0, key = s.label })
+    group_rows(s.entries, 1, s.pair, rows, s.label)
   end
   return rows
 end
@@ -633,8 +636,70 @@ local function hover(session)
   end
 end
 
+--- Remember which headers the user folded in the window drawn last, by row
+--- `key`, so a redraw or a new selection keeps them folded. Folds are
+--- per-window: one drawn in another window (the view moved hosts) is kept
+--- as last saved. A header inside a closed fold counts as open.
+local function save_folds(session)
+  local drawn = session.tree_drawn
+  if not (drawn and drawn.win == session.wins.tree and vim.api.nvim_win_is_valid(drawn.win)) then
+    return
+  end
+  local folded = {}
+  vim.api.nvim_win_call(drawn.win, function()
+    for lnum, row in ipairs(drawn.rows) do
+      if row.key and vim.fn.foldclosed(lnum) == lnum then
+        folded[row.key] = true
+      end
+    end
+  end)
+  session.tree_folded = folded
+end
+
+--- One manual fold per header row, over the rows nested under it; the
+--- saved ones closed. Indent folds can't do it: they start below a header,
+--- so `za` on a header folds its parent and a top-level header has no fold.
+local function apply_folds(session, win)
+  local rows = session.tree_rows
+  local wo = vim.wo[win]
+  wo.foldmethod = 'manual'
+  wo.foldtext = "v:lua.require'diffy.panels.tree'.foldtext()"
+  wo.fillchars = 'fold: '
+  wo.foldenable = true
+  vim.api.nvim_win_call(win, function()
+    vim.cmd('silent! normal! zE')
+    -- last header first, so nested folds exist before their parent's
+    for i = #rows, 1, -1 do
+      if rows[i].key then
+        local last = i
+        while rows[last + 1] and rows[last + 1].depth > rows[i].depth do
+          last = last + 1
+        end
+        vim.cmd(('%d,%dfold'):format(i, last))
+      end
+    end
+    vim.cmd('silent! normal! zR')
+    local folded = session.tree_folded or {}
+    for i = #rows, 1, -1 do
+      if rows[i].key and folded[rows[i].key] then
+        vim.cmd(('%dfoldclose'):format(i))
+      end
+    end
+  end)
+  session.tree_drawn = { win = win, rows = rows }
+end
+
+--- A folded header: its row, then `…`.
+function M.foldtext()
+  local session = require('diffy.session').current()
+  local row = session and session.tree_rows and session.tree_rows[vim.v.foldstart]
+  local group = row and row.kind == 'section' and 'DiffyLabel' or 'DiffyDirectory'
+  return { { vim.fn.getline(vim.v.foldstart), group }, { ' …', 'Comment' } }
+end
+
 --- Re-render the current rows fitted to the tree window's width (no git).
 function M.redraw(session)
+  save_folds(session)
   local buf = session.bufs.tree
   local width = tree_width(session)
   session.tree_width = width
@@ -654,7 +719,6 @@ function M.redraw(session)
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
-  vim.bo[buf].shiftwidth = 2
   local ns = require('diffy.session').namespace(session, 'tree_render')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for i, spans in ipairs(all_spans) do
@@ -666,9 +730,7 @@ function M.redraw(session)
   end
   local win = session.wins.tree
   if win and vim.api.nvim_win_is_valid(win) then
-    vim.wo[win].foldmethod = 'indent'
-    vim.wo[win].foldenable = true
-    vim.wo[win].foldlevel = 99
+    apply_folds(session, win)
   end
   M.mark_current(session)
   hover(session)
@@ -780,8 +842,16 @@ end
 
 --- `<CR>`/`o`: open the pair for the entry at the cursor. `<CR>` passes
 --- `opts.focus` to then move to the right diff window (the result window in
---- the conflict view); `o` keeps the cursor in the tree.
+--- the conflict view); `o` keeps the cursor in the tree. On a header or a
+--- closed fold, both fold/unfold it instead.
 function M.select_at_cursor(session, opts)
+  local cur, cur_lnum = cursor_row(session)
+  if cur and (cur.key or vim.fn.foldclosed(cur_lnum) ~= -1) then
+    vim.api.nvim_win_call(session.wins.tree, function()
+      vim.cmd('normal! za')
+    end)
+    return
+  end
   local row, lnum = row_at_cursor(session)
   if not row then
     return
@@ -847,10 +917,10 @@ function M.setup(session)
   local buf = session.bufs.tree
   map(session, 'n', '<CR>', function()
     M.select_at_cursor(session, { focus = true })
-  end, { buffer = buf, desc = 'open pair and focus it' })
+  end, { buffer = buf, desc = 'open pair and focus it, or fold the header' })
   map(session, 'n', 'o', function()
     M.select_at_cursor(session)
-  end, { buffer = buf, desc = 'open pair' })
+  end, { buffer = buf, desc = 'open pair, or fold the header' })
   map(session, 'n', ']f', function()
     M.move_file(session, vim.v.count1)
   end, { buffer = buf, desc = 'next file' })

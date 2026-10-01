@@ -302,6 +302,52 @@ function M.open(opts)
       layout.relayout(session)
     end,
   })
+  -- a split across the tab (a toggled terminal) takes its rows from, and
+  -- gives them back to, whichever column window nvim picks. Detected in the
+  -- event (the window may be gone by the next tick), refitted once after.
+  local function splits()
+    local n = 0
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(session.tab)) do
+      if vim.api.nvim_win_get_config(w).relative == '' then
+        n = n + 1
+      end
+    end
+    return n
+  end
+  local split_count = splits()
+  local refit_pending = false
+  vim.api.nvim_create_autocmd({ 'WinNew', 'WinClosed' }, {
+    group = session.augroup,
+    callback = function(args)
+      if session.closed or not vim.api.nvim_tabpage_is_valid(session.tab) then
+        return
+      end
+      local n = splits()
+      if args.event == 'WinClosed' then
+        local win = tonumber(args.match)
+        if
+          win
+          and vim.api.nvim_win_is_valid(win)
+          and vim.api.nvim_win_get_tabpage(win) == session.tab
+          and vim.api.nvim_win_get_config(win).relative == ''
+        then
+          n = n - 1
+        end
+      end
+      if n == split_count or refit_pending then
+        split_count = n
+        return
+      end
+      split_count = n
+      refit_pending = true
+      vim.schedule(function()
+        refit_pending = false
+        if not session.closed and vim.api.nvim_tabpage_is_valid(session.tab) then
+          layout.fit_column(session)
+        end
+      end)
+    end,
+  })
   -- A window opened from a diff window (a picker, a plugin float) copies its
   -- scrollbind/cursorbind/diff: bound to the diff, its cursor gets dragged
   -- to the diff's column as you type in it. Only diffy's own windows stay bound.

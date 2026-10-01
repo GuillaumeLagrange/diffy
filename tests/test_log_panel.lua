@@ -136,6 +136,26 @@ T['the log always lists every entry, sized min(#entries, 40% of the column), foc
   child.cmd('Diffy close')
 end
 
+T['a full-width split opened under the tab and closed again, like a toggled terminal, leaves the log its height'] = function()
+  child.o.lines = 40
+  open_branch()
+  local w = ui.wins(child)
+  local function heights()
+    return child.lua_get(('{ vim.api.nvim_win_get_height(%d), vim.api.nvim_win_get_height(%d) }'):format(w.tree, w.log))
+  end
+  local h = heights()
+
+  child.lua([[
+    local buf = vim.api.nvim_create_buf(false, true)
+    local win = vim.api.nvim_open_win(buf, true, { split = 'below', win = -1, height = 15 })
+    vim.api.nvim_win_close(win, true)
+    vim.api.nvim_buf_delete(buf, { force = true })
+  ]])
+  MiniTest.expect.equality(heights(), h)
+
+  child.cmd('Diffy close')
+end
+
 T['rapid J J J ends up showing the last selection, even if an earlier one\'s git calls resolve later'] = function()
   open_branch()
   ui.select_log_row(child, 3) -- Add

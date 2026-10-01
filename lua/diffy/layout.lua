@@ -158,10 +158,37 @@ local function place_floats(session)
   end
 end
 
---- Reset window sizes: the fixed-width column (each view's `height`, the
---- others sharing the rest), the diff area split evenly over what's left
---- (the full width while the column is hidden), floats over it. Called on
---- open, on `R`, on `VimResized` and on toggling the column.
+--- Size the column's views: each view's `height`, the others sharing the
+--- rest. A split opened or closed across the tab moves rows in or out of
+--- whichever column window nvim picks, so the session calls this then too.
+function M.fit_column(session)
+  local w = session.wins
+  if not valid(w[session.column[1]]) then
+    return
+  end
+  local room = 0
+  for _, name in ipairs(session.column) do
+    if valid(w[name]) then
+      room = room + vim.api.nvim_win_get_height(w[name])
+    end
+  end
+  -- sized views keep their height while the next one is sized, so only
+  -- the views without one give up rows
+  for _, name in ipairs(session.column) do
+    local spec = M.spec(name)
+    local want = spec.height and spec.height(session, room)
+    if want and valid(w[name]) then
+      vim.wo[w[name]].winfixheight = false
+      vim.api.nvim_win_set_height(w[name], want)
+      vim.wo[w[name]].winfixheight = true
+    end
+  end
+end
+
+--- Reset window sizes: the fixed-width column (`fit_column`), the diff area
+--- split evenly over what's left (the full width while the column is
+--- hidden), floats over it. Called on open, on `R`, on `VimResized` and on
+--- toggling the column.
 function M.relayout(session)
   local w = session.wins
   local top = w[session.column[1]]
@@ -181,25 +208,7 @@ function M.relayout(session)
       vim.api.nvim_win_set_width(left, math.floor((diff_width - 1) / 2))
     end
   end
-  if shown then
-    local room = 0
-    for _, name in ipairs(session.column) do
-      if valid(w[name]) then
-        room = room + vim.api.nvim_win_get_height(w[name])
-      end
-    end
-    -- sized views keep their height while the next one is sized, so only
-    -- the views without one give up rows
-    for _, name in ipairs(session.column) do
-      local spec = M.spec(name)
-      local want = spec.height and spec.height(session, room)
-      if want and valid(w[name]) then
-        vim.wo[w[name]].winfixheight = false
-        vim.api.nvim_win_set_height(w[name], want)
-        vim.wo[w[name]].winfixheight = true
-      end
-    end
-  end
+  M.fit_column(session)
   place_floats(session)
 end
 

@@ -266,17 +266,13 @@ local function show_column(session)
   end
 end
 
+--- Hide the column, leaving the cursor where it is; or show it and put the
+--- cursor in the file tree (else the column's first view).
 function M.toggle_column(session)
-  if session.panel_hidden then
-    show_column(session)
-  else
+  if not session.panel_hidden then
     hide_column(session)
+    return
   end
-end
-
---- Show the column if hidden, then put the cursor in the file tree (else
---- the column's first view).
-local function focus_column(session)
   show_column(session)
   local win = session.wins.tree
   if not (vim.tbl_contains(session.column, 'tree') and valid(win)) then
@@ -287,24 +283,18 @@ local function focus_column(session)
   end
 end
 
---- Buffer-local column keys (configurable) on `buf`: toggle the column, and
---- focus the file tree (showing the column first when hidden).
+--- The buffer-local column toggle (`config.keymaps.toggle_panel`) on `buf`.
 function M.map_toggle(session, buf)
-  local keys = require('diffy').config.keymaps
-  if keys.toggle_panel and keys.toggle_panel ~= '' then
-    session_mod.map(session, 'n', keys.toggle_panel, function()
+  local key = require('diffy').config.keymaps.toggle_panel
+  if key and key ~= '' then
+    session_mod.map(session, 'n', key, function()
       M.toggle_column(session)
     end, { buffer = buf, nowait = true, desc = 'toggle panels' })
-  end
-  if keys.focus_panel and keys.focus_panel ~= '' then
-    session_mod.map(session, 'n', keys.focus_panel, function()
-      focus_column(session)
-    end, { buffer = buf, nowait = true, desc = 'focus the file tree' })
   end
 end
 
 --- The keys every diffy buffer but the threads view has: `R` rebuilds, and
---- the column keys (`map_toggle`).
+--- the column toggle (`map_toggle`).
 function M.map_panel_keys(session, buf)
   session_mod.map(session, 'n', 'R', function()
     if session.refresh then

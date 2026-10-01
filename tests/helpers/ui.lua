@@ -405,20 +405,47 @@ function M.threads_view(child)
   ]])
 end
 
---- The threads view's rows grouped under their headers: `{ { group =
---- 'Open', count = 2, rows = { row text, … } }, … }` (a folded group has
---- no rows), from `M.threads_view`'s rows.
-function M.thread_groups(view)
-  local out = {}
+--- The threads view's buffer lines, one entry each: `{ kind = 'group',
+--- label, count, folded }`, `{ kind = 'file', path }`, `{ kind = 'thread',
+--- path, text }` (`text` reads `● f.txt:5  you  body`, the row under its
+--- file header with the path put back), `{ kind = 'other', text }`.
+function M.thread_rows(view)
+  local out, path = {}, nil
   for _, l in ipairs(view.rows) do
     local label, count = l:match('^▾ (.-)  (%d+)$')
-    if not label then
+    local folded = l:match('^▸ ') ~= nil
+    if folded then
       label, count = l:match('^▸ (.-)  (%d+)$')
     end
+    local icon, loc, rest = l:match('^    (%S+)%s+(%S+)  (.*)$')
+    local header = l:match('^  (%S.*)$')
     if label then
-      table.insert(out, { group = label, count = tonumber(count), rows = {} })
-    elseif out[#out] and vim.trim(l) ~= '' then
-      table.insert(out[#out].rows, vim.trim(l))
+      table.insert(out, { kind = 'group', label = label, count = tonumber(count), folded = folded })
+    elseif icon and path then
+      local where = loc == 'file' and (path .. ' (file)') or (path .. ':' .. loc)
+      table.insert(out, { kind = 'thread', path = path, text = vim.trim(('%s %s  %s'):format(icon, where, rest)) })
+    elseif header then
+      path = header
+      table.insert(out, { kind = 'file', path = header })
+    else
+      table.insert(out, { kind = 'other', text = vim.trim(l) })
+    end
+  end
+  return out
+end
+
+--- The threads view's thread rows grouped under their headers: `{ { group =
+--- 'Open', count = 2, files = { path, … }, rows = { thread text, … } }, … }`
+--- (a folded group has none), from `M.thread_rows`.
+function M.thread_groups(view)
+  local out = {}
+  for _, r in ipairs(M.thread_rows(view)) do
+    if r.kind == 'group' then
+      table.insert(out, { group = r.label, count = r.count, files = {}, rows = {} })
+    elseif r.kind == 'file' and out[#out] then
+      table.insert(out[#out].files, r.path)
+    elseif r.kind == 'thread' and out[#out] then
+      table.insert(out[#out].rows, r.text)
     end
   end
   return out

@@ -27,8 +27,7 @@ require('diffy').setup({
   -- 'threads' (review threads, compact). The others open in a float.
   column = { 'tree', 'log' },
   keymaps = {
-    toggle_panel = '<leader>e',   -- hide/show the panel column, in every diffy window
-    focus_panel = '<leader>E',    -- go to the file tree, showing the column first if hidden
+    toggle_panel = '<leader>e',   -- in every diffy window: hide the panel column, or show it and go to the file tree
   },
   -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
@@ -140,8 +139,7 @@ session.
 | `]f` / `[f` | next / previous file |
 | `]r` / `[r` | next / previous commit |
 | `R` | refresh everything: git state, panels, window sizes |
-| `<leader>e` | hide / show the panel column |
-| `<leader>E` | go to the file tree, bringing the column back first if it's hidden |
+| `<leader>e` | hide the panel column, the cursor staying where it is; or show it and go to the file tree |
 
 **Statusline.** A blob side's buffer name is a `fugitive://…/.git//<sha>/<path>` URI, which is what a
 statusline shows. diffy sets `b:diffy_title` (`a1b2c3d: src/foo.lua`) on those buffers; with lualine:
@@ -197,7 +195,7 @@ the file has comments, and put your own back otherwise.
 | `<leader>ds` | hide / show the summaries, keeping the bars (hover still previews) |
 | `<leader>dr` | hide / show resolved threads |
 | `<leader>dt` | hide / show comments inline altogether |
-| `<leader>dC` / `<leader>dc` | the threads view: every thread / those of this file (`:Diffy threads`, `:Diffy threads file`) |
+| `<leader>dC` | the threads view: every thread, the file in the diff first (`:Diffy threads`) |
 | `gP` | PR description and conversation (`:Diffy pr`) |
 
 Threads open as a framed card over the other diff window; on an added or deleted file, where there is only
@@ -240,9 +238,11 @@ shows the PR description and its conversation the same way.
 
 **The threads view** lists the review's threads grouped by where they stand: Open, Outdated (no longer
 trackable to HEAD, not resolved), Detached (a local comment whose lines are gone), Resolved, and Resolved,
-outdated. Headers carry the count; the resolved groups start folded. Each row gives the file and line, who
-started the thread ("you" for yours), how many replies and who wrote the last one when it's someone else,
-`draft`/`pending`, and the first line. A thread the selected range doesn't show has its location dimmed.
+outdated; within a group, under a header per file, the file in the diff first (in bold). Group headers
+carry the count; the resolved groups start folded, and the cursor starts on the first thread of the file in the
+diff. Each row gives the line, who started the thread ("you" for yours), how many replies and who wrote
+the last one when it's someone else, `draft`/`pending`, and the first line. A thread the selected range
+doesn't show has its line dimmed.
 
 It opens in a float over the diff with a preview beside it (on a wide enough screen): which commits show
 the thread (GitHub), the code it's on (its lines numbered and marked, up to 3 lines of context above, the
@@ -251,7 +251,7 @@ instead, compact and without the preview, and `:Diffy threads` moves the cursor 
 
 | Key (in the threads view) | |
 |---|---|
-| `<CR>` | go to the thread: its file, its line, into its float. An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). Resolved or hidden threads are shown again. On a header: fold / unfold |
+| `<CR>` | go to the thread: its file, its line, into its float. An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). Resolved or hidden threads are shown again. On a group header: fold / unfold; on a file header: its first thread |
 | `<Tab>` | fold / unfold the group under the cursor |
 | `x` | resolve / unresolve the thread under the cursor |
 | `m` | only threads you started / everyone's (GitHub) |

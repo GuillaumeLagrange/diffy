@@ -244,14 +244,13 @@ local function thread_entries()
   child.o.columns = 200
   ui.all_threads(child, 'Diffy threads')
   local out, group = {}, nil
-  for i, l in ipairs(ui.threads_view(child).rows) do
-    local label = l:match('^▾ (.-)  %d+$')
-    if label then
-      group = label
-    elseif vim.trim(l) ~= '' then
+  for i, r in ipairs(ui.thread_rows(ui.threads_view(child))) do
+    if r.kind == 'group' then
+      group = r.label
+    elseif r.kind == 'thread' then
       child.type_keys(i .. 'G')
       local shown = ui.threads_view(child).preview[1]
-      table.insert(out, { lnum = tonumber(l:match(':(%d+)%s')), text = vim.trim(l), group = group, shown = shown })
+      table.insert(out, { lnum = tonumber(r.text:match(':(%d+)%s')), text = r.text, group = group, shown = shown })
     end
   end
   child.type_keys('q')

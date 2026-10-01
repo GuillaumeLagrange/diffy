@@ -1,5 +1,5 @@
--- `:Diffy threads` (`<leader>dC`; `<leader>dc` for the file in the diff):
--- every thread of the review, grouped by where it stands (`GROUPS`). A
+-- `:Diffy threads` (`<leader>dC`): every thread of the review, grouped by
+-- where it stands (`GROUPS`), then by file, the file in the diff first. A
 -- layout.lua view: in a float over the diff with the thread under the
 -- cursor previewed beside it, or compact in the column when
 -- `config.column` lists it.
@@ -65,9 +65,9 @@ local function review_of(session)
   return type(session.review) == 'table' and session.review or nil
 end
 
---- Entries `{ thread, group, line, here }` matching the filters, by file,
---- then line, then age. `here`: shown in the current selection, `line`
---- being where; else `line` is the thread's own.
+--- Entries `{ thread, group, line, here }` matching the filters, by file
+--- (the one in the diff first), then line, then age. `here`: shown in the
+--- current selection, `line` being where; else `line` is the thread's own.
 local function collect(session, st)
   local review = session.review
   local files = {}
@@ -97,9 +97,14 @@ local function collect(session, st)
       })
     end
   end
+  local current = session.current_path
   table.sort(out, function(a, b)
-    if a.thread.anchor.path ~= b.thread.anchor.path then
-      return a.thread.anchor.path < b.thread.anchor.path
+    local pa, pb = a.thread.anchor.path, b.thread.anchor.path
+    if pa ~= pb then
+      if pa == current or pb == current then
+        return pa == current
+      end
+      return pa < pb
     end
     if (a.line or 0) ~= (b.line or 0) then
       return (a.line or 0) < (b.line or 0)
@@ -121,18 +126,13 @@ local function width_of(chunks)
   return n
 end
 
--- a longer path keeps its end, where the file name is
-local PATH_MAX = 36
-
---- A thread's cells: state, location, who (first author, replies, who
---- spoke last; `me` is "you"), what isn't published yet, first line.
+--- A thread's cells: state, line, who (first author, replies, who spoke
+--- last; `me` is "you"), what isn't published yet, first line.
 local function cells(session, e, full, me)
   local t = e.thread
   local people = session.review.backend.capabilities.people
-  local line = e.line and (':' .. e.line) or ' (file)'
-  local path = full and highlight.truncate_left(t.anchor.path, PATH_MAX) or vim.fn.fnamemodify(t.anchor.path, ':t')
   -- threads the selection doesn't show are dimmed where they are
-  local loc_hl = e.here and 'DiffyDirectory' or 'DiffyThreadTime'
+  local loc_hl = not e.here and 'DiffyThreadTime' or nil
   local function person(login)
     if not people or login == me then
       return { 'you', 'DiffyThreadAuthor' }
@@ -159,7 +159,7 @@ local function cells(session, e, full, me)
   local icon = ICONS[state_name]
   return {
     icon = { { icon[1], icon[2] or highlight.lane(t.id) } },
-    loc = { { path, loc_hl }, { line, 'LineNr' } },
+    loc = { { e.line and tostring(e.line) or 'file', loc_hl } },
     who = who,
     badges = badges,
     text = { first_line(t), t.resolved and 'DiffyThreadSummaryResolved' or nil },
@@ -168,8 +168,9 @@ end
 
 local CELL_ORDER = { 'icon', 'loc', 'who', 'badges' }
 
---- One line per thread with every cell padded to its widest, so the first
---- lines start at the same column; the text is cut to `width`.
+--- One line per thread with every cell padded to its widest (line numbers
+--- right-aligned), so the first lines start at the same column; the text is
+--- cut to `width`.
 local function thread_lines(session, entries, width, full)
   local backend = session.review.backend
   local me = backend.capabilities.people and backend.author(session.root) or nil
@@ -182,11 +183,18 @@ local function thread_lines(session, entries, width, full)
   end
   local out = {}
   for i, c in ipairs(all) do
-    local chunks = { { '  ' } }
+    local chunks = { { '    ' } }
     for _, k in ipairs(CELL_ORDER) do
       if w[k] > 0 then
-        vim.list_extend(chunks, c[k])
-        table.insert(chunks, { (' '):rep(w[k] - width_of(c[k]) + 2) })
+        local pad = (' '):rep(w[k] - width_of(c[k]))
+        if k == 'loc' then
+          table.insert(chunks, { pad })
+          vim.list_extend(chunks, c[k])
+          table.insert(chunks, { '  ' })
+        else
+          vim.list_extend(chunks, c[k])
+          table.insert(chunks, { pad .. '  ' })
+        end
       end
     end
     local room = math.max(1, width - width_of(chunks))
@@ -215,7 +223,16 @@ end
 --- What the row under the view's cursor shows, as an identity that
 --- survives a re-render.
 local function row_key(row)
-  return row and (row.kind == 'group' and ('group:' .. row.key) or ('thread:' .. row.entry.thread.id)) or nil
+  if not row then
+    return nil
+  end
+  if row.kind == 'group' then
+    return 'group:' .. row.key
+  end
+  if row.kind == 'file' then
+    return ('file:%s:%s'):format(row.group, row.path)
+  end
+  return 'thread:' .. row.entry.thread.id
 end
 
 local function cursor_row(session)
@@ -280,9 +297,19 @@ local function render(session)
         })
         rows[#chunk_lines] = { kind = 'group', key = g.key }
         if not folded then
+          local path
           for i, chunks in ipairs(thread_lines(session, entries, width, full)) do
+            local e = entries[i]
+            if e.thread.anchor.path ~= path then
+              path = e.thread.anchor.path
+              table.insert(chunk_lines, {
+                { '  ' },
+                { highlight.truncate_left(path, width - 2), path == session.current_path and { 'DiffyDirectory', 'DiffyCurrentFileName' } or 'DiffyDirectory' },
+              })
+              rows[#chunk_lines] = { kind = 'file', path = path, entry = e, group = g.key }
+            end
             table.insert(chunk_lines, chunks)
-            rows[#chunk_lines] = { kind = 'thread', entry = entries[i], group = g.key }
+            rows[#chunk_lines] = { kind = 'thread', entry = e, group = g.key }
           end
         end
       end
@@ -308,7 +335,8 @@ local function render(session)
     return
   end
   -- back on the same thread or group; else the same line (what was under
-  -- it moved into a folded group), and on a fresh view the first thread
+  -- it moved into a folded group), and on a fresh view the first thread of
+  -- the file in the diff, else the first thread
   local target
   for lnum, row in pairs(rows) do
     if prev_key and row_key(row) == prev_key then
@@ -319,13 +347,18 @@ local function render(session)
     target = math.min(prev_lnum, #lines)
   end
   if not target then
-    target = 1
+    local first
     for lnum = 1, #lines do
-      if rows[lnum] and rows[lnum].kind == 'thread' then
-        target = lnum
-        break
+      local row = rows[lnum]
+      if row and row.kind == 'thread' then
+        first = first or lnum
+        if row.entry.thread.anchor.path == session.current_path then
+          target = lnum
+          break
+        end
       end
     end
+    target = target or first or 1
   end
   vim.api.nvim_win_set_cursor(win, { target, 0 })
   if full then

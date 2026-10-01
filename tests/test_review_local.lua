@@ -806,9 +806,8 @@ end
 --- Put the threads view's cursor on the row with `needle` and press `key`,
 --- waiting for `event` if given.
 local function press_on_row(needle, key, event)
-  local view = ui.threads_view(child)
-  for i, l in ipairs(view.rows) do
-    if l:find(needle, 1, true) then
+  for i, r in ipairs(ui.thread_rows(ui.threads_view(child))) do
+    if (r.text or r.label or r.path):find(needle, 1, true) then
       child.api.nvim_win_set_cursor(ui.wins(child).threads, { i, 0 })
     end
   end
@@ -821,7 +820,7 @@ local function press_on_row(needle, key, event)
   end
 end
 
-T[':Diffy threads lists every thread in a float, `file` those of the file in the diff; <CR> selects what shows one'] = function()
+T[':Diffy threads lists every thread in a float by file, the one in the diff first; `file` those of that file; <CR> selects what shows one'] = function()
   child.o.columns = 160
   vim.fn.writefile(Repo.lines(10), repo.dir .. '/g.txt')
   open_default()
@@ -833,14 +832,16 @@ T[':Diffy threads lists every thread in a float, `file` those of the file in the
   local groups, view = threads('Diffy threads')
   MiniTest.expect.equality(#groups, 1)
   MiniTest.expect.equality({ groups[1].group, groups[1].count }, { 'Open', 2 })
-  MiniTest.expect.equality(groups[1].rows[1]:match('f%.txt:5') ~= nil, true)
-  MiniTest.expect.equality(groups[1].rows[2]:match('g%.txt:3') ~= nil, true)
-  -- the preview beside it shows the thread under the cursor, the first one
-  MiniTest.expect.equality(view.preview_title, 'f.txt:5')
-  MiniTest.expect.equality(table.concat(view.preview, '\n'):find('about f', 1, true) ~= nil, true)
-  child.type_keys('j')
-  view = ui.threads_view(child)
+  MiniTest.expect.equality(groups[1].files, { 'g.txt', 'f.txt' })
+  MiniTest.expect.equality(groups[1].rows[1]:match('g%.txt:3') ~= nil, true)
+  MiniTest.expect.equality(groups[1].rows[2]:match('f%.txt:5') ~= nil, true)
+  -- the cursor starts on the shown file's thread, previewed beside the list
   MiniTest.expect.equality(view.preview_title, 'g.txt:3')
+  MiniTest.expect.equality(table.concat(view.preview, '\n'):find('about g', 1, true) ~= nil, true)
+  -- over f.txt's header onto its thread
+  child.type_keys('2j')
+  view = ui.threads_view(child)
+  MiniTest.expect.equality(view.preview_title, 'f.txt:5')
   child.type_keys('q')
   MiniTest.expect.equality(ui.threads_view(child), vim.NIL)
 

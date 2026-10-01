@@ -93,7 +93,7 @@ T['diff-window keys are mapped on the placeholders, before the first render'] = 
   child.cmd('Diffy close')
 end
 
-T['<leader>E goes to the file tree from the diff, bringing the column back first when hidden'] = function()
+T['<leader>e hides the column leaving the cursor in the diff, and shows it again with the cursor in the file tree'] = function()
   repo = Repo.new():commit('Base', { ['a.txt'] = Repo.lines(5, 'a') })
   vim.fn.writefile({ 'a1', 'changed' }, repo.dir .. '/a.txt')
   child.fn.chdir(repo.dir)
@@ -103,15 +103,12 @@ T['<leader>E goes to the file tree from the diff, bringing the column back first
   local w = ui.wins(child)
 
   child.api.nvim_set_current_win(w.right)
-  child.type_keys('\\E')
-  MiniTest.expect.equality(child.api.nvim_get_current_win(), w.tree)
-
-  child.api.nvim_set_current_win(w.right)
   child.type_keys('\\e')
   MiniTest.expect.equality(ui.layout(child).tree, vim.NIL)
-  child.type_keys('\\E')
-  local shown = ui.layout(child)
-  MiniTest.expect.equality(shown.tree ~= vim.NIL, true)
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), w.right)
+
+  child.type_keys('\\e')
+  MiniTest.expect.equality(ui.layout(child).tree ~= vim.NIL, true)
   MiniTest.expect.equality(child.api.nvim_get_current_win(), ui.wins(child).tree)
 
   child.cmd('Diffy close')

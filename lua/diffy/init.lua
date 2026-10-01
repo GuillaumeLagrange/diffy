@@ -9,10 +9,9 @@ M.config = {
   -- (commits), 'threads' (review threads). Any other view opens in a float.
   column = { 'tree', 'log' },
   keymaps = {
-    -- buffer-local in every diffy window: hide/show the panel column
+    -- buffer-local in every diffy window: hide the panel column, or show it
+    -- and go to the file tree
     toggle_panel = '<leader>e',
-    -- … and go to the file tree, showing the column first if it's hidden
-    focus_panel = '<leader>E',
   },
   -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',

@@ -101,6 +101,21 @@ T['resting on a commit shows its full message, wrapped; Esc, other rows and leav
   child.cmd('Diffy close')
 end
 
+T['Esc with no commit message shown does what it was mapped to before diffy'] = function()
+  child.lua([[
+    _G.esc = 0
+    vim.keymap.set('n', '<Esc>', function() _G.esc = _G.esc + 1 end)
+  ]])
+  open()
+  keys_ready(tostring(row_of('Second')) .. 'G')
+  child.type_keys('<Esc>')
+  MiniTest.expect.equality({ float_lines(), child.lua_get('_G.esc') }, { vim.NIL, 0 })
+  child.type_keys('<Esc>')
+  MiniTest.expect.equality(child.lua_get('_G.esc'), 1)
+
+  child.cmd('Diffy close')
+end
+
 T['the float sits right of the column, beside the cursor row'] = function()
   open()
   local second = row_of('Second')

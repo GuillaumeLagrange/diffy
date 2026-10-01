@@ -353,6 +353,25 @@ T['<Esc> closes the hover card and keeps it closed on that line until the cursor
   child.cmd('Diffy close')
 end
 
+T['<Esc> with no thread card open does what it was mapped to before diffy'] = function()
+  child.lua([[
+    vim.g.esc = 0
+    vim.keymap.set('n', '<Esc>', '<Cmd>let g:esc += 1<CR>')
+  ]])
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 3, 'a thread')
+
+  child.type_keys('1G', '3G')
+  MiniTest.expect.equality(ui.thread_float(child) ~= vim.NIL, true)
+  child.type_keys('<Esc>')
+  MiniTest.expect.equality({ ui.thread_float(child), child.g.esc }, { vim.NIL, 0 })
+  child.type_keys('<Esc>')
+  MiniTest.expect.equality(child.g.esc, 1)
+
+  child.cmd('Diffy close')
+end
+
 T['each comment in the thread float is headed by who wrote it, when, and its state; only applicable keys are offered'] = function()
   child.o.columns = 160
   open_default()

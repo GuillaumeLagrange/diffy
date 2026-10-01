@@ -95,7 +95,7 @@ then the message wrapped to fit. It closes on a non-commit row, when you leave t
 | `a` | select everything |
 | `J` / `K` | select the next / previous entry |
 | `X` | toggle checkout mode (see below) |
-| `<Esc>` | close the commit message float |
+| `<Esc>` | close the commit message float; with none shown, whatever `<Esc>` is mapped to outside diffy |
 
 **Files** (top): status letter, path relative to its folder, `+added -removed`. The file shown in the diff
 is highlighted.
@@ -191,7 +191,7 @@ the file has comments, and put your own back otherwise.
 | `K` / `<CR>` | enter the thread float; `K` off a commented line is LSP hover (or `keywordprg`) as usual |
 | `]t` / `[t` | next / previous thread, by first line, larger range first, oldest first |
 | `<Tab>` / `<S-Tab>` | next / previous thread covering the cursor line, left to right, wrapping (also in the thread float) |
-| `<Esc>` | close the thread card; no preview on this line until the cursor leaves it |
+| `<Esc>` | close the thread card; no preview on this line until the cursor leaves it. With no card open, whatever `<Esc>` is mapped to outside diffy (e.g. `:nohlsearch`) |
 | `<leader>ds` | hide / show the summaries, keeping the bars (hover still previews) |
 | `<leader>dr` | hide / show resolved threads |
 | `<leader>dt` | hide / show comments inline altogether |

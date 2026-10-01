@@ -2015,20 +2015,21 @@ function M.setup_diff_keymaps(session, buf)
     M.cycle_line(session, -1)
   end, { buffer = buf, desc = 'review: previous thread on this line' })
   map(session, 'n', '<Esc>', function()
-    M.dismiss(session)
-  end, { buffer = buf, desc = 'review: close the thread card, no hover on this line' })
+    return M.dismiss(session)
+  end, { buffer = buf, fallback = true, desc = 'review: close the thread card, no hover on this line' })
 end
 
 --- `<Esc>` in a diff window: close the open thread card and keep hover from
---- reopening one until the cursor leaves its line.
+--- reopening one until the cursor leaves its line. False when no card is open.
 function M.dismiss(session)
   local review = session.review
   if not (review and review._open) then
-    return
+    return false
   end
   local win = vim.api.nvim_get_current_win()
   review._hover_off = { win = win, line = vim.api.nvim_win_get_cursor(win)[1] }
   M.close_thread(session)
+  return true
 end
 
 -- ---------------------------------------------------------------------

@@ -260,10 +260,12 @@ function M.setup(session)
   })
   session_mod.map(session, 'n', '<Esc>', function()
     local st = state(session)
+    local shown = valid(session.wins.commitmsg)
     st.suppressed = cursor_row(session)
     st.seq = st.seq + 1
     M.close(session)
-  end, { buffer = buf, desc = 'close the commit message' })
+    return shown
+  end, { buffer = buf, fallback = true, desc = 'close the commit message' })
 end
 
 return M

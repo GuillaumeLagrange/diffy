@@ -49,15 +49,63 @@ function M.namespace(session, name)
   return session.ns[name]
 end
 
+local function find_map(maps, lhsraw)
+  for _, m in ipairs(maps) do
+    if m.lhsraw == lhsraw and not (m.desc or ''):find('^diffy: ') then
+      return m
+    end
+  end
+end
+
+--- Run keymap `m` (a `nvim_get_keymap` entry) as if `lhs` was typed; nil
+--- means nvim's built-in `lhs`.
+local function run_mapping(m, lhs)
+  if not m then
+    vim.api.nvim_feedkeys(vim.keycode(lhs), 'n', false)
+    return
+  end
+  local keys
+  if m.callback then
+    keys = m.callback()
+    if m.expr ~= 1 then
+      return
+    end
+    if m.replace_keycodes == 1 and type(keys) == 'string' then
+      keys = vim.keycode(keys)
+    end
+  else
+    local rhs = m.rhs:gsub('<[Ss][Ii][Dd]>', ('<SNR>%d_'):format(m.sid))
+    keys = m.expr == 1 and vim.api.nvim_eval(rhs) or vim.keycode(rhs)
+  end
+  if type(keys) == 'string' and keys ~= '' then
+    vim.api.nvim_feedkeys(keys, m.noremap == 1 and 'n' or 'm', false)
+  end
+end
+
 --- Set a buffer-local keymap and record it for teardown/`unmap_buffer`.
 --- `opts.buffer` is required. All diffy keymaps get a `diffy: ` prefixed
 --- `desc`, which the leak check relies on to find stragglers.
+--- `opts.fallback`: `rhs` returns true when it acted; otherwise the key does
+--- what it did without diffy (the buffer-local map it shadowed, else the
+--- global one, else the built-in).
 function M.map(session, modes, lhs, rhs, opts)
   opts = vim.deepcopy(opts or {})
   assert(opts.buffer, 'session.map: opts.buffer is required')
   opts.desc = 'diffy: ' .. (opts.desc or lhs)
+  local fallback = opts.fallback
+  opts.fallback = nil
   for _, mode in ipairs(type(modes) == 'table' and modes or { modes }) do
-    vim.keymap.set(mode, lhs, rhs, opts)
+    local mode_rhs = rhs
+    if fallback then
+      local lhsraw = vim.keycode(lhs)
+      local shadowed = find_map(vim.api.nvim_buf_get_keymap(opts.buffer, mode), lhsraw)
+      mode_rhs = function()
+        if not rhs() then
+          run_mapping(shadowed or find_map(vim.api.nvim_get_keymap(mode), lhsraw), lhs)
+        end
+      end
+    end
+    vim.keymap.set(mode, lhs, mode_rhs, opts)
     table.insert(session.keymaps, { buf = opts.buffer, mode = mode, lhs = lhs })
   end
 end

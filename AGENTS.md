@@ -186,7 +186,11 @@ with the real config and `--listen`, screenshotted with `grim`:
 - `:tabnew` leaves a listed `[No Name]` buffer behind once its window shows something else; open the tab
   directly on a scratch buffer with `:tab sbuffer N`.
 - `vim.api.nvim__ns_set(ns, { wins = {…} })` scopes a namespace's extmarks/signs/virt_lines to those windows
-  (experimental API; `vim.fn.nvim__ns_set` raises). `nvim_win_add_ns` doesn't exist.
+  (experimental API; `vim.fn.nvim__ns_set` raises). `nvim_win_add_ns` doesn't exist. The scope only holds
+  for marks starting in the redrawn region: a multi-line range mark shows in every window of its buffer
+  once a redraw starts below its first line (scrolled, cursorline moved), so `diffpair.lua` paints
+  one-sided files from a decoration provider. An ephemeral `line_hl_group` isn't drawn; `hl_group` +
+  `hl_eol` is.
 - virt_lines on one side of a scrollbound diff shift that window only; the other side needs the same number
   of blank virt_lines on the counterpart line.
 - Diff highlights (DiffAdd/DiffText) win over an extmark `line_hl_group`; mark ranges with

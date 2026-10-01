@@ -107,6 +107,35 @@ function M.rows_with(child, panel, group)
   return out
 end
 
+--- Lines of `win`'s buffer drawn on screen (first cell) with background `bg`
+--- (0xRRGGBB, under 'termguicolors'); lines scrolled out of view are left
+--- out. With `want`, first waits up to 1 s for exactly those lines: a colour
+--- can land a redraw after the DiffyReady that drew the file.
+function M.lines_with_bg(child, win, bg, want)
+  return child.lua(
+    [[
+    local win, bg, want = ...
+    local function lines()
+      vim.cmd('redraw!')
+      local out = {}
+      for l = 1, vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(win)) do
+        local pos = vim.fn.screenpos(win, l, 1)
+        local cell = pos.row > 0 and vim.api.nvim__inspect_cell(1, pos.row - 1, pos.col - 1)
+        if cell and cell[2] and cell[2].background == bg then
+          table.insert(out, l)
+        end
+      end
+      return out
+    end
+    if want then
+      vim.wait(1000, function() return vim.deep_equal(lines(), want) end, 20)
+    end
+    return lines()
+  ]],
+    { win, bg, want }
+  )
+end
+
 --- Names of every `diffy://` buffer still loaded in `child`.
 function M.diffy_buffers(child)
   return child.lua_get([[(function()

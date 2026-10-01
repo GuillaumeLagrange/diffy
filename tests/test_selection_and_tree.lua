@@ -94,21 +94,18 @@ T['<CR> in the tree opens the pair and moves to the new side; o stays in the tre
   child.cmd('Diffy close')
 end
 
---- Highlight groups of the extmarks covering line `lnum` of the `side`
---- diff window.
-local function colour(side, lnum)
-  return child.lua(([[
-    local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
-    local buf = vim.api.nvim_win_get_buf(s.wins[%q])
-    local out = {}
-    for _, m in ipairs(vim.inspect_pos(buf, %d, 0).extmarks) do
-      table.insert(out, m.opts.hl_group)
-    end
-    return out
-  ]]):format(side, lnum - 1))
+--- Lines `first`..`last` of the `side` diff window, capped to what it shows.
+local function visible(side, first, last)
+  local win = ui.wins(child)[side]
+  local bottom = child.lua('return vim.fn.line("w$", ...)', { win })
+  return win, vim.fn.range(first, math.min(last, bottom))
 end
 
+local GREEN, RED = 0x00ff00, 0xff0000
+
 T['an added or deleted file fills the diff area, coloured as such; a modified one brings the pair back'] = function()
+  child.o.termguicolors = true
+  child.cmd('hi DiffAdd guibg=#00ff00 | hi DiffDelete guibg=#ff0000')
   ui.arm_ready(child, 'render')
   child.cmd('Diffy branch main')
   ui.wait_ready(child)
@@ -122,15 +119,18 @@ T['an added or deleted file fills the diff area, coloured as such; a modified on
 
   open_file('d.txt')
   MiniTest.expect.equality(shown(), { left = 'd.txt', right = false, windows = 1 })
-  MiniTest.expect.equality({ colour('left', 1), colour('left', 10) }, { { 'DiffyFileDeleted' }, { 'DiffyFileDeleted' } })
+  local win, lines = visible('left', 1, 10)
+  MiniTest.expect.equality(ui.lines_with_bg(child, win, RED, lines), lines)
 
   open_file('new.txt')
   MiniTest.expect.equality(shown(), { left = false, right = 'new.txt', windows = 1 })
-  MiniTest.expect.equality(colour('right', 20), { 'DiffyFileAdded' })
+  win, lines = visible('right', 1, 20)
+  MiniTest.expect.equality(ui.lines_with_bg(child, win, GREEN, lines), lines)
 
   open_file('f.txt')
   MiniTest.expect.equality(shown(), { left = 'f.txt', right = 'f.txt', windows = 2 })
-  MiniTest.expect.equality({ ui.layout(child).diff, colour('right', 1) }, { true, {} })
+  -- only nvim's own diff colours: the inserted first line
+  MiniTest.expect.equality({ ui.layout(child).diff, ui.lines_with_bg(child, ui.wins(child).right, GREEN, { 1 }) }, { true, { 1 } })
 
   child.cmd('Diffy close')
 end

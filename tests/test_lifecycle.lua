@@ -232,4 +232,27 @@ T[':tab split of the worktree side opens a plain window, where diffy keys do wha
   child.cmd('Diffy close')
 end
 
+T[':tab split of an added file shows it without the added colour, scrolled too'] = function()
+  child.o.termguicolors = true
+  child.cmd('hi DiffAdd guibg=#00ff00')
+  vim.fn.writefile(Repo.lines(10, 'line '), repo.dir .. '/new.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  ui.open_tree_row(child, 'new.txt', '<CR>', 'open_row')
+  local right = ui.wins(child).right
+  local GREEN, all = 0x00ff00, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }
+  MiniTest.expect.equality(ui.lines_with_bg(child, right, GREEN, all), all)
+  child.cmd('tab split')
+  local clone = child.api.nvim_get_current_win()
+  child.lua('vim.wait(500, function() return vim.wo.winbar == "" end)')
+  MiniTest.expect.equality(ui.lines_with_bg(child, clone, GREEN), {})
+  -- a redraw starting below the first line, as after scrolling or a cursor move
+  child.type_keys('<C-e>')
+  MiniTest.expect.equality(ui.lines_with_bg(child, clone, GREEN), {})
+  child.cmd('tabclose')
+  MiniTest.expect.equality(ui.lines_with_bg(child, right, GREEN, all), all)
+  child.cmd('Diffy close')
+end
+
 return T

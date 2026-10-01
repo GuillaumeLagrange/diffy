@@ -168,22 +168,52 @@ function M.restore(session)
   require('diffy.layout').relayout(session)
 end
 
---- The whole file on one side, coloured like its lines would be in a diff.
+-- The whole file on one side, coloured like its lines would be in a diff.
+-- Drawn per line by a decoration provider, only in the session's window: a
+-- range extmark would also show in every other window of the buffer (a
+-- `:tab split`) as soon as a redraw starts below its first line, window-
+-- scoped namespace or not (nvim's `decor_redraw_start` skips the scope).
+local one_sided_ns = vim.api.nvim_create_namespace('diffy/one_sided')
+local painting
+
+vim.api.nvim_set_decoration_provider(one_sided_ns, {
+  on_win = function(_, win, buf)
+    for _, s in pairs(session_mod.sessions) do
+      local o = s.one_sided
+      if o and o.win == win and o.buf == buf and not s.closed then
+        painting = o.group
+        return true
+      end
+    end
+    return false
+  end,
+  on_line = function(_, _, buf, row)
+    -- under syntax: the background only. An ephemeral `line_hl_group` isn't drawn.
+    vim.api.nvim_buf_set_extmark(buf, one_sided_ns, row, 0, {
+      end_row = row + 1,
+      hl_group = painting,
+      hl_eol = true,
+      priority = 10,
+      ephemeral = true,
+      strict = false,
+    })
+  end,
+})
+
+--- `value`: `{ win, buf, group }`, or nil for none.
+local function set_one_sided(session, value)
+  local old = session.one_sided
+  session.one_sided = value
+  for _, o in ipairs({ old or false, value or false }) do
+    if o and valid_win(o.win) then
+      vim.api.nvim__redraw({ win = o.win, valid = false, flush = false })
+    end
+  end
+end
+
 local function paint_one_sided(session, name, group)
   local win = session.wins[name]
-  local buf = vim.api.nvim_win_get_buf(win)
-  local ns = session_mod.namespace(session, 'one_sided')
-  -- a real file can be open elsewhere: only this window shows it
-  pcall(vim.api.nvim__ns_set, ns, { wins = { win } })
-  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
-  vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, {
-    end_row = vim.api.nvim_buf_line_count(buf),
-    strict = false,
-    hl_group = group,
-    hl_eol = true,
-    -- under syntax: the background only
-    priority = 10,
-  })
+  set_one_sided(session, { win = win, buf = vim.api.nvim_win_get_buf(win), group = group })
 end
 
 --- Scroll the left diff window to the right one's view by nvim's diff
@@ -232,15 +262,7 @@ function M.show(session, left_spec, right_spec)
       break
     end
   end
-  local ns = session.ns.one_sided
-  if ns then
-    for _, name in ipairs(SIDES) do
-      local win = session.wins[name]
-      if valid_win(win) then
-        vim.api.nvim_buf_clear_namespace(vim.api.nvim_win_get_buf(win), ns, 0, -1)
-      end
-    end
-  end
+  set_one_sided(session, nil)
 
   local one = (left_spec == nil) ~= (right_spec == nil) and (left_spec and 'left' or 'right') or nil
   if one then

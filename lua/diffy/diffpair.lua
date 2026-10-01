@@ -324,4 +324,41 @@ function M.track_edits(session)
   })
 end
 
+--- cursorbind puts the other window's cursor on the counterpart line, which
+--- for a line in an added or deleted block is past the filler, possibly below
+--- the window. Whatever validates that window's view next (`line('w0')` in
+--- `win_execute`, as diffchar.vim does on WinScrolled) scrolls it to that
+--- cursor and breaks the alignment. Keep the bound cursor inside the view.
+function M.keep_bound_cursor_visible(session)
+  vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI' }, {
+    group = session.augroup,
+    callback = function()
+      local cur = vim.api.nvim_get_current_win()
+      local name = (cur == session.wins.left and 'left') or (cur == session.wins.right and 'right')
+      if not name or not vim.wo[cur].cursorbind then
+        return
+      end
+      local other = session.wins[other_side(name)]
+      if not valid_win(other) or not vim.wo[other].cursorbind then
+        return
+      end
+      -- getwininfo computes botline from the current topline without scrolling
+      local info = vim.fn.getwininfo(other)[1]
+      local so = vim.wo[other].scrolloff
+      if so < 0 then
+        so = vim.go.scrolloff
+      end
+      so = math.min(so, math.floor((info.height - 1) / 2))
+      local last = vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(other))
+      local top = info.topline + (info.topline > 1 and so or 0)
+      local bottom = info.botline - (info.botline < last and so or 0)
+      local pos = vim.api.nvim_win_get_cursor(other)
+      local lnum = math.max(top, math.min(pos[1], bottom))
+      if top <= bottom and lnum ~= pos[1] then
+        vim.api.nvim_win_set_cursor(other, { lnum, pos[2] })
+      end
+    end,
+  })
+end
+
 return M

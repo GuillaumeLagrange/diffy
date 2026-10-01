@@ -201,6 +201,11 @@ with the real config and `--listen`, screenshotted with `grim`:
 - A window opened while a diff window is current, floats included (a snacks picker), copies its
   window-local options: `scrollbind`, `cursorbind`, `diff`. A bound picker prompt gets its cursor dragged
   back to column 0 as you type; `session.lua` unbinds every window of the tab diffy doesn't own on `WinNew`.
+- cursorbind puts the other diff window's cursor on the counterpart line, past the filler for a line in an
+  added/deleted block, so possibly below that window. nvim leaves it there until something validates that
+  window's view (`line('w0')` inside `win_execute`, which diffchar.vim does on every `WinScrolled`); then
+  the window scrolls to its cursor, out of alignment. `diffpair.keep_bound_cursor_visible` clamps it on
+  `CursorMoved`, which runs before `WinScrolled`. Vim does the same.
 - `nvim_set_current_win`/`nvim_win_set_buf` don't fire `WinEnter`/`BufEnter`. `BufWinEnter` runs with the
   affected window current and only when the buffer actually changes.
 - Autocmd callbacks don't nest: buffer swaps and option changes made inside a `BufWinEnter` callback fire

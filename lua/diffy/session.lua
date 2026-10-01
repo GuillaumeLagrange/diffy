@@ -85,25 +85,28 @@ end
 --- Set a buffer-local keymap and record it for teardown/`unmap_buffer`.
 --- `opts.buffer` is required. All diffy keymaps get a `diffy: ` prefixed
 --- `desc`, which the leak check relies on to find stragglers.
---- `opts.fallback`: `rhs` returns true when it acted; otherwise the key does
---- what it did without diffy (the buffer-local map it shadowed, else the
---- global one, else the built-in).
+--- Outside the session's tab (the buffer shown in a `:tab split`), and with
+--- `opts.fallback` when `rhs` returns false, the key does what it did
+--- without diffy (the buffer-local map it shadowed, else the global one,
+--- else the built-in).
 function M.map(session, modes, lhs, rhs, opts)
   opts = vim.deepcopy(opts or {})
   assert(opts.buffer, 'session.map: opts.buffer is required')
   opts.desc = 'diffy: ' .. (opts.desc or lhs)
   local fallback = opts.fallback
   opts.fallback = nil
+  local lhsraw = vim.keycode(lhs)
   for _, mode in ipairs(type(modes) == 'table' and modes or { modes }) do
-    local mode_rhs = rhs
-    if fallback then
-      local lhsraw = vim.keycode(lhs)
-      local shadowed = find_map(vim.api.nvim_buf_get_keymap(opts.buffer, mode), lhsraw)
-      mode_rhs = function()
-        if not rhs() then
-          run_mapping(shadowed or find_map(vim.api.nvim_get_keymap(mode), lhsraw), lhs)
+    local shadowed = find_map(vim.api.nvim_buf_get_keymap(opts.buffer, mode), lhsraw)
+    local function mode_rhs()
+      if vim.api.nvim_get_current_tabpage() == session.tab then
+        if not fallback then
+          return rhs()
+        elseif rhs() then
+          return
         end
       end
+      run_mapping(shadowed or find_map(vim.api.nvim_get_keymap(mode), lhsraw), lhs)
     end
     vim.keymap.set(mode, lhs, mode_rhs, opts)
     table.insert(session.keymaps, { buf = opts.buffer, mode = mode, lhs = lhs })
@@ -131,10 +134,10 @@ end
 -- already closed everything itself and teardown's window/tab steps are
 -- no-ops, while a lone `:q` still has its siblings open for teardown to
 -- close.
-local function schedule_teardown(session)
+local function schedule_teardown(session, opts)
   return function()
     vim.schedule(function()
-      M.teardown(session)
+      M.teardown(session, opts)
     end)
   end
 end
@@ -144,7 +147,7 @@ local function watch_close(session, win)
     group = session.augroup,
     pattern = tostring(win),
     once = true,
-    callback = schedule_teardown(session),
+    callback = schedule_teardown(session, { keep_lone = true }),
   })
   session._win_watchers = session._win_watchers or {}
   session._win_watchers[win] = au_id
@@ -230,6 +233,24 @@ end
 function M.unbind(win)
   vim.wo[win].scrollbind = false
   vim.wo[win].cursorbind = false
+end
+
+--- Make `win` a plain window again: a diff window the session lets go of,
+--- or a copy of one (`:tab split`). `diffoff` puts back the folds and wrap
+--- `diffthis` saved (a split copies them too); `statuscolumn` is the one
+--- the review gutter replaced, if any.
+function M.release(win, statuscolumn)
+  vim.api.nvim_win_call(win, function()
+    pcall(vim.cmd, 'diffoff')
+    vim.cmd('setlocal winbar<')
+  end)
+  M.unbind(win)
+  if statuscolumn ~= nil then
+    vim.api.nvim_set_option_value('statuscolumn', statuscolumn, { win = win, scope = 'local' })
+  end
+  vim.w[win].diffy_rev = nil
+  vim.w[win].diffy_path = nil
+  vim.w[win].diffy_statuscolumn = nil
 end
 
 M.PLACEHOLDER = { 'diffy: nothing loaded yet' }
@@ -374,6 +395,32 @@ function M.open(opts)
       end)
     end,
   })
+  -- A split leaves its source window (WinLeave), then fires WinNew and
+  -- WinEnter in the copy. One copied from a diff window into another tab
+  -- (`:tab split`) carries diff mode, diff folds and the winbar.
+  local split_from
+  vim.api.nvim_create_autocmd({ 'WinLeave', 'WinEnter' }, {
+    group = session.augroup,
+    callback = function(args)
+      local win = vim.api.nvim_get_current_win()
+      split_from = args.event == 'WinLeave' and (win == session.wins.left or win == session.wins.right) and win or nil
+    end,
+  })
+  vim.api.nvim_create_autocmd('WinNew', {
+    group = session.augroup,
+    callback = function()
+      local src, win = split_from, vim.api.nvim_get_current_win()
+      if not src or vim.api.nvim_win_get_tabpage(win) == session.tab then
+        return
+      end
+      local statuscolumn = vim.w[src].diffy_statuscolumn
+      vim.schedule(function()
+        if vim.api.nvim_win_is_valid(win) then
+          M.release(win, statuscolumn)
+        end
+      end)
+    end,
+  })
 
   vim.api.nvim_set_current_win(left_win)
 
@@ -381,16 +428,52 @@ function M.open(opts)
   return session
 end
 
+--- The diff window left alone in the session's tab, if it shows a file:
+--- every other window closed around it (`<C-w>o`, `:only`).
+local function lone_file_window(session)
+  if not vim.api.nvim_tabpage_is_valid(session.tab) then
+    return nil
+  end
+  local splits = vim.tbl_filter(function(w)
+    return vim.api.nvim_win_get_config(w).relative == ''
+  end, vim.api.nvim_tabpage_list_wins(session.tab))
+  local win = splits[1]
+  if #splits ~= 1 or (win ~= session.wins.left and win ~= session.wins.right) then
+    return nil
+  end
+  if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)):find('^diffy://') then
+    return nil
+  end
+  return win
+end
+
 --- Idempotent teardown: closes managed windows/buffers, deletes the
 --- augroup, removes tracked keymaps, clears extmarks in this session's
 --- namespaces from every buffer, and closes the tab if still open. Windows
---- and the tab may already be gone.
-function M.teardown(session)
+--- and the tab may already be gone. `opts.keep_lone`: a diff window left
+--- alone with a file stays, as a plain window in a plain tab.
+function M.teardown(session, opts)
   if not session or session.closed then
     return
   end
   session.closed = true
   M.sessions[session.id] = nil
+
+  local keep = opts and opts.keep_lone and lone_file_window(session)
+  if keep then
+    local buf = vim.api.nvim_win_get_buf(keep)
+    for name, w in pairs(session.wins) do
+      if w == keep then
+        session.wins[name] = nil
+      end
+    end
+    for name, b in pairs(session.bufs) do
+      if b == buf then
+        session.bufs[name] = nil
+      end
+    end
+    vim.b[buf].diffy_title = nil
+  end
 
   -- best-effort restore of an active full checkout; skipped while nvim is
   -- exiting, where checkout.lua's VimLeavePre handler does it synchronously.
@@ -432,7 +515,12 @@ function M.teardown(session)
     end
   end
 
-  if vim.api.nvim_tabpage_is_valid(session.tab) then
+  if keep then
+    if package.loaded['diffy.review.ui'] then
+      require('diffy.review.ui').fit_gutter(keep, nil)
+    end
+    M.release(keep)
+  elseif vim.api.nvim_tabpage_is_valid(session.tab) then
     local ok, tabnr = pcall(vim.api.nvim_tabpage_get_number, session.tab)
     if ok then
       pcall(vim.cmd, tabnr .. 'tabclose')

@@ -6,7 +6,10 @@ hand the comments to an LLM agent or push them as a GitHub pull request review.
 Each `:Diffy` session lives in its own tab: a column of views on the left (changed files on top, commits
 below; `column` in `setup` picks which) and a side-by-side diff in native diff mode. A view that isn't in
 the column (the review threads, by default) opens in a float over the diff. Closing the tab in any way
-(`:tabclose`, `:q` in a diffy window, `:Diffy close`, quitting nvim) cleans everything up.
+(`:tabclose`, `:q` in a diffy window, `:Diffy close`, quitting nvim) cleans everything up. `<C-w>o` (`:only`)
+in a diff window ends the session too, but keeps that window: a plain one showing its file, out of diff mode,
+with diffy's winbar and keys gone. `:tab split` of a diff window opens such a plain window, and the file's diffy
+keys do what they do elsewhere outside the session's tab.
 
 ## Requirements
 

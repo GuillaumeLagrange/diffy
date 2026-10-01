@@ -168,4 +168,68 @@ T['the worktree side is a listed buffer, like :edit would open'] = function()
   MiniTest.expect.equality(child.lua_get(('vim.bo[vim.api.nvim_win_get_buf(%d)].buflisted'):format(right)), true)
 end
 
+local function open_worktree_file()
+  child.o.foldmethod = 'indent'
+  vim.fn.writefile({ '1', 'changed', '3', '4', '5' }, repo.dir .. '/f.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(ui.layout(child).right.rev, 'worktree')
+end
+
+local function plain_window(win)
+  return child.lua(
+    [[
+    local win = ...
+    local wo = vim.wo[win]
+    return {
+      name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)),
+      diff = wo.diff, scrollbind = wo.scrollbind, cursorbind = wo.cursorbind,
+      winbar = wo.winbar, foldmethod = wo.foldmethod, wrap = wo.wrap,
+    }
+  ]],
+    { win }
+  )
+end
+
+local function expect_plain(win)
+  MiniTest.expect.equality(plain_window(win), {
+    name = repo.dir .. '/f.txt',
+    diff = false,
+    scrollbind = false,
+    cursorbind = false,
+    winbar = '',
+    foldmethod = 'indent',
+    wrap = true,
+  })
+end
+
+T['<C-w>o in the worktree side ends the session and keeps the file alone in a plain window'] = function()
+  open_worktree_file()
+  local right = ui.wins(child).right
+  child.api.nvim_set_current_win(right)
+  child.type_keys('<C-w>o')
+  child.lua('vim.wait(500, function() return vim.wo.winbar == "" end)')
+  MiniTest.expect.equality(tabs(), 2)
+  MiniTest.expect.equality(child.api.nvim_tabpage_list_wins(0), { right })
+  expect_plain(right)
+  MiniTest.expect.equality(ui.layout(child), nil)
+  MiniTest.expect.equality(ui.diffy_buffers(child), {})
+  child.cmd('tabclose')
+end
+
+T[':tab split of the worktree side opens a plain window, where diffy keys do what they do elsewhere'] = function()
+  open_worktree_file()
+  child.lua([[vim.keymap.set('n', ']f', function() vim.g.user_next_file = true end)]])
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  child.cmd('tab split')
+  local clone = child.api.nvim_get_current_win()
+  child.lua('vim.wait(500, function() return vim.wo.winbar == "" end)')
+  expect_plain(clone)
+  child.type_keys(']f')
+  MiniTest.expect.equality(child.g.user_next_file, true)
+  child.cmd('tabclose')
+  child.cmd('Diffy close')
+end
+
 return T

@@ -49,4 +49,22 @@ T['<C-u> through a long added block keeps the other side aligned when a plugin r
   end
 end
 
+T['coming back to a file with [f keeps the other side aligned with where the cursor was left'] = function()
+  -- commit g.txt without touching the f.txt edit, then edit it
+  local f = vim.fn.readfile(repo.dir .. '/f.txt')
+  repo:commit('g', { ['g.txt'] = Repo.lines(10), ['f.txt'] = Repo.lines(130) })
+  vim.fn.writefile(f, repo.dir .. '/f.txt')
+  local g = Repo.lines(10)
+  g[5] = 'changed'
+  vim.fn.writefile(g, repo.dir .. '/g.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  for _, key in ipairs({ 'G', ']f', '[f' }) do
+    child.type_keys(key)
+    eq({ key, ui.aligned(child) }, { key, true })
+  end
+end
+
 return T

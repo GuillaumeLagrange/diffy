@@ -186,6 +186,33 @@ local function paint_one_sided(session, name, group)
   })
 end
 
+--- Scroll the left diff window to the right one's view by nvim's diff
+--- alignment (`row(l) = l + Σ diff_filler(k)` for `k ≤ l`). `:syncbind`
+--- compares line numbers, ignoring the filler.
+local function align_left(session)
+  local target = vim.api.nvim_win_call(session.wins.right, function()
+    -- the view of a buffer just put in the window is only computed on use
+    vim.fn.line('w0')
+    local view = vim.fn.winsaveview()
+    local row = view.topline
+    for k = 1, view.topline do
+      row = row + vim.fn.diff_filler(k)
+    end
+    return row - view.topfill
+  end)
+  vim.api.nvim_win_call(session.wins.left, function()
+    local row = 0
+    for l = 1, vim.fn.line('$') do
+      local filler = vim.fn.diff_filler(l)
+      row = row + filler + 1
+      if row >= target then
+        vim.fn.winrestview({ topline = l, topfill = math.min(filler, row - target) })
+        return
+      end
+    end
+  end)
+end
+
 --- Show `left_spec`/`right_spec` in the session's diff windows and put both
 --- into native diff mode with scrollbind/cursorbind. An added or deleted
 --- file (one spec `nil`) takes the whole diff area, coloured as added or
@@ -237,6 +264,10 @@ function M.show(session, left_spec, right_spec)
         vim.cmd('diffthis')
       end)
     end
+    -- The right window can come back to a file at the view it was left at
+    -- (a real file remembers its cursor per window) while the left blob is
+    -- fresh at the top: scrollbind only follows the next scroll.
+    align_left(session)
   end
 
   require('diffy.review.ui').decorate(session)

@@ -208,7 +208,7 @@ T['rapid J J J ends up showing the last selection, even if an earlier one\'s git
   MiniTest.expect.equality(selected(), { 'C1' })
   MiniTest.expect.equality(ui.layout(child).tree, c1_tree)
 
-  -- release the stale render (name-status, then the numstat it triggers)
+  -- release the stale render (raw, then the numstat it triggers)
   for _ = 1, 10 do
     child.lua([[
       while #_G.__deferred > 0 do

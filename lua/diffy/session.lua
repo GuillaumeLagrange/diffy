@@ -482,6 +482,9 @@ function M.teardown(session, opts)
   end
 
   pcall(vim.api.nvim_del_augroup_by_id, session.augroup)
+  if package.loaded['diffy.viewed'] then
+    require('diffy.viewed').detach(session)
+  end
   -- images are drawn on the terminal, outside any window
   if package.loaded['diffy.avatar'] then
     require('diffy.avatar').clear(session.id)

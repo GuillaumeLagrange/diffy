@@ -31,6 +31,8 @@ require('diffy').setup({
   column = { 'tree', 'log' },
   keymaps = {
     toggle_panel = '<leader>e',   -- in every diffy window: hide the panel column, or show it and go to the file tree
+    toggle_viewed = '<leader>m',  -- in the diff windows: mark the file shown viewed, or unmark it
+    tree_toggle_viewed = 'm',     -- in the file tree: the same for the file, folder or section at the cursor
   },
   -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
@@ -49,6 +51,7 @@ require('diffy').setup({
 | `:Diffy file [path]` | commits touching the file (default: current buffer), across renames | newest |
 | `:Diffy conflicts` | conflicted files, in the conflict view | first file |
 | `:Diffy panel` | hide/show the panel column | |
+| `:Diffy viewed [clear]` | mark the file shown viewed, or unmark it; `clear` drops all its marks. See Viewed files | |
 | `:Diffy threads [file] [author=… state=… review=…]` | the threads view: every review thread, grouped; `file`: those of the file in the diff (`state`: open, resolved, outdated, detached). See Review | |
 | `:Diffy review submit\|clear` | local review, see below | |
 | `:Diffy review submit [comment\|approve\|request_changes]\|push\|pull` | GitHub review, see below | |
@@ -57,7 +60,7 @@ require('diffy').setup({
 | `:Diffy close` | close the session | |
 
 `<Tab>` completes subcommands and their arguments: the review subcommands and events the current session
-offers, `:Diffy threads` filters, paths for `file`, branches for `branch`.
+offers, `:Diffy threads` filters, paths for `file`, branches for `branch`, `clear` for `viewed`.
 
 `:Diffy branch` without an argument uses the PR base of the current branch, then `origin`'s default branch.
 Either is taken through the base branch's upstream (usually `origin/main`: the remote's tip as of your last
@@ -115,12 +118,13 @@ headers stay when a section is empty; with no changes at all the tree says `(no 
 |---|---|
 | `<CR>` | open the file and move to the diff; on a folder or section header, collapse / expand it |
 | `o` | open the file, stay in the tree; on a header, collapse / expand it |
-| `]f` / `[f` | next / previous file, skipping collapsed folders |
+| `]f` / `[f` | next / previous file, skipping collapsed folders and viewed files |
 | `]r` / `[r` | next / previous commit |
 | `gf` | open the real file in the previous tab |
 | `-` | move the file to the other section (stage in Unstaged, unstage in Staged) |
 | `s` / `u` | stage / unstage the file, whichever section it's in (a rename stages both paths) |
 | `S` / `U` | stage / unstage everything |
+| `m` | mark the file viewed, or unmark it; on a folder, section or `Viewed` header, mark every file under it, or unmark them all when they all are viewed |
 
 A collapsed folder shows as its header followed by `…` and stays collapsed as you change the selection;
 jumping to a file inside it from the diff expands it.
@@ -129,6 +133,21 @@ On a section header, collapsed or not, `-`, `s` and `u` apply to every file of t
 follows the file into the section it moved to. Staging works only with `Working tree` selected alone. You
 can also stage hunk by hunk: for an Unstaged file the left side is the index, so `do`/`dp` or editing it and
 `:w` stages; for a Staged file the right side is the index.
+
+**Viewed files.** Marking a file viewed (`m` in the tree, `<leader>m` in the diff, `:Diffy viewed`) moves it
+to a folded `Viewed (n)` group at the bottom of its section (or of the tree, without sections). The group
+unfolds while it holds the file shown and folds back once that file leaves it, unless you unfolded it
+yourself. `]f`/`[f` skip viewed files, and so does the file opened first after a refresh. Marking the file
+shown opens the next unviewed one; with none left, the keys stay where they are and say so.
+
+A mark records the file's change as the view shows it: the blob on the left and the blob on the right. The
+file stays viewed while the view shows that same pair: committing, staging, amending or rebasing on a base
+that didn't touch it keep it; an edit to it, a base that changed it, a symlink retargeted or a submodule
+moved bring it back. A file that comes back carries `●` until you open it (the file you're looking at never
+gets one). Marks are per view: a file marked on one commit isn't hidden in the whole-branch view, and the
+other way round; each view keeps its own marks (the last 5 per path). A rename (`R`) keeps the marks of
+its old path. `:Diffy viewed clear` drops every mark of the file shown. Marks are stored in
+`.git/diffy/<branch>/viewed.json`, shared live by every session on the branch, in any nvim.
 
 ## The diff
 
@@ -144,7 +163,8 @@ session.
 
 | Key (in either diff window) | |
 |---|---|
-| `]f` / `[f` | next / previous file |
+| `]f` / `[f` | next / previous file, skipping viewed files |
+| `<leader>m` | mark the file shown viewed (and open the next unviewed one), or unmark it |
 | `]r` / `[r` | next / previous commit |
 | `R` | refresh everything: git state, panels, window sizes |
 | `<leader>e` | hide the panel column, the cursor staying where it is; or show it and go to the file tree |
@@ -322,6 +342,7 @@ All set with `default = true`, so a colorscheme or your config can override any 
 | `DiffyDirectory`, `DiffySha`, `DiffyLabel`, `DiffyMerge` | `Directory`, `Identifier`, `Title`, `Comment` | tree folders, log rows |
 | `DiffySelection` | `Visual` | selected commits |
 | `DiffyCurrentFile`, `DiffyCurrentFileName` | `Visual`, bold | the file shown in the diff |
+| `DiffyViewedChanged` | `DiagnosticWarn` | the `●` of a viewed file that changed since |
 | `DiffyThreadSummary` / `DiffyThreadCurrent` | `Comment` / bold | comment summaries / the weight of the open one's |
 | `DiffyThreadStep` | `Normal`'s colour, bold | the `]t`/`[t` marks on summaries |
 | `DiffyThreadSummaryResolved` | `NonText` | summaries and bars of resolved threads (their ✓ uses `DiffyThreadResolved`) |

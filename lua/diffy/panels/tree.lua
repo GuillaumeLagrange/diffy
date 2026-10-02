@@ -12,8 +12,11 @@ local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
 local selection = require('diffy.selection')
 local hl = require('diffy.highlight')
+local viewed = require('diffy.viewed')
 
 local M = {}
+
+local ZERO = ('0'):rep(40)
 
 -- after a collapsed folder or section header
 local COLLAPSED = ' …'
@@ -28,24 +31,19 @@ local function diff_cmd(session, pair, format_flag)
   return args
 end
 
---- name-status entries annotated with their numstat +/- counts.
-local function merge_counts(ns_list, numstat)
+--- raw entries annotated with their numstat +/- counts.
+local function merge_counts(raw, numstat)
   local by_path = {}
   for _, e in ipairs(numstat) do
     by_path[e.path] = e
   end
-  local entries = {}
-  for _, e in ipairs(ns_list) do
+  for _, e in ipairs(raw) do
     local n = by_path[e.path]
-    table.insert(entries, {
-      status = e.status,
-      path = e.path,
-      old_path = e.old_path,
-      added = n and n.added or nil,
-      removed = n and n.removed or nil,
-    })
+    e.added = n and n.added or nil
+    e.removed = n and n.removed or nil
+    e.score = nil
   end
-  return entries
+  return raw
 end
 
 -- An unmerged path's plain `git diff` (worktree vs index) reports it twice
@@ -70,18 +68,19 @@ local function drop_unmerged_duplicates(entries)
   return deduped
 end
 
---- name-status + numstat for `pair`, merged by path, plus untracked files
+--- raw + numstat for `pair`, merged by path, plus untracked files
 --- for the unstaged pair (index -> worktree).
 local function build_diff_entries(session, pair, gen, cb)
-  local ns_args = diff_cmd(session, pair, '--name-status')
+  local raw_args = diff_cmd(session, pair, '--raw')
+  table.insert(raw_args, 5, '--no-abbrev')
   local num_args = diff_cmd(session, pair, '--numstat')
 
-  run.git(ns_args, {
+  run.git(raw_args, {
     cwd = session.root,
     session = session,
     gen = gen,
-    on_exit = run.parsed(parse.name_status, function(ns_list, err)
-      if not ns_list then
+    on_exit = run.parsed(parse.raw, function(raw, err)
+      if not raw then
         cb(nil, err)
         return
       end
@@ -94,11 +93,11 @@ local function build_diff_entries(session, pair, gen, cb)
             cb(nil, num_err)
             return
           end
-          local entries = merge_counts(ns_list, numstat)
+          local entries = merge_counts(raw, numstat)
           if pair.left == 'INDEX' and pair.right == 'WORKTREE' then
             for _, s in ipairs(session.status_entries or {}) do
               if s.kind == 'untracked' then
-                table.insert(entries, { status = '?', path = s.path })
+                table.insert(entries, { status = '?', path = s.path, left_id = ZERO })
               end
             end
           end
@@ -111,6 +110,90 @@ local function build_diff_entries(session, pair, gen, cb)
       })
     end),
   })
+end
+
+--- Fill the right ids git left at zero (worktree files) for every entry of
+--- `lists`, then `cb()`. A deleted file keeps its zero id: `hash-object
+--- --stdin-paths` fails the whole batch on a missing path. Symlinks hash
+--- their target string (`--stdin-paths` would follow them), submodules
+--- take their checked-out commit (`hash-object` refuses them).
+local function fill_ids(session, lists, gen, cb)
+  local files, by_path, links, subs = {}, {}, {}, {}
+  local function want(tbl, path, e)
+    if not tbl[path] then
+      tbl[path] = {}
+      if tbl == by_path then
+        table.insert(files, path)
+      end
+    end
+    table.insert(tbl[path], e)
+  end
+  for _, entries in ipairs(lists) do
+    for _, e in ipairs(entries) do
+      if e.status ~= 'D' and e.status ~= 'U' and (e.right_id == nil or e.right_id == ZERO) then
+        e.right_id = nil
+        local st = vim.uv.fs_lstat(session.root .. '/' .. e.path)
+        local kind = st and st.type
+        if e.right_mode == '120000' or kind == 'link' then
+          want(links, e.path, e)
+        elseif e.right_mode == '160000' or kind == 'directory' then
+          want(subs, e.path, e)
+        elseif kind == 'file' and not e.path:find('\n', 1, true) then
+          want(by_path, e.path, e)
+        end
+      end
+    end
+  end
+  local pending = 1
+  local function done()
+    pending = pending - 1
+    if pending == 0 then
+      cb()
+    end
+  end
+  local function assign(entries, id)
+    for _, e in ipairs(entries) do
+      e.right_id = id
+    end
+  end
+  local function call(args, stdin, on_ok)
+    pending = pending + 1
+    run.git(args, {
+      cwd = session.root,
+      session = session,
+      gen = gen,
+      stdin = stdin,
+      notify_on_error = false,
+      on_exit = function(res)
+        if res.code == 0 then
+          on_ok(res.stdout or '')
+        end
+        done()
+      end,
+    })
+  end
+  if #files > 0 then
+    call({ 'hash-object', '--stdin-paths' }, table.concat(files, '\n') .. '\n', function(out)
+      local ids = vim.split(vim.trim(out), '\n', { plain = true })
+      for i, path in ipairs(files) do
+        assign(by_path[path], ids[i])
+      end
+    end)
+  end
+  for path, entries in pairs(links) do
+    local target = vim.uv.fs_readlink(session.root .. '/' .. path)
+    if target then
+      call({ 'hash-object', '--stdin' }, target, function(out)
+        assign(entries, vim.trim(out))
+      end)
+    end
+  end
+  for path, entries in pairs(subs) do
+    call({ '-C', path, 'rev-parse', 'HEAD' }, nil, function(out)
+      assign(entries, vim.trim(out))
+    end)
+  end
+  done()
 end
 
 local function basename(path)
@@ -191,18 +274,43 @@ local function layout(node, path, chain, base, depth, rows)
   end
 end
 
---- Group a flat, path-sorted entry list into display rows, `depth` deep,
---- file rows tagged with `pair` (a section's pair, or nil), header rows with
---- a `key` naming them across renders (`section`'s label prefixed).
-local function group_rows(entries, depth, pair, rows, section)
-  rows = rows or {}
-  local first = #rows + 1
-  layout(build_tree(entries), '', '', '', depth or 0, rows)
+local function tag_rows(rows, first, pair, prefix)
   for i = first, #rows do
     local row = rows[i]
     row.pair = row.kind == 'file' and pair or nil
     if row.kind == 'dir' then
-      row.key = (section or '') .. '/' .. row.path
+      row.key = prefix .. '/' .. row.path
+    end
+  end
+end
+
+--- Group a flat, path-sorted entry list into display rows, `depth` deep,
+--- file rows tagged with `pair` (a section's pair, or nil), header rows with
+--- a `key` naming them across renders (`section`'s label prefixed). Viewed
+--- files go under a `Viewed (n)` header after the others.
+local function group_rows(session, entries, depth, pair, rows, section)
+  rows = rows or {}
+  depth = depth or 0
+  local shown, done = {}, {}
+  for _, e in ipairs(entries) do
+    table.insert(viewed.is_viewed(session, e) and done or shown, e)
+  end
+  local first = #rows + 1
+  layout(build_tree(shown), '', '', '', depth, rows)
+  tag_rows(rows, first, pair, section or '')
+  for i = first, #rows do
+    if rows[i].kind == 'file' then
+      rows[i].changed = viewed.changed(session, rows[i].entry) or nil
+    end
+  end
+  if #done > 0 then
+    local key = (section or '') .. '#viewed'
+    table.insert(rows, { kind = 'viewed', label = 'Viewed', count = #done, depth = depth, key = key })
+    first = #rows + 1
+    layout(build_tree(done), '', '', '', depth + 1, rows)
+    tag_rows(rows, first, pair, key)
+    for i = first, #rows do
+      rows[i].viewed = rows[i].kind == 'file' or nil
     end
   end
   return rows
@@ -211,7 +319,7 @@ end
 --- The two sections' rows: a header (`Unstaged (n)`/`Staged (n)`) then its
 --- files one level deeper. Both headers stay even when one section is
 --- empty; with no changes at all there are no rows.
-local function section_rows(unstaged, staged)
+local function section_rows(session, unstaged, staged)
   local rows = {}
   if #unstaged == 0 and #staged == 0 then
     return rows
@@ -221,9 +329,18 @@ local function section_rows(unstaged, staged)
     { label = 'Staged', pair = selection.STAGED, entries = staged },
   }) do
     table.insert(rows, { kind = 'section', label = s.label, count = #s.entries, pair = s.pair, depth = 0, key = s.label })
-    group_rows(s.entries, 1, s.pair, rows, s.label)
+    group_rows(session, s.entries, 1, s.pair, rows, s.label)
   end
   return rows
+end
+
+--- `session.tree_all` from the last git listing and the current marks.
+local function make_rows(session)
+  local lists = session.tree_lists
+  if lists.split then
+    return section_rows(session, lists[1], lists[2])
+  end
+  return group_rows(session, lists[1])
 end
 
 local function relative(path, base)
@@ -249,18 +366,20 @@ local function row_line(row, width)
     local text = indent .. name .. '/'
     return text .. more, { { #indent, #text, 'DiffyDirectory' }, { #text, #text + #more, 'Comment' } }, nil, name ~= row.name
   end
-  if row.kind == 'section' then
-    local full = ('%s (%d)'):format(row.label, row.count)
+  if row.kind == 'section' or row.kind == 'viewed' then
+    local full = indent .. ('%s (%d)'):format(row.label, row.count)
     local more = row.collapsed and COLLAPSED or ''
     local text = width and hl.truncate(full, math.max(1, width - vim.fn.strdisplaywidth(more))) or full
-    return text .. more, { { 0, #text, 'DiffyLabel' }, { #text, #text + #more, 'Comment' } }, nil, text ~= full
+    local group = row.kind == 'viewed' and 'Comment' or 'DiffyLabel'
+    return text .. more, { { #indent, #text, group }, { #text, #text + #more, 'Comment' } }, nil, text ~= full
   end
   local e = row.entry
   local counts = ''
   if e.added or e.removed then
     counts = ('+%d -%d'):format(e.added or 0, e.removed or 0)
   end
-  local head = indent .. e.status .. ' '
+  local dot = row.changed and '● ' or ''
+  local head = indent .. e.status .. ' ' .. dot
   local avail = width and (width - vim.fn.strdisplaywidth(head) - (counts ~= '' and (#counts + 1) or 0)) or math.huge
   local new_rel = relative(e.path, row.base)
   local name = new_rel
@@ -286,6 +405,10 @@ local function row_line(row, width)
   local pad = width and math.max(1, width - vim.fn.strdisplaywidth(left) - #counts) or 1
   local text = counts ~= '' and (left .. (' '):rep(pad) .. counts) or left
   local spans = { { #indent, #indent + #e.status, hl.STATUS[e.status] or 'DiffyChanged' } }
+  if dot ~= '' then
+    local at = #indent + #e.status + 1
+    table.insert(spans, { at, at + #'●', 'DiffyViewedChanged' })
+  end
   if counts ~= '' then
     local plus_end = #text - #counts + #tostring(e.added or 0) + 1
     table.insert(spans, { #text - #counts, plus_end, 'DiffyAdded' })
@@ -463,6 +586,39 @@ function M.unstage_all(session)
   end
 end
 
+local function is_current(session, row)
+  return row.kind == 'file'
+    and row.entry.path == session.current_path
+    and (not row.pair or row.pair == session.file_pair)
+end
+
+--- A Viewed group unfolds while it holds the file shown and folds back once
+--- that file leaves it, unless the user unfolded it (`'user'`). `false`: the
+--- user folded it over the shown file. Returns whether any fold changed.
+local function sync_viewed_folds(session)
+  local all, changed = session.tree_all or {}, false
+  session.viewed_open = session.viewed_open or {}
+  local open = session.viewed_open
+  for i, row in ipairs(all) do
+    if row.kind == 'viewed' then
+      local holds = false
+      for j = i + 1, #all do
+        if all[j].depth <= row.depth then
+          break
+        end
+        holds = holds or is_current(session, all[j])
+      end
+      local state = open[row.key]
+      if holds and state == nil then
+        open[row.key], changed = 'auto', true
+      elseif not holds and (state == 'auto' or state == false) then
+        open[row.key], changed = nil, true
+      end
+    end
+  end
+  return changed
+end
+
 --- Open the diff pair for tree row `row` (a `{kind='file', entry=...}`),
 --- or the 4-window conflict view for an unmerged ('U') row.
 function M.open_row(session, row, opts)
@@ -500,7 +656,12 @@ function M.open_row(session, row, opts)
   session.current_path = e.path
   -- the pair of the file shown, which is not `session.pair` in a section
   session.file_pair = pair
-  M.mark_current(session)
+  viewed.saw(session, e)
+  if sync_viewed_folds(session) then
+    M.redraw(session)
+  else
+    M.mark_current(session)
+  end
   diffpair.show(session, left_spec, right_spec)
 end
 
@@ -531,7 +692,12 @@ local function reveal(session, index)
     end
     if all[i].depth < depth then
       depth = all[i].depth
-      if collapsed[all[i].key] then
+      if all[i].kind == 'viewed' then
+        session.viewed_open = session.viewed_open or {}
+        if not session.viewed_open[all[i].key] then
+          session.viewed_open[all[i].key], changed = 'auto', true
+        end
+      elseif collapsed[all[i].key] then
         collapsed[all[i].key], changed = nil, true
       end
     end
@@ -574,12 +740,6 @@ function M.open_path(session, path, accept)
   set_tree_cursor(session, row.lnum)
   M.open_row(session, row)
   return true
-end
-
-local function is_current(session, row)
-  return row.kind == 'file'
-    and row.entry.path == session.current_path
-    and (not row.pair or row.pair == session.file_pair)
 end
 
 --- Highlight the row of the file shown in the diff pair.
@@ -681,7 +841,13 @@ local function visible_rows(session)
     else
       table.insert(rows, row)
       row.lnum = #rows
-      row.collapsed = row.key and collapsed[row.key] and all[i + 1] and all[i + 1].depth > row.depth or nil
+      local folded
+      if row.kind == 'viewed' then
+        folded = not (session.viewed_open or {})[row.key]
+      else
+        folded = row.key and collapsed[row.key]
+      end
+      row.collapsed = folded and all[i + 1] and all[i + 1].depth > row.depth or nil
       hide_below = row.collapsed and row.depth or nil
     end
   end
@@ -725,18 +891,33 @@ end
 
 --- Collapse or expand the header `row`, keeping the cursor on it.
 local function toggle_collapsed(session, row)
-  session.tree_collapsed = session.tree_collapsed or {}
-  session.tree_collapsed[row.key] = not session.tree_collapsed[row.key] or nil
+  if row.kind == 'viewed' then
+    session.viewed_open = session.viewed_open or {}
+    session.viewed_open[row.key] = row.collapsed and 'user' or false
+  else
+    session.tree_collapsed = session.tree_collapsed or {}
+    session.tree_collapsed[row.key] = not session.tree_collapsed[row.key] or nil
+  end
   M.redraw(session)
   set_tree_cursor(session, row.lnum)
 end
 
---- The rows for the current selection: two sections for the working tree
---- alone, one tree otherwise. `cb(rows | nil, err)`.
-local function build_rows(session, gen, cb)
+--- The entry lists for the current selection, ids filled (`session.tree_lists`):
+--- Unstaged and Staged for the working tree alone, one list otherwise.
+--- `cb(lists | nil, err)`.
+local function build_lists(session, gen, cb)
+  local function filled(lists)
+    fill_ids(session, lists, gen, function()
+      cb(lists)
+    end)
+  end
   if not session.pair.split then
     build_diff_entries(session, session.pair, gen, function(entries, err)
-      cb(entries and group_rows(entries), err)
+      if not entries then
+        cb(nil, err)
+        return
+      end
+      filled({ entries })
     end)
     return
   end
@@ -746,9 +927,23 @@ local function build_rows(session, gen, cb)
       return
     end
     build_diff_entries(session, selection.STAGED, gen, function(staged, staged_err)
-      cb(staged and section_rows(unstaged, staged), staged_err)
+      if not staged then
+        cb(nil, staged_err)
+        return
+      end
+      filled({ unstaged, staged, split = true })
     end)
   end)
+end
+
+--- Rebuild the rows after the marks changed (no git), keeping the cursor line.
+function M.refresh_viewed(session)
+  if not (session.tree_lists and session.bufs.tree and vim.api.nvim_buf_is_valid(session.bufs.tree)) then
+    return
+  end
+  session.tree_all = make_rows(session)
+  sync_viewed_folds(session)
+  M.redraw(session)
 end
 
 --- Where the cursor goes after a staging key (`session.tree_keep`): the same
@@ -785,24 +980,32 @@ end
 function M.render(session, cb)
   session.gen = (session.gen or 0) + 1
   local gen = session.gen
-  build_rows(session, gen, function(rows, err)
-    if not rows then
+  viewed.attach(session)
+  build_lists(session, gen, function(lists, err)
+    if not lists then
       vim.notify('diffy: ' .. tostring(err), vim.log.levels.ERROR)
       if cb then
         cb()
       end
       return
     end
+    session.tree_lists = lists
+    local rows = make_rows(session)
     session.tree_all = rows
     M.redraw(session)
     restore_cursor(session)
 
-    -- the file shown before, collapsed or not, else the first one in sight
-    local target, same_path, first, first_shown
+    -- the file shown before, viewed or collapsed or not, else the first
+    -- unviewed one in sight, else the first one
+    local target, same_path, first, first_shown, first_unviewed, first_unviewed_shown
     for _, row in ipairs(rows) do
       if row.kind == 'file' then
         first = first or row
         first_shown = first_shown or (row.lnum and row)
+        if not row.viewed then
+          first_unviewed = first_unviewed or row
+          first_unviewed_shown = first_unviewed_shown or (row.lnum and row)
+        end
         if row.entry.path == session.current_path then
           same_path = same_path or row
           if not row.pair or row.pair == session.file_pair then
@@ -812,7 +1015,7 @@ function M.render(session, cb)
         end
       end
     end
-    target = target or same_path or first_shown or first
+    target = target or same_path or first_unviewed_shown or first_unviewed or first_shown or first
 
     if target then
       session.current_file_line = target.lnum
@@ -852,21 +1055,31 @@ function M.select_at_cursor(session, opts)
   run.ready({ session = session.id, event = 'open_row' })
 end
 
+local function say_none_left()
+  vim.notify('diffy: no unviewed file left', vim.log.levels.INFO)
+end
+
 --- `]f`/`[f` (also from the diff windows): move `delta` file entries
 --- (a count, signed), stopping at the first/last one, and open it. Files in
---- collapsed folders are skipped.
+--- collapsed folders and viewed files are skipped.
 function M.move_file(session, delta)
-  local files, pos = {}, nil
+  local files, pos, any_viewed = {}, nil, false
   for _, row in ipairs(session.tree_all or {}) do
     if row.kind == 'file' then
+      local skip = not row.lnum or row.viewed
+      any_viewed = any_viewed or row.viewed
       if is_current(session, row) then
-        -- a hidden current file sits between its shown neighbours
-        pos = row.lnum and #files + 1 or #files + 0.5
+        -- a skipped current file sits between its shown neighbours
+        pos = skip and #files + 0.5 or #files + 1
       end
-      if row.lnum then
+      if not skip then
         table.insert(files, row)
       end
     end
+  end
+  if any_viewed and (#files == 0 or (#files == 1 and pos == 1)) then
+    say_none_left()
+    return
   end
   if #files == 0 then
     return
@@ -881,6 +1094,133 @@ function M.move_file(session, delta)
   set_tree_cursor(session, row.lnum)
   M.open_row(session, row)
   run.ready({ session = session.id, event = 'open_row' })
+end
+
+--- Mark `rows` (file rows) viewed, or unmark them when `on` is false. When
+--- the file shown gets marked, the next unviewed file opens (else the
+--- previous one); with none left the pair stays and says so.
+local function set_viewed(session, rows, on)
+  local entries = {}
+  for _, row in ipairs(rows) do
+    if viewed.markable(row.entry) then
+      table.insert(entries, row.entry)
+    end
+  end
+  if #entries == 0 then
+    vim.notify('diffy: nothing to mark viewed here', vim.log.levels.WARN)
+    run.ready({ session = session.id, event = 'viewed' })
+    return
+  end
+  local before, cur = {}, nil
+  for _, row in ipairs(session.tree_all) do
+    if row.kind == 'file' then
+      table.insert(before, row)
+      if is_current(session, row) then
+        cur = #before
+      end
+    end
+  end
+  local shown_marked = on and cur and vim.tbl_contains(entries, before[cur].entry)
+  viewed.set(session, entries, on)
+  if shown_marked then
+    local index = {}
+    for i, row in ipairs(session.tree_all) do
+      if row.kind == 'file' then
+        index[row.entry] = i
+      end
+    end
+    local target
+    local order = {}
+    for i = cur + 1, #before do
+      table.insert(order, before[i])
+    end
+    for i = cur - 1, 1, -1 do
+      table.insert(order, before[i])
+    end
+    for _, old in ipairs(order) do
+      local i = index[old.entry]
+      if i and not session.tree_all[i].viewed then
+        target = i
+        break
+      end
+    end
+    if target then
+      if reveal(session, target) then
+        M.redraw(session)
+      end
+      local row = session.tree_all[target]
+      session.current_file_line = row.lnum
+      set_tree_cursor(session, row.lnum)
+      M.open_row(session, row)
+    else
+      say_none_left()
+    end
+  end
+  run.ready({ session = session.id, event = 'viewed' })
+end
+
+--- The file rows under header `row` (a folder, section or Viewed group).
+local function rows_under(session, header)
+  local out, inside = {}, false
+  for _, row in ipairs(session.tree_all) do
+    if row == header then
+      inside = true
+    elseif inside then
+      if row.depth <= header.depth then
+        break
+      end
+      if row.kind == 'file' then
+        table.insert(out, row)
+      end
+    end
+  end
+  return out
+end
+
+--- `m` in the tree: toggle the file at the cursor; on a header, mark every
+--- file under it, or unmark them all when they all are viewed already.
+function M.toggle_viewed_at_cursor(session)
+  local row = cursor_row(session)
+  if not row then
+    return
+  end
+  if row.kind == 'file' then
+    set_viewed(session, { row }, not row.viewed)
+    return
+  end
+  local rows = rows_under(session, row)
+  local all = #rows > 0
+  for _, r in ipairs(rows) do
+    all = all and r.viewed
+  end
+  set_viewed(session, rows, not all)
+end
+
+local function current_row(session)
+  for _, row in ipairs(session.tree_all or {}) do
+    if is_current(session, row) then
+      return row
+    end
+  end
+  vim.notify('diffy: no file shown', vim.log.levels.WARN)
+  return nil
+end
+
+--- `<leader>m` / `:Diffy viewed`: toggle the file shown.
+function M.toggle_viewed_current(session)
+  local row = current_row(session)
+  if row then
+    set_viewed(session, { row }, not row.viewed)
+  end
+end
+
+--- `:Diffy viewed clear`: drop the shown file's marks and seen pair.
+function M.clear_viewed_current(session)
+  local row = current_row(session)
+  if row then
+    viewed.clear(session, row.entry)
+    run.ready({ session = session.id, event = 'viewed' })
+  end
 end
 
 --- `gf`: open the real worktree file for the entry at the cursor in the
@@ -942,6 +1282,12 @@ function M.setup(session)
   map(session, 'n', 'U', function()
     M.unstage_all(session)
   end, { buffer = buf, desc = 'unstage all' })
+  local mark_key = require('diffy').config.keymaps.tree_toggle_viewed
+  if mark_key and mark_key ~= '' then
+    map(session, 'n', mark_key, function()
+      M.toggle_viewed_at_cursor(session)
+    end, { buffer = buf, desc = 'toggle viewed' })
+  end
   require('diffy.layout').map_panel_keys(session, buf)
   vim.api.nvim_create_autocmd({ 'WinResized', 'VimResized' }, {
     group = session.augroup,

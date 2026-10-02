@@ -83,6 +83,12 @@ function M.set_nav_keymaps(session, buf)
   map(session, 'n', '[f', function()
     require('diffy.panels.tree').move_file(session, -vim.v.count1)
   end, { buffer = buf, desc = 'previous file' })
+  local mark_key = require('diffy').config.keymaps.toggle_viewed
+  if mark_key and mark_key ~= '' then
+    map(session, 'n', mark_key, function()
+      require('diffy.panels.tree').toggle_viewed_current(session)
+    end, { buffer = buf, desc = 'toggle viewed' })
+  end
   require('diffy.layout').map_panel_keys(session, buf)
   require('diffy.review.ui').setup_diff_keymaps(session, buf)
 end

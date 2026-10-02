@@ -52,6 +52,32 @@ function M.name_status(stdout)
   return out
 end
 
+--- `git diff -z -M --raw --no-abbrev <revs>`: name-status plus both sides'
+--- modes and object ids (an all-zero id is a side git didn't hash: a
+--- worktree file, or no file at all).
+--- @return { status: string, path: string, old_path?: string, score?: number, left_mode: string, right_mode: string, left_id: string, right_id: string }[]
+function M.raw(stdout)
+  local tokens = split_z(stdout)
+  local out = {}
+  local i = 1
+  while i <= #tokens and tokens[i] ~= '' do
+    local lmode, rmode, lid, rid, status = tokens[i]:match('^:(%d+) (%d+) (%x+) (%x+) (%S+)$')
+    if not status then
+      break
+    end
+    local e = { left_mode = lmode, right_mode = rmode, left_id = lid, right_id = rid, status = status:sub(1, 1) }
+    if e.status == 'R' or e.status == 'C' then
+      e.old_path, e.path, e.score = tokens[i + 1], tokens[i + 2], tonumber(status:sub(2))
+      i = i + 3
+    else
+      e.path = tokens[i + 1]
+      i = i + 2
+    end
+    table.insert(out, e)
+  end
+  return out
+end
+
 --- `git diff -z -M --numstat <revs>`. `added`/`removed` are `nil` for
 --- binary files (git prints `-`). Renamed/copied entries carry `old_path`.
 --- @return { added: number|nil, removed: number|nil, path: string, old_path?: string }[]

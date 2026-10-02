@@ -6,6 +6,8 @@ local LINKS = {
   DiffyAdded = 'Added',
   DiffyChanged = 'Changed',
   DiffyRemoved = 'Removed',
+  -- a viewed file whose change changed since: the `●` before its name
+  DiffyViewedChanged = 'DiagnosticWarn',
   DiffyConflict = 'DiagnosticError',
   DiffyFileAdded = 'DiffAdd',
   DiffyFileDeleted = 'DiffDelete',

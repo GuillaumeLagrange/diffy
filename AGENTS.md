@@ -26,12 +26,14 @@ lua/diffy/
   session.lua           one session per tab: registry, augroup, namespaces, keymap tracking, teardown
   layout.lua            views (tree, log, threads) and where they're shown: the left column, floats
   git/run.lua           every git/gh subprocess (vim.system), error notify, DiffyReady, M.recent (last 50)
-  git/parse.lua         pure parsers for git's -z formats (log, name-status, numstat, status v2, ls-files -u)
+  git/parse.lua         pure parsers for git's -z formats (log, name-status, raw, numstat, status v2, ls-files -u)
   git/repo.lua          root, merge-base, base resolution, status, default range, diff args
   selection.lua         log selection -> (left rev, right rev); the real-file rule
   panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), selection keys
   panels/commitmsg.lua  full commit message float beside the column while the log cursor rests on a commit
-  panels/tree.lua       files view: tree rows (Unstaged/Staged sections for the working tree), staging keys, file navigation
+  panels/tree.lua       files view: tree rows (Unstaged/Staged sections for the working tree, Viewed groups), right blob
+                        ids for worktree files, staging and viewed keys, file navigation
+  viewed.lua            viewed marks (blob pair per path) in viewed.json: shared per nvim, watched across nvims
   diffpair.lua          the two diff windows: buffers, diff mode, winbars, b:diffy_title, shared keys,
                         edits (redecorate on change, rebuild on write)
   navigation.lua        BufWinEnter on the diff windows, reacted to on the next tick: swap the pair when you
@@ -71,7 +73,7 @@ Conventions the code relies on:
   dropping one link drops the chain.
 - **DiffyReady.** `run.ready({ session, event })` fires `User DiffyReady` when something finished drawing.
   Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `choose`, `conflict`,
-  `checkout`, `restore`, `pr`, `close`, `commitmsg`, `feedback`. Tests wait on these; never sleep.
+  `checkout`, `restore`, `pr`, `close`, `commitmsg`, `feedback`, `viewed`. Tests wait on these; never sleep.
 - **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `branch`, `author`,
   `place(session, thread) -> {win, start_line, end_line} | nil` (in the open file), `view_place` (the same
   for any file of the current pair, or of a given pair: the threads view uses it to pick a selection that

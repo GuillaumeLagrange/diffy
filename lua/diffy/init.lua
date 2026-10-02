@@ -12,6 +12,10 @@ M.config = {
     -- buffer-local in every diffy window: hide the panel column, or show it
     -- and go to the file tree
     toggle_panel = '<leader>e',
+    -- in the diff windows: mark the file shown viewed, or unmark it
+    toggle_viewed = '<leader>m',
+    -- in the file tree: the same for the file, folder or section at the cursor
+    tree_toggle_viewed = 'm',
   },
   -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
@@ -187,6 +191,22 @@ function M.dispatch.close()
       require('diffy.git.run').ready({ session = s.id, event = 'close' })
     end
   end)
+end
+
+--- `:Diffy viewed`: toggle the file shown; `:Diffy viewed clear` drops its marks.
+function M.dispatch.viewed(args)
+  local s = current_session()
+  if not s then
+    return
+  end
+  local tree = require('diffy.panels.tree')
+  if args[1] == 'clear' then
+    tree.clear_viewed_current(s)
+  elseif args[1] == nil then
+    tree.toggle_viewed_current(s)
+  else
+    vim.notify('diffy: `viewed` expects nothing or `clear`', vim.log.levels.WARN)
+  end
 end
 
 --- `:Diffy panel`: hide/show the tree/log column.
@@ -526,6 +546,8 @@ local function candidates(words, arg_lead)
     return { 'file', 'author=', 'state=', 'review=' }
   elseif sub == 'file' and #words == 1 then
     return vim.fn.getcompletion(arg_lead, 'file')
+  elseif sub == 'viewed' and #words == 1 then
+    return { 'clear' }
   elseif sub == 'branch' and #words == 1 then
     local res = vim.system({ 'git', 'for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes' }, { text = true }):wait()
     return res.code == 0 and vim.split(vim.trim(res.stdout), '\n', { trimempty = true }) or {}

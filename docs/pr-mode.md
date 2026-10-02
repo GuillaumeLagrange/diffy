@@ -205,15 +205,26 @@ Conflict rules:
 | a draft reply whose thread was deleted | dropped, its text in a notification |
 | a draft reply whose thread was resolved, or went outdated | kept: GitHub accepts both |
 
-Needs measuring before building it:
+Measured on a throwaway sandbox PR (#36), and what it means here:
 
-- What happens to pending comments whose commit a force-push removed from the PR.
-- Mirroring drafts one by one: `addPullRequestReviewThread` anchors at head, so a draft on an older commit
-  needs the legacy `addPullRequestReviewComment(commitOID, position)` with the pending review's id. Today
-  `push` recreates the whole pending review instead. The legacy call on old-side lines is still unmeasured.
-- `updatePullRequestReviewComment` and `deletePullRequestReviewComment`, on pending and on published
-  comments; deleting an empty pending review.
-- Whether a comment edited on github.com gets a new `updatedAt` (the read query doesn't fetch it today).
+- **One comment at a time.** `addPullRequestReviewComment(pullRequestReviewId, commitOID, position)` joins
+  the pending review, on any commit and on either side (a `position` on a `-` line makes a LEFT thread).
+  `addPullRequestReviewThread(pullRequestReviewId, …)` also joins it, at head, ranges included. Mirroring
+  uses the first for drafts on older commits, the second for drafts on head.
+- **Edits and deletions** work on pending and published comments alike; deleting a thread's only comment
+  removes the thread. Deleting the last pending comment deletes the pending review itself (the payload still
+  says `PENDING`, any later use of its id is `NOT_FOUND`): the mirror then forgets the review's id and
+  creates a new one with the next draft. "Deleted once empty" after an agent submit is therefore automatic.
+- **Change signal.** A pending comment's edit only moves `updatedAt` (`lastEditedAt` stays null, even after
+  submit); a published comment's edit sets `lastEditedAt`. The bookkeeping compares `updatedAt` for pending
+  comments, `lastEditedAt` for published ones. The read query fetches neither today.
+- **Racing creation.** A second `addPullRequestReview` while one is pending returns null with `UNPROCESSABLE`
+  "User can only have one pending review per pull request" and creates nothing: read
+  `reviews(states: PENDING)` and adopt it.
+- **Force-push.** Pending comments are remapped like published ones; an untrackable one keeps its old
+  `commit` and becomes outdated, its `line` unchanged. The pending review still submits. diffy places and
+  judges outdatedness itself, so nothing depends on `line`.
+- **Pagination.** A thread's `comments` take `after` and have `pageInfo`.
 
 ## Code touched
 

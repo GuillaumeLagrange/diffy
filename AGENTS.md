@@ -274,8 +274,19 @@ Pending reviews:
 - One pending review per user per PR; `reviews(states: PENDING)` returns only the viewer's. While it exists,
   REST `POST pulls/{n}/comments` fails with 422.
 - Threads in `addPullRequestReview` anchor at its `commitOID`. `addPullRequestReviewThread` has no commit and
-  anchors at head. Deprecated `addPullRequestReviewComment(commitOID, position)` still works: `originalCommit`
-  is that commit and GitHub moves `commit` to head right away when trackable.
+  anchors at head; with `pullRequestReviewId` it joins that pending review (ranges too). Deprecated
+  `addPullRequestReviewComment(pullRequestReviewId, commitOID, position)` still works and joins the review:
+  `originalCommit` is that commit and GitHub moves `commit` to head right away when trackable. A `position`
+  on a `-` line makes a LEFT thread whose line is merge-base-relative.
+- A second `addPullRequestReview` while one is pending returns null with `UNPROCESSABLE` "User can only have
+  one pending review per pull request", creating nothing.
+- Deleting the last comment of a pending review deletes the review: the payload still says `PENDING` with 0
+  comments, then the id is `NOT_FOUND`. A review created without threads stays; `deletePullRequestReview`
+  removes it. `updatePullRequestReviewComment`/`deletePullRequestReviewComment` work on pending and
+  published comments; deleting a thread's only comment removes the thread.
+- Editing a pending comment only moves `updatedAt` (`lastEditedAt` stays null, even after submit; submit
+  moves `updatedAt` of every comment). Editing a published one sets `lastEditedAt` and
+  `includesCreatedEdit`.
 - `position` = 1-based index of the line below the file's first `@@` in `merge-base...commitOID`, later `@@`
   headers counting as lines.
 - `addPullRequestReview` returns no thread ids: replies drafted on a new thread are pushed afterwards with
@@ -286,7 +297,9 @@ Pending reviews:
 Where comments point:
 - Between pushes nothing is remapped: `line == originalLine`, `commit` = the commit written on.
 - On the next push (force-pushes too) trackable comments get `commit` = head and a shifted `line`;
-  untrackable ones get `line = null`, `isOutdated = true`. diffy computes placement and outdatedness itself.
+  untrackable ones get `isOutdated = true` and `line = null` (published) or an unchanged `line` (a pending
+  LEFT comment, measured on #36). Pending comments are remapped like published ones, and a pending review
+  whose commit is gone still submits. diffy computes placement and outdatedness itself.
 - `diffSide`/`startDiffSide` are thread-level fields; `line`/`originalLine`/`startLine`/
   `originalStartLine`/`commit`/`originalCommit`/`diffHunk` are comment-level. Thread-level `startLine` is
   already tracked to head while `line` isn't: use comment-level lines only.
@@ -322,6 +335,5 @@ collecting `document.body.innerText`. Thread headers read `Comment on line R15` 
 
 ## Open questions
 
-- Legacy `addPullRequestReviewComment` on old-side (LEFT) lines.
 - Whether the review's `commitOID` matters on github.com beyond anchoring.
 - Bodies written in the web UI (CRLF?).

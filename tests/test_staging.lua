@@ -440,40 +440,28 @@ T['nested directories group under collapsible headers, single-child chains flatt
   child.cmd('Diffy close')
 end
 
---- The tree as drawn: a closed fold is one row, its header's text then `…`.
-local function shown_tree()
-  return child.lua_get(([[vim.api.nvim_win_call(%d, function()
-    local out, l, last = {}, 1, vim.fn.line('$')
-    while l <= last do
-      local stop = vim.fn.foldclosedend(l)
-      if stop ~= -1 then
-        table.insert(out, vim.fn.getline(l) .. ' …')
-        l = stop + 1
-      else
-        table.insert(out, vim.fn.getline(l))
-        l = l + 1
-      end
-    end
-    return out
-  end)]]):format(ui.wins(child).tree))
+--- The tree's rows without their +/- counts.
+local function tree_rows()
+  return vim.tbl_map(function(l)
+    return (l:gsub('%s+%+%d+ %-%d+$', ''))
+  end, tree())
 end
 
---- Put the tree cursor on the row reading `text` and type `keys`.
+--- Put the tree cursor on the row reading `text` (counts left out) and type `keys`.
 local function keys_on(text, keys)
   local w = ui.wins(child)
   child.api.nvim_set_current_win(w.tree)
-  child.api.nvim_win_set_cursor(w.tree, { exact_line(tree(), text), 0 })
+  child.api.nvim_win_set_cursor(w.tree, { exact_line(tree_rows(), text), 0 })
   child.type_keys(keys)
 end
 
-local function nested_repo()
+T['<CR> on a folder collapses it to its header and expands it back, top-level folders included'] = function()
   repo = Repo.new()
     :commit('Base', { ['top.txt'] = Repo.lines(1) })
     :commit('Add', {
       ['a/b/c/file1.txt'] = Repo.lines(1),
       ['a/b/c/file2.txt'] = Repo.lines(1),
       ['a/d/file3.txt'] = Repo.lines(1),
-      ['a/e.txt'] = Repo.lines(1),
       ['z/one.txt'] = Repo.lines(1),
       ['z/two.txt'] = Repo.lines(1),
     })
@@ -481,65 +469,83 @@ local function nested_repo()
   ui.arm_ready(child, 'render')
   child.cmd(('Diffy %s..%s'):format(repo.sha.Base, repo.sha.Add))
   ui.wait_ready(child)
-end
+  local w = ui.wins(child)
 
-T['za on a folder folds only that folder, top-level folders included'] = function()
-  nested_repo()
-  keys_on('  b/c/', 'za')
-  MiniTest.expect.equality(shown_tree(), {
-    'a/',
-    '  b/c/ …',
-    '  A d/file3.txt                   +1 -0',
-    '  A e.txt                         +1 -0',
-    'z/',
-    '  A one.txt                       +1 -0',
-    '  A two.txt                       +1 -0',
-  })
-  keys_on('z/', 'za')
-  MiniTest.expect.equality(shown_tree()[5], 'z/ …')
-  MiniTest.expect.equality(#shown_tree(), 5)
-  child.cmd('Diffy close')
-end
+  keys_on('  b/c/', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { 'a/', '  b/c/ …', '  A d/file3.txt', 'z/', '  A one.txt', '  A two.txt' })
+  -- the cursor stays on the header, in the tree
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), w.tree)
+  MiniTest.expect.equality(child.api.nvim_win_get_cursor(w.tree)[1], 2)
 
-T['<CR> and o on a folder fold and unfold it, folds staying across re-renders'] = function()
-  nested_repo()
+  keys_on('z/', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { 'a/', '  b/c/ …', '  A d/file3.txt', 'z/ …' })
   keys_on('a/', '<CR>')
-  MiniTest.expect.equality(shown_tree(), {
-    'a/ …',
-    'z/',
-    '  A one.txt                       +1 -0',
-    '  A two.txt                       +1 -0',
-  })
-  -- the cursor stays in the tree
-  MiniTest.expect.equality(child.api.nvim_get_current_win(), ui.wins(child).tree)
-
-  -- a resize redraws the tree; R re-renders it
-  child.cmd('vertical resize +3')
-  MiniTest.expect.equality(shown_tree()[1], 'a/ …')
-  ui.arm_ready(child, 'render')
-  child.type_keys('R')
-  ui.wait_ready(child)
-  MiniTest.expect.equality(shown_tree()[1], 'a/ …')
-
-  keys_on('a/', 'o')
-  MiniTest.expect.equality(shown_tree()[2], '  b/c/')
+  MiniTest.expect.equality(tree_rows(), { 'a/ …', 'z/ …' })
+  -- expanding a/ shows b/c/ as it was left
+  keys_on('a/ …', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { 'a/', '  b/c/ …', '  A d/file3.txt', 'z/ …' })
+  keys_on('  b/c/ …', '<CR>')
+  MiniTest.expect.equality(tree_rows()[3], '    A file1.txt')
   child.cmd('Diffy close')
 end
 
-T['za on a section header folds the section'] = function()
-  repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(5), ['g.txt'] = Repo.lines(5) })
-  vim.fn.writefile({ 'staged' }, repo.dir .. '/g.txt')
-  ui.git(repo.dir, { 'add', 'g.txt' })
-  vim.fn.writefile({ 'unstaged' }, repo.dir .. '/f.txt')
+T['a collapsed folder stays collapsed across renders, ]f skips it, a jump to a file in it expands it'] = function()
+  repo = Repo.new():commit('Base', {
+    ['0.txt'] = Repo.lines(3),
+    ['a/one.txt'] = Repo.lines(3),
+    ['a/two.txt'] = Repo.lines(3),
+    ['z/four.txt'] = Repo.lines(3),
+    ['z/three.txt'] = Repo.lines(3),
+  })
+  for _, p in ipairs({ '0.txt', 'a/one.txt', 'a/two.txt', 'z/four.txt', 'z/three.txt' }) do
+    vim.fn.writefile({ '1', 'changed', '3' }, repo.dir .. '/' .. p)
+  end
   child.fn.chdir(repo.dir)
   ui.arm_ready(child, 'render')
   child.cmd('Diffy')
   ui.wait_ready(child)
 
-  keys_on('Unstaged (1)', 'za')
-  local shown = shown_tree()
-  MiniTest.expect.equality({ shown[1], shown[2] }, { 'Unstaged (1) …', 'Staged (1)' })
-  MiniTest.expect.equality(shown[3]:match('^  M g%.txt'), '  M g.txt')
+  press_in_tree(exact_line(tree_rows(), '    M one.txt'), 'o', 'open_row')
+  keys_on('  a/', '<CR>')
+  ui.arm_ready(child, 'render')
+  child.type_keys('R')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(
+    tree_rows(),
+    { 'Unstaged (5)', '  M 0.txt', '  a/ …', '  z/', '    M four.txt', '    M three.txt', 'Staged (0)' }
+  )
+  MiniTest.expect.equality(ui.layout(child).right.path, 'a/one.txt')
+
+  -- from the hidden a/one.txt, ]f goes to the next file in sight
+  ui.arm_ready(child, 'open_row')
+  child.type_keys(']f')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(ui.layout(child).right.path, 'z/four.txt')
+
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  child.cmd('edit ' .. repo.dir .. '/a/two.txt')
+  vim.wait(2000, function()
+    return ui.layout(child).right.path == 'a/two.txt'
+  end)
+  MiniTest.expect.equality(tree_rows()[3], '  a/')
+  MiniTest.expect.equality(marked_lines(), { exact_line(tree_rows(), '    M two.txt') })
+  child.cmd('Diffy close')
+end
+
+T['<CR> on a section header collapses the section; s on it stages every file'] = function()
+  repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(5), ['d/g.txt'] = Repo.lines(5), ['d/h.txt'] = Repo.lines(5) })
+  vim.fn.writefile({ 'f' }, repo.dir .. '/f.txt')
+  vim.fn.writefile({ 'g' }, repo.dir .. '/d/g.txt')
+  vim.fn.writefile({ 'h' }, repo.dir .. '/d/h.txt')
+  child.fn.chdir(repo.dir)
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+
+  keys_on('Unstaged (3)', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { 'Unstaged (3) …', 'Staged (0)' })
+  press_in_tree(1, 's')
+  MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'd/g.txt\nd/h.txt\nf.txt')
   child.cmd('Diffy close')
 end
 

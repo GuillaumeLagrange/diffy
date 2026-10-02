@@ -1,9 +1,12 @@
 -- The file tree panel: the diff between the current selection's
--- (left, right) as a nested directory tree (each folder header folding its
--- rows on `za`/`<CR>`, chains of single-child dirs flattened into one row),
--- with rename pairs, +n/-m counts and the staging keys (`s`/`u`/`-`/`S`/`U`).
--- The working tree alone shows as two sections, Unstaged and Staged, each
--- file row carrying its section's pair.
+-- (left, right) as a nested directory tree (`<CR>` on a folder collapses it,
+-- chains of single-child dirs flattened into one row), with rename pairs,
+-- +n/-m counts and the staging keys (`s`/`u`/`-`/`S`/`U`). The working tree
+-- alone shows as two sections, Unstaged and Staged, each file row carrying
+-- its section's pair.
+--
+-- `session.tree_all` holds every row; `session.tree_rows` the ones drawn,
+-- indexed by buffer line (rows under a collapsed header are left out).
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
@@ -11,6 +14,9 @@ local selection = require('diffy.selection')
 local hl = require('diffy.highlight')
 
 local M = {}
+
+-- after a collapsed folder or section header
+local COLLAPSED = ' …'
 
 local function diff_cmd(session, pair, format_flag)
   local args = { 'diff', '-z', '-M', format_flag }
@@ -187,7 +193,7 @@ end
 
 --- Group a flat, path-sorted entry list into display rows, `depth` deep,
 --- file rows tagged with `pair` (a section's pair, or nil), header rows with
---- a `key` naming their fold across renders (`section`'s label prefixed).
+--- a `key` naming them across renders (`section`'s label prefixed).
 local function group_rows(entries, depth, pair, rows, section)
   rows = rows or {}
   local first = #rows + 1
@@ -237,14 +243,17 @@ end
 local function row_line(row, width)
   local indent = ('  '):rep(row.depth)
   if row.kind == 'dir' then
-    local name = width and hl.truncate_path(row.name, math.max(1, width - #indent - 1)) or row.name
+    local more = row.collapsed and COLLAPSED or ''
+    local avail = width and math.max(1, width - #indent - 1 - vim.fn.strdisplaywidth(more))
+    local name = avail and hl.truncate_path(row.name, avail) or row.name
     local text = indent .. name .. '/'
-    return text, { { #indent, #text, 'DiffyDirectory' } }, nil, name ~= row.name
+    return text .. more, { { #indent, #text, 'DiffyDirectory' }, { #text, #text + #more, 'Comment' } }, nil, name ~= row.name
   end
   if row.kind == 'section' then
     local full = ('%s (%d)'):format(row.label, row.count)
-    local text = width and hl.truncate(full, width) or full
-    return text, { { 0, #text, 'DiffyLabel' } }, nil, text ~= full
+    local more = row.collapsed and COLLAPSED or ''
+    local text = width and hl.truncate(full, math.max(1, width - vim.fn.strdisplaywidth(more))) or full
+    return text .. more, { { 0, #text, 'DiffyLabel' }, { #text, #text + #more, 'Comment' } }, nil, text ~= full
   end
   local e = row.entry
   local counts = ''
@@ -351,15 +360,16 @@ local function git_refresh(session, args)
   })
 end
 
---- Paths of every file row of the section headed at `lnum`.
-local function section_paths(session, lnum)
-  local paths = {}
-  for i = lnum + 1, #session.tree_rows do
-    local row = session.tree_rows[i]
+--- Paths of every file row of the section `header`, collapsed folders included.
+local function section_paths(session, header)
+  local paths, inside = {}, false
+  for _, row in ipairs(session.tree_all) do
     if row.kind == 'section' then
-      break
-    end
-    if row.kind == 'file' then
+      if inside then
+        break
+      end
+      inside = row == header
+    elseif inside and row.kind == 'file' then
       vim.list_extend(paths, row_paths(row))
     end
   end
@@ -376,14 +386,14 @@ local function stage_at_cursor(session, verb, to)
     paths = row_paths(row)
     session.tree_keep = { path = row.entry.path, pair = to, lnum = lnum }
   elseif row and row.kind == 'section' then
-    paths = section_paths(session, lnum)
+    paths = section_paths(session, row)
     session.tree_keep = { section = row.pair, lnum = lnum }
   end
   if verb == 'add' then
     -- `git add` fails on a path with nothing to stage and missing from the
     -- worktree (a staged deletion or rename source)
     local unstaged = {}
-    for _, r in ipairs(session.tree_rows) do
+    for _, r in ipairs(session.tree_all) do
       if r.kind == 'file' and r.pair == selection.UNSTAGED then
         for _, p in ipairs(row_paths(r)) do
           unstaged[p] = true
@@ -502,7 +512,7 @@ end
 
 --- Whether `path` is one of the files of the current selection.
 function M.has_path(session, path)
-  for _, row in ipairs(session.tree_rows or {}) do
+  for _, row in ipairs(session.tree_all or {}) do
     if row.kind == 'file' and row.entry.path == path then
       return true
     end
@@ -510,15 +520,34 @@ function M.has_path(session, path)
   return false
 end
 
+--- Expand every collapsed folder or section holding `tree_all[index]`.
+--- Returns whether one was collapsed.
+local function reveal(session, index)
+  local all, collapsed = session.tree_all, session.tree_collapsed or {}
+  local depth, changed = all[index].depth, false
+  for i = index - 1, 1, -1 do
+    if depth == 0 then
+      break
+    end
+    if all[i].depth < depth then
+      depth = all[i].depth
+      if collapsed[all[i].key] then
+        collapsed[all[i].key], changed = nil, true
+      end
+    end
+  end
+  return changed
+end
+
 --- Locate the tree row for `path` and open its diff pair, updating the
---- tracked current-file line and cursor position. In the working tree's
---- sections a path can have two rows: `accept(pair)`, if given, picks one;
---- otherwise the section shown last wins (a jump back with `<C-t>` returns
---- to the pair it left), then the first.
+--- tracked current-file line and cursor position, expanding the folders
+--- hiding it. In the working tree's sections a path can have two rows:
+--- `accept(pair)`, if given, picks one; otherwise the section shown last
+--- wins (a jump back with `<C-t>` returns to the pair it left), then the first.
 --- Returns `true` if a row was opened, `false` otherwise.
 function M.open_path(session, path, accept)
   local first
-  for i, row in ipairs(session.tree_rows or {}) do
+  for i, row in ipairs(session.tree_all or {}) do
     if row.kind == 'file' and row.entry.path == path then
       local pair = row.pair or session.pair
       if accept then
@@ -537,9 +566,13 @@ function M.open_path(session, path, accept)
   if not first then
     return false
   end
-  session.current_file_line = first
-  set_tree_cursor(session, first)
-  M.open_row(session, session.tree_rows[first])
+  local row = session.tree_all[first]
+  if reveal(session, first) then
+    M.redraw(session)
+  end
+  session.current_file_line = row.lnum
+  set_tree_cursor(session, row.lnum)
+  M.open_row(session, row)
   return true
 end
 
@@ -636,70 +669,28 @@ local function hover(session)
   end
 end
 
---- Remember which headers the user folded in the window drawn last, by row
---- `key`, so a redraw or a new selection keeps them folded. Folds are
---- per-window: one drawn in another window (the view moved hosts) is kept
---- as last saved. A header inside a closed fold counts as open.
-local function save_folds(session)
-  local drawn = session.tree_drawn
-  if not (drawn and drawn.win == session.wins.tree and vim.api.nvim_win_is_valid(drawn.win)) then
-    return
+--- `session.tree_rows`: the rows of `tree_all` not under a collapsed
+--- header, each given its buffer line (`lnum`, nil when hidden). An empty
+--- section doesn't show as collapsed.
+local function visible_rows(session)
+  local all, collapsed = session.tree_all, session.tree_collapsed or {}
+  local rows, hide_below = {}, nil
+  for i, row in ipairs(all) do
+    if hide_below and row.depth > hide_below then
+      row.lnum = nil
+    else
+      table.insert(rows, row)
+      row.lnum = #rows
+      row.collapsed = row.key and collapsed[row.key] and all[i + 1] and all[i + 1].depth > row.depth or nil
+      hide_below = row.collapsed and row.depth or nil
+    end
   end
-  local folded = {}
-  vim.api.nvim_win_call(drawn.win, function()
-    for lnum, row in ipairs(drawn.rows) do
-      if row.key and vim.fn.foldclosed(lnum) == lnum then
-        folded[row.key] = true
-      end
-    end
-  end)
-  session.tree_folded = folded
-end
-
---- One manual fold per header row, over the rows nested under it; the
---- saved ones closed. Indent folds can't do it: they start below a header,
---- so `za` on a header folds its parent and a top-level header has no fold.
-local function apply_folds(session, win)
-  local rows = session.tree_rows
-  local wo = vim.wo[win]
-  wo.foldmethod = 'manual'
-  wo.foldtext = "v:lua.require'diffy.panels.tree'.foldtext()"
-  wo.fillchars = 'fold: '
-  wo.foldenable = true
-  vim.api.nvim_win_call(win, function()
-    vim.cmd('silent! normal! zE')
-    -- last header first, so nested folds exist before their parent's
-    for i = #rows, 1, -1 do
-      if rows[i].key then
-        local last = i
-        while rows[last + 1] and rows[last + 1].depth > rows[i].depth do
-          last = last + 1
-        end
-        vim.cmd(('%d,%dfold'):format(i, last))
-      end
-    end
-    vim.cmd('silent! normal! zR')
-    local folded = session.tree_folded or {}
-    for i = #rows, 1, -1 do
-      if rows[i].key and folded[rows[i].key] then
-        vim.cmd(('%dfoldclose'):format(i))
-      end
-    end
-  end)
-  session.tree_drawn = { win = win, rows = rows }
-end
-
---- A folded header: its row, then `…`.
-function M.foldtext()
-  local session = require('diffy.session').current()
-  local row = session and session.tree_rows and session.tree_rows[vim.v.foldstart]
-  local group = row and row.kind == 'section' and 'DiffyLabel' or 'DiffyDirectory'
-  return { { vim.fn.getline(vim.v.foldstart), group }, { ' …', 'Comment' } }
+  session.tree_rows = rows
 end
 
 --- Re-render the current rows fitted to the tree window's width (no git).
 function M.redraw(session)
-  save_folds(session)
+  visible_rows(session)
   local buf = session.bufs.tree
   local width = tree_width(session)
   session.tree_width = width
@@ -728,22 +719,16 @@ function M.redraw(session)
       end
     end
   end
-  local win = session.wins.tree
-  if win and vim.api.nvim_win_is_valid(win) then
-    apply_folds(session, win)
-  end
   M.mark_current(session)
   hover(session)
 end
 
-local function file_rows(session)
-  local out = {}
-  for i, row in ipairs(session.tree_rows or {}) do
-    if row.kind == 'file' then
-      table.insert(out, i)
-    end
-  end
-  return out
+--- Collapse or expand the header `row`, keeping the cursor on it.
+local function toggle_collapsed(session, row)
+  session.tree_collapsed = session.tree_collapsed or {}
+  session.tree_collapsed[row.key] = not session.tree_collapsed[row.key] or nil
+  M.redraw(session)
+  set_tree_cursor(session, row.lnum)
 end
 
 --- The rows for the current selection: two sections for the working tree
@@ -808,27 +793,30 @@ function M.render(session, cb)
       end
       return
     end
-    session.tree_rows = rows
+    session.tree_all = rows
     M.redraw(session)
     restore_cursor(session)
 
-    local files = file_rows(session)
-    local target, same_path
-    for _, i in ipairs(files) do
-      local row = session.tree_rows[i]
-      if row.entry.path == session.current_path then
-        same_path = same_path or i
-        if not row.pair or row.pair == session.file_pair then
-          target = i
-          break
+    -- the file shown before, collapsed or not, else the first one in sight
+    local target, same_path, first, first_shown
+    for _, row in ipairs(rows) do
+      if row.kind == 'file' then
+        first = first or row
+        first_shown = first_shown or (row.lnum and row)
+        if row.entry.path == session.current_path then
+          same_path = same_path or row
+          if not row.pair or row.pair == session.file_pair then
+            target = row
+            break
+          end
         end
       end
     end
-    target = target or same_path or files[1]
+    target = target or same_path or first_shown or first
 
     if target then
-      session.current_file_line = target
-      M.open_row(session, session.tree_rows[target])
+      session.current_file_line = target.lnum
+      M.open_row(session, target)
     else
       require('diffy.diffpair').clear(session)
       session.current_path = nil
@@ -842,14 +830,12 @@ end
 
 --- `<CR>`/`o`: open the pair for the entry at the cursor. `<CR>` passes
 --- `opts.focus` to then move to the right diff window (the result window in
---- the conflict view); `o` keeps the cursor in the tree. On a header or a
---- closed fold, both fold/unfold it instead.
+--- the conflict view); `o` keeps the cursor in the tree. On a folder or
+--- section header, both collapse/expand it instead.
 function M.select_at_cursor(session, opts)
-  local cur, cur_lnum = cursor_row(session)
-  if cur and (cur.key or vim.fn.foldclosed(cur_lnum) ~= -1) then
-    vim.api.nvim_win_call(session.wins.tree, function()
-      vim.cmd('normal! za')
-    end)
+  local header = cursor_row(session)
+  if header and header.key then
+    toggle_collapsed(session, header)
     return
   end
   local row, lnum = row_at_cursor(session)
@@ -867,28 +853,33 @@ function M.select_at_cursor(session, opts)
 end
 
 --- `]f`/`[f` (also from the diff windows): move `delta` file entries
---- (a count, signed), stopping at the first/last one, and open it.
+--- (a count, signed), stopping at the first/last one, and open it. Files in
+--- collapsed folders are skipped.
 function M.move_file(session, delta)
-  local files = file_rows(session)
+  local files, pos = {}, nil
+  for _, row in ipairs(session.tree_all or {}) do
+    if row.kind == 'file' then
+      if is_current(session, row) then
+        -- a hidden current file sits between its shown neighbours
+        pos = row.lnum and #files + 1 or #files + 0.5
+      end
+      if row.lnum then
+        table.insert(files, row)
+      end
+    end
+  end
   if #files == 0 then
     return
   end
-  local pos
-  for i, lnum in ipairs(files) do
-    if lnum == session.current_file_line then
-      pos = i
-      break
-    end
-  end
-  local from = pos or (delta > 0 and 0 or #files + 1)
+  local from = pos and (delta > 0 and math.floor(pos) or math.ceil(pos)) or (delta > 0 and 0 or #files + 1)
   local next_pos = math.max(1, math.min(#files, from + delta))
   if next_pos == pos then
     return
   end
-  local lnum = files[next_pos]
-  session.current_file_line = lnum
-  set_tree_cursor(session, lnum)
-  M.open_row(session, session.tree_rows[lnum])
+  local row = files[next_pos]
+  session.current_file_line = row.lnum
+  set_tree_cursor(session, row.lnum)
+  M.open_row(session, row)
   run.ready({ session = session.id, event = 'open_row' })
 end
 
@@ -917,10 +908,10 @@ function M.setup(session)
   local buf = session.bufs.tree
   map(session, 'n', '<CR>', function()
     M.select_at_cursor(session, { focus = true })
-  end, { buffer = buf, desc = 'open pair and focus it, or fold the header' })
+  end, { buffer = buf, desc = 'open pair and focus it, or collapse the folder' })
   map(session, 'n', 'o', function()
     M.select_at_cursor(session)
-  end, { buffer = buf, desc = 'open pair, or fold the header' })
+  end, { buffer = buf, desc = 'open pair, or collapse the folder' })
   map(session, 'n', ']f', function()
     M.move_file(session, vim.v.count1)
   end, { buffer = buf, desc = 'next file' })
@@ -956,7 +947,7 @@ function M.setup(session)
     group = session.augroup,
     callback = function()
       local win = session.wins.tree
-      if session.tree_rows and win and vim.api.nvim_win_is_valid(win) and tree_width(session) ~= session.tree_width then
+      if session.tree_all and win and vim.api.nvim_win_is_valid(win) and tree_width(session) ~= session.tree_width then
         M.redraw(session)
       end
     end,
@@ -994,7 +985,7 @@ M.view = {
   label = ' Files',
   persistent = true,
   render = function(session)
-    if session.tree_rows then
+    if session.tree_all then
       M.redraw(session)
     end
   end,

@@ -113,17 +113,19 @@ headers stay when a section is empty; with no changes at all the tree says `(no 
 
 | Key | |
 |---|---|
-| `<CR>` | open the file and move to the diff; on a folder or section header, fold / unfold it |
-| `o` | open the file, stay in the tree; on a header, fold / unfold it |
-| `]f` / `[f` | next / previous file |
+| `<CR>` | open the file and move to the diff; on a folder or section header, collapse / expand it |
+| `o` | open the file, stay in the tree; on a header, collapse / expand it |
+| `]f` / `[f` | next / previous file, skipping collapsed folders |
 | `]r` / `[r` | next / previous commit |
-| `za` (any fold key) | fold / unfold the folder or section under the cursor; folds stay as you change the selection |
 | `gf` | open the real file in the previous tab |
 | `-` | move the file to the other section (stage in Unstaged, unstage in Staged) |
 | `s` / `u` | stage / unstage the file, whichever section it's in (a rename stages both paths) |
 | `S` / `U` | stage / unstage everything |
 
-On a section header, `-`, `s` and `u` apply to every file of that section. After staging, the cursor
+A collapsed folder shows as its header followed by `…` and stays collapsed as you change the selection;
+jumping to a file inside it from the diff expands it.
+
+On a section header, collapsed or not, `-`, `s` and `u` apply to every file of that section. After staging, the cursor
 follows the file into the section it moved to. Staging works only with `Working tree` selected alone. You
 can also stage hunk by hunk: for an Unstaged file the left side is the index, so `do`/`dp` or editing it and
 `:w` stages; for a Staged file the right side is the index.

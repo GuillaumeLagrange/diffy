@@ -71,7 +71,7 @@ end
 local function collect(session, st)
   local review = session.review
   local files = {}
-  for _, row in ipairs(session.tree_rows or {}) do
+  for _, row in ipairs(session.tree_all or {}) do
     if row.kind == 'file' then
       files[row.entry.path] = true
     end

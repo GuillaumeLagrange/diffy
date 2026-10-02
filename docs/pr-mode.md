@@ -1,6 +1,6 @@
 # PR layer — design draft
 
-Status: draft for review, nothing implemented. Replaces `:Diffy pr` as a mode of its own.
+Status: decided, nothing implemented. The measurements under Background sync come first.
 
 ## The ask
 
@@ -26,17 +26,25 @@ Never in scope: PRs of branches you haven't checked out (`:Diffy pr 123`). That'
 ### Loading
 
 - The session renders as if there were no PR. The layer attaches when `gh` answers (`DiffyReady`, event
-  `pr`). No PR, no `gh`, offline: no layer, no warning.
+  `pr`). Offline or without `gh`, it attaches from the cache of the last read (see the store), the PR row
+  saying `offline`; with no cache, there's no layer and no warning. `github = false` in `setup` turns the
+  layer off everywhere.
+- The PR is found with `gh pr view <branch> --json number,url,state,baseRefName,headRefOid`, `<branch>`
+  being the session's branch (HEAD may be detached in checkout mode). gh follows the branch's upstream and
+  picks the PR, forks included: every later read and write goes to the repository in `url`, not `origin`'s.
+  This replaces `github.find_pr` (GraphQL by `headRefName` on `origin`'s repository, missing forks and
+  renamed local branches). Only an `OPEN` PR attaches.
 - The base of `:Diffy branch` without an argument can't wait on the network either. Today
   `repo.resolve_base` waits on `gh pr view`, then `gh repo view`, before the first render. New order: the PR
-  base cached in `.git/diffy/<branch>/pr.json` by the last session, else `origin/HEAD` (`git symbolic-ref
-  refs/remotes/origin/HEAD`, local), else `gh repo view`. If the layer brings a different base, the session
-  re-renders once and caches it. An explicit base is used as given, and the layer still attaches: threads
-  are placed by tracking, not by base.
+  base from the cache, else `origin/HEAD` (`git symbolic-ref refs/remotes/origin/HEAD`, local), else
+  `gh repo view`. If the layer brings a different base, the session re-renders once, keeping the selected
+  commits when they're still listed, else the default selection.
+  An explicit base is used as given, and the layer still attaches: threads are placed by tracking, not by
+  base.
 - Attaches to `:Diffy` and `:Diffy branch`, the sessions that have a review today. Not to ranges,
   `:Diffy file` or `:Diffy conflicts`.
-- When a sync finds the PR merged or closed, the layer detaches: the PR row and the published threads go.
-  Your drafts stay.
+- When a sync finds the PR merged or closed, the layer detaches: the PR row and the published threads go,
+  and so does the cache. Your drafts stay.
 
 ### The PR row
 
@@ -47,9 +55,11 @@ First row of the log, above `Working tree`, only while the PR is open:
 ```
 
 - Number and title.
-- What's yours to do: threads to answer, addressed threads not sent, sync conflicts.
-- Where the branch stands against the PR head: nothing when in sync, `2 unpushed`, `behind 1`, `diverged`.
-- `offline` when the last sync failed.
+- Sync conflicts waiting for you.
+- Where the branch stands against the PR head: nothing when in sync, `2 unpushed`, `behind 1`, `diverged`
+  (`git rev-list --left-right --count`). When the PR head isn't a local commit, `GitHub has newer commits`:
+  diffy never fetches.
+- `offline` when the last read failed.
 
 It isn't a diff entry: `J`/`K` and selections skip it. Resting the cursor on it shows the description, the
 reviewers' states (`alice ✗ changes requested`, `bob ✓`) and the conversation in the float beside the log,
@@ -57,29 +67,87 @@ the way a commit's message shows. `gP` stays.
 
 ### Review markers
 
-A review is written on a commit (`PullRequestReview.commit`). Each submitted review shows as a dim row right
-above that commit: `── alice ✗ 4 threads`. `<CR>` on it selects everything above it: what changed since
-that review, which is what the reviewer will look at next.
+A review is written on a commit (`PullRequestReview.commit`). Each submitted review on a commit listed in the
+log shows as a dim row right above that commit: `── alice ✗ 4 threads`. `<CR>` on it selects everything
+above it: what changed since that review, which is what the reviewer will look at next.
+
+A review whose commit isn't listed has no marker: in `:Diffy`, which lists unpushed commits only, that's
+almost every review; elsewhere, a commit a force-push removed. The PR row's float lists every review anyway,
+with its short sha and `not in this log` or `no longer in the branch`.
+
+### Reading
+
+- When: on layer load, on `R`, on `FocusGained`, and every 5 minutes while the session's tab is current
+  (configurable, 0 turns the timer off); entering the tab reads if the last read is older than that.
+  Whether zellij passes focus events to nvim is unverified; the timer covers it either way.
+- One read at a time; a trigger during a read queues one more.
+- No read on rebuilds: `:w` re-places threads from the cache.
+- The read query paginates everything it reads (today a thread's comments stop at 50, reviews at 100).
 
 ## One set of threads
 
-`.git/diffy/<branch>/threads.json` replaces `local.json` and `pr-<n>.json`. Both are merged into it on
-first load and deleted; ids that collide are renumbered.
+### The store
+
+`.git/diffy/<branch>/threads.json` replaces `local.json` and `pr-<n>.json`. The branch is the one the
+session opened on: checkout mode detaches HEAD, and `local_backend.branch` would then return a sha.
+
+- **Migration.** Both old files (every `pr-<n>.json`) are merged into it on first load, then deleted.
+  `local.json`'s ids are kept, since `review.md` refers to them; ids from `pr-<n>.json` that collide are
+  renumbered.
+- **Ids** are unique across processes (time plus random), not the highest number plus one as in
+  `model.next_id`: two nvims would both make `t5`.
+- **Contents.** Your comments, their states and flags, and a cache of the last GitHub read (PR metadata,
+  published threads, reviews), replaced as a whole by every read.
 
 Each comment of yours has two independent states:
 
 | | |
 |---|---|
-| GitHub | `local` (not mirrored) · `pending` (in your pending review) · `published` |
+| GitHub | `local` (not mirrored) · `pending` (in your pending review) · `published`, possibly with a staged edit or deletion |
 | Agent | not sent · `sent` (in `review.md`) |
 
-Threads also carry local flags: `addressed`, `resolve_staged`, `for_agent`, `conflict`.
+Threads also carry local flags: `resolve_staged`, `conflict`.
 
-**Placement.** One rule for every thread, GitHub's: tracked across the branch's commits from where it was
-written, then into the index and the worktree. Today a local thread only shows in the exact view it was
-written in (`model.pair_side`); a GitHub thread shows in any view of the PR (`github.place_at`). A thread
-anchored on the worktree or the index is re-anchored to HEAD once HEAD has its lines (`model.relocate`
-against HEAD's blob): that's how a draft written on the worktree reaches GitHub after you commit and push.
+### Several sessions
+
+Not common, so kept simple: every session sees every change, nobody owns the store.
+
+- In one nvim, sessions on the same branch share one in-memory store; a change redraws all of them.
+- Across nvims, each change is applied to a fresh read of the file and written atomically (temporary file,
+  rename). The other nvims watch the file (`vim.uv.new_fs_event`) and reload. Whole states are never merged:
+  that would bring back what the other session deleted. The same comment edited in two nvims at once: the
+  last write wins.
+- The same rule covers everything in the branch's directory: `threads.json` and `viewed.json`.
+- Two nvims running the background sync at once: see Background sync.
+
+### Placement
+
+One rule for every thread. Today a local thread only shows in the exact view it was written in
+(`model.pair_side`), and a GitHub thread in any view of the PR (`github.place_at`).
+
+- **Source**: where the comment was written. A local comment: the commit on its side of the view it was
+  written in. A GitHub thread: its comment's `commit` (else `originalCommit`) on the new side, the merge-base
+  on the old side (GitHub reports old-side lines relative to the merge-base).
+- **Worktree and index comments** have no stable source. They're placed by excerpt search, as today
+  (`model.relocate`, ±20 lines). Once HEAD's blob has the excerpt, the comment becomes a comment on HEAD at
+  those lines and is tracked like any other: that's how a draft written on the worktree reaches GitHub after
+  you commit and push.
+- **Targets**: a commit, by `git diff -M -U0 <source> <target>` (one call per pair, shared by every thread
+  with that source); the index, by `git diff --cached -U0 <source>`; the worktree, by `vim.diff` against the
+  buffer when the file is loaded, else `git diff -U0 <source>`.
+- **Shown** in a view when both ends of its range map through unchanged lines (`model.map_range`); hidden
+  there otherwise.
+- **Outdated** when it can't be mapped to the worktree, live: the buffer as you type, so a thread goes
+  outdated as soon as you touch its first or last line, and comes back if you undo. ⚠ Validate this
+  behaviour before building `docs/pr-answering.md`; extmarks moving with your edits, judged on write, is the
+  alternative. In checkout mode the worktree is the checked-out commit, so threads written after it show as
+  outdated until you leave (the simplest rule; revisit if it gets in the way).
+- **Detached** when there's no source to map from: its commit is gone locally (force-pushed away, then
+  pruned), or a worktree or index comment's excerpt isn't found any more.
+- The threads view keeps its groups: Open, Outdated, Detached, Resolved.
+
+**`review.md`** gives each comment's location now (tracked to the worktree: what the agent edits) and where
+it was written (commit and hunk). An outdated comment only has the second.
 
 ## Submitting
 
@@ -88,41 +156,54 @@ agent, `g` GitHub (then the verdict, as today; on your own PR GitHub only allows
 there's no question: it goes to the agent.
 
 - **Each comment goes to one destination.** Submitting to the agent writes the unsent drafts to
-  `review.md`, marks them `sent` and takes them out of the pending review. Submitting to GitHub publishes the
-  pending review.
-- Threads flagged for the agent (`for_agent`, reviewers' threads included) go to `review.md` with their whole
-  conversation; the flag clears.
+  `review.md`, marks them `sent` and takes them out of the pending review (deleted once empty). Submitting to
+  GitHub publishes the pending review.
 - **Nothing anyone else can see changes before a GitHub submit.** The background sync only writes to your
-  pending review, which only you see. Replies, new threads and resolves wait for the submit.
-- GitHub submit runs the review first, then the staged resolves, so a resolution lands after its reply. A
-  resolve that fails stays staged and the next sync retries it.
-- Before a GitHub submit, the confirm float lists what won't go: drafts GitHub can't take, agent replies you
-  haven't checked. It also lists unpushed commits.
-- `:Diffy review clear` drops your drafts and deletes the pending review (it's yours and private).
+  pending review, which only you see. Replies, new threads, resolves, and edits and deletions of your
+  published comments wait for the submit.
+- **The confirm float lists everything going out**: new threads, replies, staged edits, deletions and
+  resolves. Each can be excluded: an excluded draft leaves the pending review for this submit and goes back
+  into a fresh one on the next sync. It also lists what can't go (drafts GitHub can't take) and unpushed
+  commits.
+- **Order**: excluded drafts out of the pending review, the review, the staged edits and deletions, then the
+  staged resolves, so a resolution lands after its reply. A staged change that fails stays staged and the
+  next sync retries it.
+- `:Diffy review clear` drops your drafts and staged changes and deletes the pending review, adopted comments
+  included; it asks first (`prompt.lua`), since it deletes on GitHub.
+
+### Staged changes
+
+Kept in the store only (GitHub has no pending edit, deletion or resolve), so another machine doesn't see
+them.
+
+- `x` on a thread stages a resolve or unresolve; `x` again cancels.
+- `e` on one of your published comments stages an edit; `dd` stages its deletion; `dd` again cancels.
 
 ## Background sync
 
-**When.** On layer load, on `FocusGained`, every 60 s while the session's tab is current, on `R`, and 2 s
-after the last local change to a draft that can be mirrored. One sync at a time; a trigger during a sync
-queues one more.
+Reads are the layer's (see Reading). Writes go to your pending review only:
 
-**Reads.** The current read query, plus each review's commit and state.
-
-**Writes.** Only to your pending review: create it with the first mirrored draft; add, edit and delete
-pending comments. For each mirrored comment diffy keeps its GitHub id and the body and `updatedAt` it last
-synced, which is how it tells which side changed.
+- **When**: 2 s after the last local change to a draft GitHub can take; offline, after the next successful
+  read. A change is mirrored by the nvim that made it; changes left unmirrored (nvim closed within the 2 s)
+  go with the next sync of any session.
+- **What**: create the pending review with the first mirrored draft (if another nvim created it meanwhile,
+  adopt that one); add, edit and delete pending comments.
+- **Bookkeeping**: for each mirrored comment, its GitHub id and the body and `updatedAt` it last synced.
+  Before editing or deleting a mirrored comment, diffy reads it again: changed since means a conflict, not an
+  overwrite. Two mirrored copies of one draft (same anchor and body, two nvims racing) are merged on read.
 
 Conflict rules:
 
 | Case | Result |
 |---|---|
-| a comment of yours changed on both sides, or edited on one and deleted on the other | both versions kept, the thread flagged as a conflict until you delete one; an edit beats a delete |
+| a pending comment changed on both sides, or edited on one and deleted on the other | both versions in the thread, the web one labelled `github.com`; `dd` deletes one, the conflict ends when one is left; an edit beats a delete |
+| a staged edit to a published comment, which was edited on github.com meanwhile | your staged edit next to the live comment; `dd` on the edit drops it, `dd` on the live one stages its deletion |
+| a staged edit to a published comment deleted on github.com | becomes a draft reply in its thread; if the thread is gone, dropped with its text in a notification |
+| a staged deletion of a published comment edited on github.com | cancelled, with a notification (an edit beats a delete) |
 | a pending review diffy didn't create (github.com, another machine) | adopted: its comments join your drafts and diffy keeps mirroring into it |
 | a draft GitHub can't take (worktree, unpushed commit, outside the diff and its 3 lines of context) | stays local with a badge, mirrored once it becomes valid; a GitHub submit lists it as staying behind |
 | a draft reply whose thread was deleted | dropped, its text in a notification |
 | a draft reply whose thread was resolved, or went outdated | kept: GitHub accepts both |
-| the agent ticks a GitHub thread | addressed, locally; nothing on GitHub |
-| `x` on a GitHub thread | staged until the next GitHub submit; `x` again cancels |
 
 Needs measuring before building it:
 
@@ -130,104 +211,35 @@ Needs measuring before building it:
 - Mirroring drafts one by one: `addPullRequestReviewThread` anchors at head, so a draft on an older commit
   needs the legacy `addPullRequestReviewComment(commitOID, position)` with the pending review's id. Today
   `push` recreates the whole pending review instead. The legacy call on old-side lines is still unmeasured.
-- Whether a pending comment edited on github.com gets a new `updatedAt`.
-
-## Answering reviews on your own PR
-
-The flow to design for: reviewers left threads. You go through them, fix things yourself or hand them to the
-agent, answer, push, submit, and ask for another look.
-
-### Whose turn
-
-The idea that organizes the rest. An open thread is **yours** when its last comment isn't yours, or it has
-comments you haven't seen. It's **theirs** when its last published comment is yours. The threads view, with
-the layer attached, groups by turn:
-
-- **To answer**: yours.
-- **Addressed**: fixed (by you or the agent), the reply or resolve not sent yet.
-- **Waiting**: theirs.
-- **Resolved**, **Detached**, as today.
-
-Outdated is a tag inside these groups, not a group of its own: on your own PR a thread usually goes outdated
-because you changed its lines, and it's still yours to answer.
-
-A comment counts as seen once its card has been open. New ones get `●` in the summary, the card and the
-threads view: the same mark as a viewed file that changed (`docs/viewed-files.md`). Seen ids are stored
-locally, per branch.
-
-### Getting to a thread
-
-- `]T`/`[T`: next/previous thread to answer, in any file. It switches the file, and the selection if needed,
-  to one that shows the thread on the current code (the worktree, as the real file), since you're about to
-  edit it. An outdated thread opens on the commit it was written on, like `<CR>` in the threads view does.
-- The PR row's count and the To answer group are the overview.
-
-### Acting on a thread
-
-Keys in the thread card:
-
-- `r`: reply. A draft reply, mirrored as pending.
-- `x`: stage a resolve.
-- `gs`: apply a reviewer's suggestion to the worktree file at the thread's tracked lines, only if those lines
-  are still the ones the suggestion was written against. The thread becomes addressed. GitHub's "Commit
-  suggestion" makes a commit on the remote branch that your local branch then lacks; applying locally keeps
-  one history.
-- `A`: flag for the agent.
-- `m`: addressed. You fixed it and have nothing to say yet.
-
-### With the agent
-
-1. Flag threads (`A` on a card, or every To answer thread from the threads view), then submit to the agent.
-2. `review.md` carries each flagged thread whole (who said what, the code at the thread, the diff hunk), a
-   `- [ ] resolved` box, and a reply slot the prompt asks the agent to fill in for the reviewer.
-3. When diffy reads `review.md` (load, `R`, sync), a tick makes the thread addressed. A filled reply slot
-   becomes a draft reply on the thread, marked as from the agent. It isn't mirrored and won't be submitted
-   until you accept it (open it, edit it or `<C-s>`).
-4. You check: the files the agent touched come back as changed in the tree (viewed marks); the Addressed group
-   lists the threads and their replies; `]T` also stops on addressed threads with a reply you haven't
-   accepted.
-5. Commit, push, submit.
-
-### Sending
-
-On your own PR, a GitHub submit is a comment review: replies, new threads, staged resolves. The confirm float
-adds:
-
-- Unpushed commits: your replies say "fixed" about code reviewers can't see yet.
-- Re-request review (`requestReviews`) from the reviewers whose threads you answered, on by default for those
-  who requested changes.
+- `updatePullRequestReviewComment` and `deletePullRequestReviewComment`, on pending and on published
+  comments; deleting an empty pending review.
+- Whether a comment edited on github.com gets a new `updatedAt` (the read query doesn't fetch it today).
 
 ## Code touched
 
 - `init.lua`: `dispatch.pr` loses its gate and becomes `:Diffy branch` on the PR base; `M.build` stops
   fetching GitHub; `completion_backend` and `review/ui.lua`'s `review_available`/`ensure` stop choosing a
   backend by kind.
-- `git/repo.lua`: `resolve_base` with the cached PR base and `origin/HEAD`.
+- `git/repo.lua`: `resolve_base` with the cached PR base and `origin/HEAD`; the PR lookup (`gh pr view`).
 - `panels/log.lua`: the PR row and review markers; `worktree_prefix` loses its `pr` case.
 - `panels/commitmsg.lua`: the PR row's float.
-- `review/github.lua`: becomes the layer: PR lookup, read, sync loop, mirroring, submit. `push`, `pull`,
-  `pr_readiness` and its own `load`/`save` go.
-- `review/local.lua`: the agent destination: `review.md` with flagged threads and reply slots.
-- `review/model.lua`: one placement for every thread (tracking out of `github.lua`), re-anchoring worktree
-  and index anchors.
-- `review/store.lua`: `threads.json`, merging the old files.
-- `review/ui.lua`: card keys, `●`, the badges (local only, conflict, addressed, resolve staged, from the agent).
-- `review/threads.lua`: turn groups.
-- `tests/helpers/fake_github.lua`: editing and deleting pending comments, review commits, `requestReviews`.
+- `review/github.lua`: becomes the layer: read (paginated, on the PR's own repository), cadence, mirroring,
+  staged changes, submit. `find_pr`, `owner_repo`, `push`, `pull`, `pr_readiness` and its own `load`/`save`
+  go.
+- `review/local.lua`: the agent destination, on the one store; `review.md` with the location now and where
+  each comment was written.
+- `review/model.lua`: one placement for every thread (tracking out of `github.lua`), the worktree target
+  (`vim.diff` on the buffer), re-anchoring worktree and index comments; unique ids.
+- `review/store.lua`: `threads.json`, merging the old files; read-apply-write per change, atomic writes, the
+  file watch shared with `viewed.json`.
+- `review/ui.lua`: the badges (local only, conflict, staged edit, deletion, resolve); `e`/`dd` on published
+  comments.
+- `tests/helpers/fake_github.lua`: editing and deleting pending and published comments, adopting a pending
+  review, `updatedAt`.
 - `README.md`: the commands table and the Review section.
+- `AGENTS.md`: the sandbox rule: with the layer on, never open a session on `sandbox/pending` in the sandbox
+  clone. Adoption and mirroring would write into PR #4's pending review, and drafts already in the store for
+  that branch are mirrored on open. Write-side smoke tests use throwaway PRs, or `github = false`.
 
-## Open questions
-
-1. **Replies on resolved or outdated threads.** You picked "drop" for a draft reply whose thread changed.
-   I've applied it to deleted threads only. On your own PR a thread goes outdated precisely when you fix its
-   lines, which is when you write "done": dropping the reply then would throw away the normal case. Drop on
-   resolved and outdated too?
-2. **Keys.** `]T`/`[T`, and `r`, `x`, `gs`, `A`, `m` in the card. `m` is also the viewed toggle in the tree:
-   different buffers, but the same letter with two meanings.
-3. **Unpushed commits at a GitHub submit.** Warn only, or offer to `git push` first? diffy has never pushed.
-4. **Re-request review.** In the submit float, on by default for reviewers who requested changes?
-5. **Review markers for force-pushed commits.** A review written on a commit no longer in the branch has no
-   row to sit above. Under the PR row, or not shown?
-6. **The reply slot in `review.md`.** Its format, and whether the prompt asks for a reply on every thread or
-   only on GitHub threads.
-7. **Sync every 60 s.** About 60 reads an hour per open session.
+Answering reviews on your own PR (turns, seen comments, card keys, the agent loop) is its own spec:
+`docs/pr-answering.md`.

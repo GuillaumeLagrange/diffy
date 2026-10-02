@@ -200,7 +200,7 @@ end
 
 --- `:Diffy feedback`: describe what you don't like in a modal; `<C-s>` hands it to the
 --- `User DiffyFeedback` handlers (`data.text`), with the session as it was. Diffy doesn't store
---- it: the handler (the user config's errlog) records it with its context.
+--- it: a handler that wants the session's state calls `debug_state()`.
 function M.dispatch.feedback()
   local s = current_session()
   if not s then
@@ -547,8 +547,7 @@ function M.complete(arg_lead, cmdline, cursor_pos)
 end
 
 --- Plain-data snapshot of every session and the recent git/gh commands, for
---- error reports (the user config's errlog). Fields of a half-built session
---- may be nil.
+--- bug reports. Fields of a half-built session may be nil.
 function M.debug_state()
   local cur_tab = vim.api.nvim_get_current_tabpage()
   local sessions = {}

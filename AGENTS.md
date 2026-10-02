@@ -21,7 +21,7 @@ document, being retired; don't cite it (or this file) from code or tests.
 plugin/diffy.lua        :Diffy command, nothing else at startup
 lua/diffy/
   init.lua              setup/config, :Diffy dispatch + completion, M.start (open a session) / M.build (render pipeline),
-                        M.debug_state (sessions + recent commands for the user config's errlog reports),
+                        M.debug_state (plain-data snapshot of sessions + recent commands, for bug reports),
                         :Diffy feedback (modal -> `User DiffyFeedback`)
   session.lua           one session per tab: registry, augroup, namespaces, keymap tracking, teardown
   layout.lua            views (tree, log, threads) and where they're shown: the left column, floats
@@ -71,7 +71,7 @@ Conventions the code relies on:
   dropping one link drops the chain.
 - **DiffyReady.** `run.ready({ session, event })` fires `User DiffyReady` when something finished drawing.
   Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `choose`, `conflict`,
-  `checkout`, `restore`, `pr`, `close`, `commitmsg`. Tests wait on these; never sleep.
+  `checkout`, `restore`, `pr`, `close`, `commitmsg`, `feedback`. Tests wait on these; never sleep.
 - **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `branch`, `author`,
   `place(session, thread) -> {win, start_line, end_line} | nil` (in the open file), `view_place` (the same
   for any file of the current pair, or of a given pair: the threads view uses it to pick a selection that
@@ -143,14 +143,14 @@ Reproducing a bug under the user's real config (most real bugs only showed up th
 vim.fn.expand('~/.config/nvim/init.lua') })`, then `set termguicolors`. `child.get_screenshot()` errors with their colorscheme; read the screen with
 `vim.fn.screenstring(row, col)` and highlights with `vim.fn.screenattr`. Throwaway scripts go in `/tmp`.
 
-Bugs the user hit come as reports from `~/dotfiles/nvim/lua/errlog/` (see its `AGENTS.md`): keys, windows,
-repo state and `debug_state()` at the time of the error. `:Diffy feedback` lands there too, as a report whose
-`message` is the user's complaint about what the session showed at that moment; it's not an error.
+Bug reports and `:Diffy feedback` can come with `debug_state()` as it was when the user hit them: sessions,
+selection, shown file, recent git/gh commands. A feedback is the user's complaint about what the session
+showed at that moment; it's not an error.
 
 Seeing what the user sees (colours, avatars, floats): a headless compositor running kitty › zellij › nvim
 with the real config and `--listen`, screenshotted with `grim`:
 
-- `WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 NVIM_ERRLOG=0 setsid -f sway -c conf`, where `conf` holds
+- `WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 setsid -f sway -c conf`, where `conf` holds
   `output HEADLESS-1 resolution 1500x800` and `exec kitty -o background_opacity=1 zellij --config
   z.kdl -s NAME -n layout.kdl`. `z.kdl` is the user's zellij config plus `show_startup_tips false` (the tip
   popup covers the pane); the layout's pane runs `nvim --listen SOCK`. Unset `ZELLIJ*` first, or zellij

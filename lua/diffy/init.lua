@@ -272,6 +272,8 @@ function M.build(s)
     end
     repo.head_sha(s.root, function(head_sha)
       s.head_sha = head_sha
+      -- what the session's stores are keyed by; read once, since checkout mode detaches HEAD
+      s.branch = s.branch or require('diffy.review.local').branch(s)
       repo.status(s.root, function(status_entries)
         s.status_entries = status_entries or {}
         s.pair = selection.resolve(s.entries, s.sel.top, s.sel.bottom)

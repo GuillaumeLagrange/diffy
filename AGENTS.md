@@ -43,13 +43,17 @@ lua/diffy/
   prompt.lua            key-driven yes/no and pick-one floats (vim.fn.confirm can't be driven in tests)
   highlight.lua         highlight groups (default links, card backgrounds) and width-fitting helpers
   avatar.lua            images over the terminal (kitty graphics): avatars, body badges; detect, fetch, place, clear
-  review/model.lua      thread data, excerpt relocation, line tracking, GitHub anchor validity/position
+  review/model.lua      thread data, ids, excerpt relocation, the placement rule (source, line tracking),
+                        GitHub anchor validity/position
+  review/track.lua      placement: diffs from each thread's source to every rev a view shows (git, vim.diff
+                        on loaded buffers), outdated/detached, worktree comments settling on HEAD
   review/ui.lua         signs, summaries, comment cards (thread float, gP), compose float, thread jumps
   review/render.lua     comment body -> card lines: HTML to markdown, link table (gx), <details> folds, badges
   review/threads.lua    the threads view (:Diffy threads): grouped rows, preview pane, jump keys
-  review/store.lua      JSON in .git/diffy/<branch>/
+  review/store.lua      JSON in .git/diffy/<branch>/: atomic writes, read-apply-write updates, file watch
+  review/drafts.lua     the branch's one store of your comments (threads.json), shared by sessions, migration
   review/local.lua      local backend + review.md export
-  review/github.lua     GitHub backend: gh transport, read, placement, push/pull/submit
+  review/github.lua     GitHub backend: gh transport, read, push/pull/submit
 ```
 
 Conventions the code relies on:
@@ -74,12 +78,20 @@ Conventions the code relies on:
 - **DiffyReady.** `run.ready({ session, event })` fires `User DiffyReady` when something finished drawing.
   Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `choose`, `conflict`,
   `checkout`, `restore`, `pr`, `close`, `commitmsg`, `feedback`, `viewed`. Tests wait on these; never sleep.
-- **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `branch`, `author`,
+- **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `author`,
   `place(session, thread) -> {win, start_line, end_line} | nil` (in the open file), `view_place` (the same
   for any file of the current pair, or of a given pair: the threads view uses it to pick a selection that
-  shows a thread), and for authoring `load`, `save`, `clear`,
-  `export` (local) or `push`/`pull`/`submit`/`resolve_thread` (GitHub). `review/ui.lua` only draws what
+  shows a thread), and for authoring `save(session, thread, comment?)`, `clear`,
+  `export` (local) or `push`/`pull`/`submit`/`resolve_thread` (GitHub). Both place through `review/track.lua`,
+  so a thread shows in every view it tracks to, whichever backend wrote it. `review/ui.lua` only draws what
   `place` returns and caches it on `thread._place`.
+- **One store per branch.** Your comments live in `.git/diffy/<branch>/threads.json`, keyed by
+  `session.branch` (the branch the session opened on). Every change goes through `review/drafts.lua`
+  (`put`/`remove`/`change`): a fresh read of the file, one change, an atomic write; never write a session's
+  whole thread list back. Sessions of one nvim on a branch share one entry and all redraw on a change; other
+  nvims reload through the file watch, stopped when the last session on the branch tears down. Session
+  threads are per-session objects brought in line by `drafts.apply`, matched by id; ids are time + random
+  (`model.new_id`).
 - **One-sided files.** An added or deleted file closes the empty side's window (`session.hidden_side`,
   `session.wins[side] = nil`) until `diffpair.restore`; anything reaching for `session.wins.left/right`
   checks it exists. The conflict view restores both first.

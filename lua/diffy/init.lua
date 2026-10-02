@@ -100,10 +100,8 @@ end
 
 local review_subcommands = {}
 
-function review_subcommands.clear(s, review, ui)
-  review.backend.clear(s, review.branch)
-  review.threads = {}
-  ui.decorate(s)
+function review_subcommands.clear(s, review)
+  review.backend.clear(s)
   vim.notify('diffy: review cleared')
   review_ready(s)
 end
@@ -313,17 +311,18 @@ function M.build(s)
           end)
         end
         -- PR threads/reviews/description are cached per session and refreshed
-        -- by `R`; fetch them before the final render so its decorate pass
-        -- finds `s.review` populated.
+        -- by `R`; fetch them, and what placing threads needs, before the
+        -- final render so its decorate pass finds them.
         if s.range.kind == 'pr' then
           require('diffy.review.github').refresh(s, finish)
         else
-          -- what the agent resolved in review.md since the review was loaded
-          local review = type(s.review) == 'table' and s.review
+          local ui = require('diffy.review.ui')
+          local review = ui.ensure(s)
+          -- what the agent resolved in review.md since the last build
           if review and review.backend.sync then
-            review.backend.sync(s, review.branch, review.threads)
+            review.backend.sync(s)
           end
-          finish()
+          require('diffy.review.track').prepare(s, finish, { fresh = true })
         end
       end, s)
     end, s)

@@ -1,15 +1,17 @@
 -- Pure review data model: Thread/Comment/Anchor shapes, excerpt relocation,
--- rev<->commit-field mapping, placement in the current pair, unified-diff
--- hunk parsing and line tracking. Uses only vim.* table/string helpers (no
--- vim.api, no subprocesses), so it's testable with plain tables.
+-- rev<->commit-field mapping, ids, unified-diff hunk parsing and line
+-- tracking: the one placement rule (`M.source`, `M.track`). Uses only vim.*
+-- helpers (no vim.api, no subprocesses), so it's testable with plain tables.
 --
---   Thread  { id, backend, anchor, comments = {}, resolved, outdated }
+--   Thread  { id, backend, anchor, comments = {}, resolved, outdated, view }
 --   Comment { id, author, body, created_at, state = draft|pending|published|sent }
---   Anchor  { path, side = old|new, start_line, end_line, commit, excerpt }
+--   Anchor  { path, side = old|new, start_line, end_line, commit, excerpt, base_relative }
 --
--- `commit` is 'worktree', 'index', or a sha: the rev shown on
--- `side` when the comment was written. `excerpt` is the array of lines that
--- were anchored, used by `M.relocate` to re-find the anchor after edits.
+-- `commit` is 'worktree', 'index', or a commit-ish: the rev shown on `side`
+-- when the comment was written, which it is tracked from. `excerpt` is the
+-- array of lines that were anchored, used by `M.relocate` to re-find a
+-- worktree or index comment. `base_relative`: an old-side GitHub comment,
+-- whose lines are the merge-base's whatever its commit.
 local M = {}
 
 M.COMMENT_ICON = '\240\159\146\172'
@@ -34,34 +36,29 @@ function M.rev_to_commit(rev, head_sha)
   return rev
 end
 
---- Which window ('left'/'right') currently shows `anchor`'s side of `pair`,
---- or nil. The local backend does no cross-commit tracking: a thread only
---- shows in the exact view it was written in. A `split` pair (the working
---- tree's two sections) shows what either section shows.
-function M.pair_side(pair, head_sha, anchor)
-  if pair.split then
-    local sel = require('diffy.selection')
-    return M.pair_side(sel.UNSTAGED, head_sha, anchor) or M.pair_side(sel.STAGED, head_sha, anchor)
+--- The rev `thread` is tracked from: its anchor's commit, the merge-base for
+--- an old-side GitHub comment. nil when it has none (GitHub found no local
+--- commit for it, or the merge-base isn't known).
+function M.source(thread, merge_base)
+  if thread._has_source == false then
+    return nil
   end
-  if anchor.side == 'old' and M.rev_to_commit(pair.left, head_sha) == anchor.commit then
-    return 'left'
+  local a = thread.anchor
+  if a.side == 'old' and a.base_relative then
+    return merge_base
   end
-  if anchor.side == 'new' and M.rev_to_commit(pair.right, head_sha) == anchor.commit then
-    return 'right'
-  end
-  return nil
+  return a.commit
 end
 
 --- Re-locate `anchor` against `lines` (the current content of its side):
 --- search outward from the stored `start_line`, within +/-20 lines, for an
---- exact match of `anchor.excerpt`. On success, updates `start_line`/
---- `end_line` in place and returns true. On failure, leaves `anchor`
---- untouched and returns false - callers treat the thread as detached.
+--- exact match of `anchor.excerpt`. Returns the matching `start_line,
+--- end_line`, or nil (callers treat the thread as detached).
 function M.relocate(anchor, lines)
-  local excerpt = anchor.excerpt
+  local excerpt = anchor.excerpt or {}
   local n = #excerpt
   if n == 0 or #lines < n then
-    return false
+    return nil
   end
   local function matches(start)
     if start < 1 or start + n - 1 > #lines then
@@ -74,54 +71,29 @@ function M.relocate(anchor, lines)
     end
     return true
   end
-  local function try(start)
-    if not matches(start) then
-      return false
-    end
-    anchor.start_line = start
-    anchor.end_line = start + n - 1
-    return true
-  end
   local origin = anchor.start_line
-  if try(origin) then
-    return true
+  if matches(origin) then
+    return origin, origin + n - 1
   end
   for d = 1, 20 do
-    if try(origin - d) or try(origin + d) then
-      return true
+    for _, start in ipairs({ origin - d, origin + d }) do
+      if matches(start) then
+        return start, start + n - 1
+      end
     end
   end
-  return false
+  return nil
 end
 
---- Next unused `<prefix><N>` id among `ids`.
-local function next_id(prefix, ids)
-  local max = 0
-  for _, id in ipairs(ids) do
-    local n = tonumber(id:match('^' .. prefix .. '(%d+)$'))
-    if n and n > max then
-      max = n
-    end
-  end
-  return prefix .. tostring(max + 1)
-end
-
-function M.next_thread_id(threads)
-  local ids = {}
-  for _, t in ipairs(threads) do
-    table.insert(ids, t.id)
-  end
-  return next_id('t', ids)
-end
-
-function M.next_comment_id(threads)
-  local ids = {}
-  for _, t in ipairs(threads) do
-    for _, c in ipairs(t.comments) do
-      table.insert(ids, c.id)
-    end
-  end
-  return next_id('c', ids)
+--- A new thread/comment id: `prefix`, the time in ms and random bits, so two
+--- nvims drafting at once never pick the same one.
+function M.new_id(prefix)
+  local sec, usec = vim.uv.gettimeofday()
+  local rand = vim.uv.random(3)
+  local hex = rand and rand:gsub('.', function(ch)
+    return ('%02x'):format(ch:byte())
+  end) or ('%06x'):format(math.random(0, 0xffffff))
+  return ('%s%x%03x%s'):format(prefix, sec, math.floor(usec / 1000), hex)
 end
 
 --- One-line `virt_lines` summary: `💬 <first author>[ +N][ · resolved]`,
@@ -344,6 +316,34 @@ function M.map_range(hunks, start_line, end_line)
     return nil
   end
   return s, e
+end
+
+--- Where `anchor`'s range lands across one diff from its source: `files`
+--- (from `M.parse_diff_files`) or the file's own `hunks`. `{ path,
+--- start_line, end_line }`, `path` being the file's name on the far side,
+--- or nil when either end falls in a changed hunk.
+function M.track(anchor, files, hunks)
+  local path = anchor.path
+  if files then
+    path, hunks = M.diff_file_hunks(files, anchor.path)
+  end
+  local s, e = M.map_range(hunks, anchor.start_line, anchor.end_line)
+  if not s then
+    return nil
+  end
+  return { path = path, start_line = s, end_line = e }
+end
+
+--- `-U0` hunks (as `M.parse_hunks` gives, without `lines`) between two line
+--- arrays.
+function M.line_hunks(a, b)
+  local hunks = {}
+  local text_a = #a > 0 and (table.concat(a, '\n') .. '\n') or ''
+  local text_b = #b > 0 and (table.concat(b, '\n') .. '\n') or ''
+  for _, h in ipairs(vim.diff(text_a, text_b, { result_type = 'indices' })) do
+    table.insert(hunks, { old_start = h[1], old_count = h[2], new_start = h[3], new_count = h[4] })
+  end
+  return hunks
 end
 
 --- Whether `[start_line, end_line]` on `side` ('old'/'new') is a changed

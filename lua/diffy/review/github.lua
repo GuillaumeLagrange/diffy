@@ -1,24 +1,20 @@
 -- GitHub review backend: the PR of the checked-out branch. Reads threads,
--- reviews, description and the viewer's pending review, places threads
--- across commits, and pushes/pulls/submits local drafts.
+-- reviews, description and the viewer's pending review, and pushes/pulls/
+-- submits your drafts, which live in the branch's one store
+-- (`review/drafts.lua`). Placement is `review/track.lua`'s, as for every
+-- thread.
 local model = require('diffy.review.model')
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
-local store = require('diffy.review.store')
-local local_backend = require('diffy.review.local')
+local drafts = require('diffy.review.drafts')
+local track = require('diffy.review.track')
 local prompt = require('diffy.prompt')
 
 local M = {}
 
 M.name = 'github'
 M.capabilities = { resolve = true, suggestions = true, people = true }
-
---- Opaque persistence label (`pr-<number>`). The draft file itself lives
---- under the checked-out git branch, see `pr_json_path`.
-function M.branch(session)
-  return ('pr-%d'):format(session.range.pr_number)
-end
 
 local cached_author
 local avatars = {} -- login -> avatar URL, from every read
@@ -44,81 +40,8 @@ local function remember_avatar(actor)
   end
 end
 
--- ---------------------------------------------------------------------
--- persistence: local drafts survive restarts at
--- `.git/diffy/<branch>/pr-<number>.json`. Only `draft` (never pushed) and
--- `pending` (pushed, then re-anchored by `:Diffy review pull`) comments are
--- persisted; published content is always re-fetched from GitHub.
-local function pr_json_path(session)
-  return store.path(session.gitdir, local_backend.branch(session), ('pr-%d.json'):format(session.range.pr_number))
-end
-
-function M.load(session, _branch)
-  local data = store.load(pr_json_path(session))
-  return (data and data.threads) or {}
-end
-
-function M.save(session, _branch, threads)
-  local keep = {}
-  for _, t in ipairs(threads) do
-    local comments = {}
-    for _, c in ipairs(t.comments) do
-      if c.state == 'draft' or c.state == 'pending' then
-        table.insert(comments, { id = c.id, author = c.author, body = c.body, created_at = c.created_at, state = c.state })
-      end
-    end
-    if #comments > 0 then
-      table.insert(keep, { id = t.id, backend = t.backend, anchor = t.anchor, comments = comments, resolved = t.resolved })
-    end
-  end
-  store.save(pr_json_path(session), { threads = keep })
-end
-
-local function index_by_id(threads)
-  local by_id = {}
-  for _, t in ipairs(threads) do
-    by_id[t.id] = t
-  end
-  return by_id
-end
-
---- Restore `src`'s anchor onto `live` and merge its comments by id: known
---- ones take `src`'s state/body, unknown ones are appended.
-local function overlay_thread(live, src)
-  live.anchor = src.anchor
-  local have = index_by_id(live.comments)
-  for _, c in ipairs(src.comments) do
-    local existing = have[c.id]
-    if existing then
-      existing.state = c.state
-      existing.body = c.body
-    else
-      table.insert(live.comments, c)
-    end
-  end
-end
-
---- Merge persisted local drafts into freshly-fetched `threads` (mutated in
---- place), matched by GitHub thread/comment id:
---- - a persisted thread matching a live one gets its `anchor` back (the
----   original commit/line) and any missing comment appended; comments
----   already present get their `state`/`body` updated.
---- - a persisted thread with no live match is a never-pushed local draft
----   (`t<N>` id) and is inserted as-is; its anchor is always local.
-local function merge_drafts(session, threads)
-  local persisted = M.load(session, M.branch(session))
-  local by_id = index_by_id(threads)
-  for _, pt in ipairs(persisted) do
-    local live = by_id[pt.id]
-    if live then
-      overlay_thread(live, pt)
-    else
-      pt._has_source = true
-      table.insert(threads, pt)
-      by_id[pt.id] = pt
-    end
-  end
-end
+M.save = drafts.put
+M.clear = drafts.clear
 
 -- ---------------------------------------------------------------------
 -- transport: every gh request goes through `M.transport`. Tests replace
@@ -483,8 +406,8 @@ local function build_thread(node, exists, pending_review_id)
       end_line = end_line,
       commit = source_commit,
       excerpt = nil,
+      base_relative = side == 'old' or nil,
     },
-    -- computed once HEAD's tracking is known (M.refresh)
     outdated = false,
     _has_source = source_commit ~= nil,
     -- raw per-comment fields (originalCommit/originalLine/pullRequestReview),
@@ -493,117 +416,15 @@ local function build_thread(node, exists, pending_review_id)
   }
 end
 
--- ---------------------------------------------------------------------
--- placement: line tracking via `git diff -M X Y` hunks, pre-computed for
--- every (source, target) pair the session's log can show, so `M.place`
--- (called synchronously while rendering) only does table lookups.
-
-local PAIR_SEP = '\30'
-
-local function pair_key(x, y)
-  return x .. PAIR_SEP .. y
-end
-
---- Every `(X, Y)` pair `M.place` might need for `session.entries`: new-side
---- anchors track to the commit on the right; old-side anchors track from
---- merge-base to the commit on the left (`C^` for a single commit, the
---- merge-base itself for the full-PR view).
-local function diff_pairs_needed(threads, entries, merge_base)
-  local set = {}
-  local function add(x, y)
-    if x and y and x ~= y then
-      set[pair_key(x, y)] = true
-    end
-  end
-  local new_targets, old_targets = {}, { merge_base }
-  for _, e in ipairs(entries) do
-    table.insert(new_targets, e.sha)
-    table.insert(old_targets, e.sha .. '^')
-  end
-  for _, t in ipairs(threads) do
-    if t._has_source then
-      if t.anchor.side == 'new' then
-        for _, y in ipairs(new_targets) do
-          add(t.anchor.commit, y)
-        end
-      elseif t.anchor.side == 'old' then
-        for _, y in ipairs(old_targets) do
-          add(merge_base, y)
-        end
-      end
-    end
-  end
-  return set
-end
-
-local function build_diff_cache(session, pairs_set, cb)
-  local keys = {}
-  for k in pairs(pairs_set) do
-    table.insert(keys, k)
-  end
-  local cache = {}
-  local remaining = #keys
-  if remaining == 0 then
-    cb(cache)
-    return
-  end
-  for _, key in ipairs(keys) do
-    local x, y = key:match('^(.-)' .. PAIR_SEP .. '(.*)$')
-    run.git({ 'diff', '-M', '-U0', x, y }, {
-      cwd = session.root,
-      session = session,
-      notify_on_error = false,
-      on_exit = function(res)
-        cache[key] = res.code == 0 and model.parse_diff_files(res.stdout or '') or {}
-        remaining = remaining - 1
-        if remaining == 0 then
-          cb(cache)
-        end
-      end,
-    })
-  end
-end
-
---- Where `thread` shows for the `left`/`right` revs and `path`, or `nil`
---- if it's hidden in that view.
-local function place_at(review, thread, left, right, path)
-  local anchor = thread.anchor
-  if anchor.path ~= path or not thread._has_source then
-    return nil
-  end
-  if not anchor.side then
-    -- file-level: always valid, pinned at the top of the new side.
-    return { win = 'right', start_line = 1, end_line = 1 }
-  end
-  local win = anchor.side == 'old' and 'left' or 'right'
-  local target = anchor.side == 'old' and left or right
-  local source = anchor.side == 'old' and review.merge_base or anchor.commit
-  if target == source then
-    return { win = win, start_line = anchor.start_line, end_line = anchor.end_line }
-  end
-  local files = review._diff_cache[pair_key(source, target)]
-  if not files then
-    return nil
-  end
-  local _, hunks = model.diff_file_hunks(files, anchor.path)
-  local s, e = model.map_range(hunks, anchor.start_line, anchor.end_line)
-  if not s then
-    return nil
-  end
-  return { win = win, start_line = s, end_line = e }
-end
-
 --- Where `thread` shows in the session's current pair/file, or `nil`.
 function M.place(session, thread)
-  local pair = session.file_pair or session.pair
-  return place_at(session.review, thread, pair.left, pair.right, session.current_path)
+  return track.place(session, thread, session.file_pair or session.pair, session.current_path)
 end
 
 --- Where `thread` shows in `pair` (default: the current one), whichever
 --- file is open, or nil.
 function M.view_place(session, thread, pair)
-  pair = pair or session.pair
-  return place_at(session.review, thread, pair.left, pair.right, thread.anchor.path)
+  return track.place(session, thread, pair or session.pair)
 end
 
 --- Every commit (by subject, newest first) `thread` is visible in, plus
@@ -611,12 +432,12 @@ end
 function M.visible_in(session, thread)
   local review = session.review
   local out = {}
-  if place_at(review, thread, review.merge_base, session.head_sha, thread.anchor.path) then
+  if track.place(session, thread, { left = review.merge_base, right = session.head_sha }) then
     table.insert(out, 'head')
   end
   for _, e in ipairs(session.entries) do
     if e.kind == 'commit' and not e.merge then
-      if place_at(review, thread, e.sha .. '^', e.sha, thread.anchor.path) then
+      if track.place(session, thread, { left = e.sha .. '^', right = e.sha }) then
         table.insert(out, e.sha:sub(1, 7))
       end
     end
@@ -624,9 +445,10 @@ function M.visible_in(session, thread)
   return out
 end
 
---- (Re)fetch everything read-related for `session` (refreshed with `R`).
---- `cb()` runs even on failure (a notify already fired), but not once
---- `:Diffy close` tore the session down mid-fetch.
+--- (Re)fetch everything read-related for `session` (refreshed with `R`),
+--- your drafts merged in, and what placing them needs. `cb()` runs even on
+--- failure (a notify already fired), but not once `:Diffy close` tore the
+--- session down mid-fetch.
 function M.refresh(session, cb)
   local root = session.root
   owner_repo(root, function(owner, name, err)
@@ -660,25 +482,12 @@ function M.refresh(session, cb)
           for _, n in ipairs(nodes) do
             table.insert(threads, build_thread(n, exists, pending_id))
           end
-          merge_drafts(session, threads)
-          local pairs_set = diff_pairs_needed(threads, session.entries, mb)
-          build_diff_cache(session, pairs_set, function(cache)
-            local review = session.review or {}
-            review.backend = M
-            review.branch = M.branch(session)
-            review.threads = threads
-            review.inline = review.inline == nil and true or review.inline
-            review.pr = meta
-            review.merge_base = mb
-            review._diff_cache = cache
-            session.review = review
-            -- outdated is computed by diffy, not GitHub's `isOutdated`:
-            -- can this thread's source be tracked to HEAD?
-            for _, t in ipairs(threads) do
-              t.outdated = not t._has_source or place_at(review, t, mb, session.head_sha, t.anchor.path) == nil
-            end
-            cb()
-          end)
+          local review = require('diffy.review.ui').ensure(session)
+          drafts.apply(threads, drafts.attach(session).threads)
+          review.threads = threads
+          review.pr = meta
+          review.merge_base = mb
+          track.prepare(session, cb, { fresh = true })
         end)
       end, session)
     end)
@@ -764,32 +573,22 @@ end
 
 --- Runs the mutations for a validated push: delete any existing pending
 --- review, create the primary batch, drafts on other commits, draft
---- replies, then drop every pushed draft comment from
---- `session.review.threads` (the next `M.refresh` re-fetches them from
---- GitHub) and persist/reload. `cb(ok)`.
+--- replies, then drop every pushed draft comment from the store (the next
+--- `M.refresh` re-fetches them from GitHub). `cb(ok)`.
 local function push_execute(session, plan, cb)
   local review = session.review
   local root = session.root
 
   local function finish(ok)
+    local pushed = {}
     for _, group in ipairs({ plan.primary_threads, plan.other_drafts, plan.replies, plan.followups or {} }) do
       for _, d in ipairs(group) do
         if d._pushed then
-          for i, c in ipairs(d.thread.comments) do
-            if c == d.comment then
-              table.remove(d.thread.comments, i)
-              break
-            end
-          end
+          table.insert(pushed, d.comment.id)
         end
       end
     end
-    for i = #review.threads, 1, -1 do
-      if #review.threads[i].comments == 0 then
-        table.remove(review.threads, i)
-      end
-    end
-    review.backend.save(session, review.branch, review.threads)
+    drafts.remove(session, pushed, { quiet = true })
     refresh_and_decorate(session, function()
       cb(ok)
     end)
@@ -1224,6 +1023,7 @@ function M.pull(session, cb)
               end_line = c.originalLine,
               commit = c.originalCommit and c.originalCommit.oid,
               excerpt = nil,
+              base_relative = t.anchor.side == 'old' or nil,
             },
             comments = {},
             resolved = t.resolved,
@@ -1242,20 +1042,35 @@ function M.pull(session, cb)
   end
 
   local function apply()
-    local by_id = index_by_id(review.threads)
-    for _, it in ipairs(imported) do
-      local live = by_id[it.id]
-      if live then
-        overlay_thread(live, it)
+    drafts.change(session, function(threads)
+      for _, it in ipairs(imported) do
+        local stored
+        for _, s in ipairs(threads) do
+          if s.id == it.id then
+            stored = s
+          end
+        end
+        if not stored then
+          table.insert(threads, it)
+        else
+          stored.anchor = it.anchor
+          for _, c in ipairs(it.comments) do
+            local at = #stored.comments + 1
+            for i, sc in ipairs(stored.comments) do
+              if sc.id == c.id then
+                at = i
+              end
+            end
+            stored.comments[at] = c
+          end
+        end
       end
-    end
-    review.backend.save(session, review.branch, review.threads)
-    require('diffy.review.ui').decorate(session)
+    end)
     vim.notify(('diffy: pulled %d thread(s) into local drafts'):format(#imported))
     cb(true)
   end
 
-  if #M.load(session, M.branch(session)) > 0 then
+  if #drafts.attach(session).threads > 0 then
     prompt.confirm(session, {
       'Local drafts already exist for this PR and may differ from the',
       'pending review on GitHub. Replace them?',

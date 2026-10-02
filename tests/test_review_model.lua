@@ -12,7 +12,9 @@ T['relocate gives up beyond the +/-20 line window'] = function()
   end
   lines[45] = 'target'
   local anchor = { start_line = 10, end_line = 10, excerpt = { 'target' } }
-  MiniTest.expect.equality(model.relocate(anchor, lines), false)
+  MiniTest.expect.equality(model.relocate(anchor, lines), nil)
+  anchor.start_line = 25
+  MiniTest.expect.equality({ model.relocate(anchor, lines) }, { 45, 45 })
 end
 
 local function hunk_thread(side, start_line, end_line, hunk)

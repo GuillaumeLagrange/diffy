@@ -590,7 +590,7 @@ T['threads stacked on a line are drawn oldest first; the hover opens the leftmos
   write_comment(w.right, 5, 'first thread')
   child.cmd('Diffy close')
 
-  local path = review_file('local.json')
+  local path = review_file('threads.json')
   local data = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
   local ages = { ['first thread'] = 7200, ['second thread'] = 3600, ['third thread'] = 60 }
   for _, t in ipairs(data.threads) do
@@ -849,7 +849,8 @@ T[':Diffy threads lists every thread in a float by file, the one in the diff fir
   vim.fn.writefile(Repo.lines(10), repo.dir .. '/g.txt')
   open_default()
   local w = ui.wins(child)
-  write_comment(w.right, 5, 'about f')
+  -- on the uncommitted line: HEAD doesn't have it
+  write_comment(w.right, 3, 'about f')
   ui.open_tree_row(child, 'g.txt', '<CR>', 'review')
   write_comment(w.right, 3, 'about g')
 
@@ -858,14 +859,14 @@ T[':Diffy threads lists every thread in a float by file, the one in the diff fir
   MiniTest.expect.equality({ groups[1].group, groups[1].count }, { 'Open', 2 })
   MiniTest.expect.equality(groups[1].files, { 'g.txt', 'f.txt' })
   MiniTest.expect.equality(groups[1].rows[1]:match('g%.txt:3') ~= nil, true)
-  MiniTest.expect.equality(groups[1].rows[2]:match('f%.txt:5') ~= nil, true)
+  MiniTest.expect.equality(groups[1].rows[2]:match('f%.txt:3') ~= nil, true)
   -- the cursor starts on the shown file's thread, previewed beside the list
   MiniTest.expect.equality(view.preview_title, 'g.txt:3')
   MiniTest.expect.equality(table.concat(view.preview, '\n'):find('about g', 1, true) ~= nil, true)
   -- over f.txt's header onto its thread
   child.type_keys('2j')
   view = ui.threads_view(child)
-  MiniTest.expect.equality(view.preview_title, 'f.txt:5')
+  MiniTest.expect.equality(view.preview_title, 'f.txt:3')
   child.type_keys('q')
   MiniTest.expect.equality(ui.threads_view(child), vim.NIL)
 
@@ -874,12 +875,12 @@ T[':Diffy threads lists every thread in a float by file, the one in the diff fir
   MiniTest.expect.equality(groups[1].rows[1]:match('g%.txt:3') ~= nil, true)
   child.type_keys('q')
 
-  -- a commit doesn't show comments written on the worktree: still listed,
-  -- and <CR> goes back to the selection that shows it
+  -- a commit doesn't show comments on worktree lines it doesn't have: still
+  -- listed, and <CR> goes back to the selection that shows it
   ui.select_log_row(child, 'base')
   groups = threads('Diffy threads')
   MiniTest.expect.equality(groups[1].count, 2)
-  press_on_row('f.txt:5', '<CR>', 'thread')
+  press_on_row('f.txt:3', '<CR>', 'thread')
   MiniTest.expect.equality(ui.threads_view(child), vim.NIL)
   MiniTest.expect.equality(ui.log_subjects(child, ui.rows_with(child, 'log', 'DiffySelection')), { 'Working tree' })
   local float = ui.thread_float(child)
@@ -889,30 +890,36 @@ T[':Diffy threads lists every thread in a float by file, the one in the diff fir
   child.cmd('Diffy close')
 end
 
-T['the threads view groups open, detached, then resolved threads (folded); x resolves the one under the cursor'] = function()
+T['the threads view groups open, outdated, detached, then resolved threads (folded); x resolves the one under the cursor'] = function()
   open_default()
   local w = ui.wins(child)
   write_comment(w.right, 5, 'keep open')
   write_comment(w.right, 10, 'to resolve')
+  -- its line edited: outdated
   write_comment(w.right, 20, 'about line 20')
-  child.api.nvim_buf_set_lines(child.api.nvim_win_get_buf(w.right), 19, 20, false, {})
+  -- on the uncommitted line, gone from the worktree with nowhere else to be
+  write_comment(w.right, 3, 'about line 3')
+  local buf = child.api.nvim_win_get_buf(w.right)
+  child.api.nvim_buf_set_lines(buf, 19, 20, false, { 'line 20 edited' })
+  child.api.nvim_buf_set_lines(buf, 2, 3, false, {})
   refresh()
 
   local groups = threads('Diffy threads')
   MiniTest.expect.equality(vim.tbl_map(function(g)
     return { g.group, g.count, #g.rows }
-  end, groups), { { 'Open', 2, 2 }, { 'Detached', 1, 1 } })
+  end, groups), { { 'Open', 2, 2 }, { 'Outdated', 1, 1 }, { 'Detached', 1, 1 } })
 
-  press_on_row('f.txt:10', 'x', 'review')
+  -- the uncommitted line went: line 10 is the worktree's 9
+  press_on_row('f.txt:9', 'x', 'review')
   groups = ui.thread_groups(ui.threads_view(child))
   MiniTest.expect.equality(vim.tbl_map(function(g)
     return { g.group, g.count, #g.rows }
-  end, groups), { { 'Open', 1, 1 }, { 'Detached', 1, 1 }, { 'Resolved', 1, 0 } })
+  end, groups), { { 'Open', 1, 1 }, { 'Outdated', 1, 1 }, { 'Detached', 1, 1 }, { 'Resolved', 1, 0 } })
 
   -- <Tab> unfolds the group under the cursor
   press_on_row('Resolved', '<Tab>')
   groups = ui.thread_groups(ui.threads_view(child))
-  MiniTest.expect.equality(groups[3].rows[1]:find('f.txt:10', 1, true) ~= nil, true)
+  MiniTest.expect.equality(groups[4].rows[1]:find('f.txt:9', 1, true) ~= nil, true)
   child.type_keys('q')
   child.cmd('Diffy close')
 end
@@ -1055,20 +1062,74 @@ T["typing a line above a thread moves its bar along with its summary, the other 
   child.cmd('Diffy close')
 end
 
-T["deleting an anchor's lines detaches it and lists it in :Diffy threads"] = function()
+T['a worktree comment follows lines typed above it, goes outdated when its first line changes, and comes back on undo'] = function()
   open_default()
   local w = ui.wins(child)
   write_comment(w.right, 20, 'about line 20')
+  local function lines()
+    return vim.tbl_map(function(v)
+      return v.line
+    end, ui.threads_visible(child, 'right'))
+  end
+  local function group()
+    local groups = threads('Diffy threads')
+    child.type_keys('q')
+    return groups[1].group
+  end
 
-  child.api.nvim_buf_set_lines(child.api.nvim_win_get_buf(w.right), 19, 20, false, {})
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('10G', 'O', 'typed above', '<Esc>')
+  MiniTest.expect.equality(lines(), { 21 })
+
+  child.type_keys('21G', 'A', ' edited', '<Esc>')
+  MiniTest.expect.equality(lines(), {})
+  MiniTest.expect.equality(group(), 'Outdated')
+
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('u')
+  MiniTest.expect.equality(lines(), { 21 })
+  MiniTest.expect.equality(group(), 'Open')
+
+  child.cmd('Diffy close')
+end
+
+T["a worktree comment becomes a comment on HEAD once its lines are committed, shown in that commit's view"] = function()
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 3, 'about the uncommitted line')
+
+  repo:commit('commit the line')
   refresh()
+  ui.select_log_row(child, 'commit the line')
+  MiniTest.expect.equality(vim.tbl_map(function(v)
+    return v.line
+  end, ui.threads_visible(child, 'right')), { 3 })
 
-  MiniTest.expect.equality(ui.threads_visible(child, 'right'), {})
+  child.cmd('Diffy close')
+end
 
-  local groups = threads('Diffy threads')
-  MiniTest.expect.equality(#groups, 1)
-  MiniTest.expect.equality({ groups[1].group, #groups[1].rows }, { 'Detached', 1 })
-  child.type_keys('q')
+T['a comment written on a commit shows in the whole-branch view at its tracked line, hidden once its line changed'] = function()
+  repo:branch('feat')
+  repo:commit('second', { ['f.txt'] = Repo.edit(15, 'second: 15') })
+  repo:commit('third', { ['f.txt'] = Repo.insert(1, 'third: on top') })
+  -- the old line 20
+  repo:commit('fourth', { ['f.txt'] = Repo.edit(21, 'fourth: 20') })
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch main')
+  ui.wait_ready(child)
+  local w = ui.wins(child)
+  ui.select_log_row(child, 'second')
+  write_comment(w.right, 15, 'about 15')
+  write_comment(w.right, 20, 'about 20')
+  child.cmd('Diffy close')
+
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch main')
+  ui.wait_ready(child)
+  -- line 20 went in `fourth`; 15 moved down with `third`'s line on top
+  MiniTest.expect.equality(vim.tbl_map(function(v)
+    return v.line
+  end, ui.threads_visible(child, 'right')), { 16 })
 
   child.cmd('Diffy close')
 end
@@ -1180,15 +1241,19 @@ T['a comment the agent ticks resolved in review.md shows resolved, on R and on t
   send_review('')
   local review_md = review_file('review.md')
   local text = table.concat(vim.fn.readfile(review_md), '\n')
-  MiniTest.expect.equality(text:find('\n## c1 [^\n]*\n%- %[ %] resolved\n') ~= nil, true)
-  MiniTest.expect.equality(text:find('\n## c2 [^\n]*\n%- %[ %] resolved\n') ~= nil, true)
+  -- each comment headed by its id and where it is
+  local ids = {}
+  for id, line in text:gmatch('\n## (c%w+) \226\128\148 f%.txt:(%d+)[^\n]*\n%- %[ %] resolved\n') do
+    ids[tonumber(line)] = id
+  end
+  MiniTest.expect.equality({ ids[5] ~= nil, ids[10] ~= nil, ids[5] ~= ids[10] }, { true, true, true })
 
   -- what the agent does: tick the box of the comment it handled
-  local function tick(id)
+  local function tick(line)
     local lines, current = vim.fn.readfile(review_md), nil
     for i, l in ipairs(lines) do
-      current = l:match('^## (c%d+) ') or current
-      if current == id and l == '- [ ] resolved' then
+      current = l:match('^## (c%w+) ') or current
+      if current == ids[line] and l == '- [ ] resolved' then
         lines[i] = '- [x] resolved'
       end
     end
@@ -1205,7 +1270,7 @@ T['a comment the agent ticks resolved in review.md shows resolved, on R and on t
     return out
   end
 
-  tick('c1')
+  tick(5)
   refresh()
   MiniTest.expect.equality(groups(), { Open = { 'f.txt:10' }, Resolved = { 'f.txt:5' } })
   local visible = ui.threads_visible(child, 'right')
@@ -1213,7 +1278,7 @@ T['a comment the agent ticks resolved in review.md shows resolved, on R and on t
 
   -- ticked while diffy is closed: read when the review opens
   child.cmd('Diffy close')
-  tick('c2')
+  tick(10)
   open_default()
   MiniTest.expect.equality(groups(), { Resolved = { 'f.txt:5', 'f.txt:10' } })
 
@@ -1325,8 +1390,19 @@ T['screenshot: nested comment ranges draw side by side, their summaries dotted i
   local w = ui.wins(child)
   write_comment(w.right, 4, 'covers four lines', 7)
   write_comment(w.right, 5, 'needs a null check')
-  -- off the thread: no hover preview over the mirrored blank line
-  child.type_keys('1G')
+  -- bar colours come from thread ids, which are random: pin them
+  child.cmd('Diffy close')
+  local path = review_file('threads.json')
+  local data = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
+  for i, t in ipairs(data.threads) do
+    t.id = 't' .. i
+  end
+  vim.fn.writefile({ vim.json.encode(data) }, path)
+  open_default()
+  -- the folds as composing the range left them; off the thread, no hover
+  -- preview over the mirrored blank line
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  child.type_keys('zR', '1G')
   MiniTest.expect.reference_screenshot(child.get_screenshot())
 
   child.cmd('Diffy close')

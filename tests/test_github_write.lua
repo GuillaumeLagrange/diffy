@@ -215,10 +215,10 @@ local function reply_at(win, lnum, body)
   save_composed(body)
 end
 
---- The local drafts file's text, or nil when there is none.
+--- The branch's drafts file's text, or nil when there is none.
 local function drafts_text()
   local branch = ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
-  local path = ('%s/.git/diffy/%s/pr-%d.json'):format(dir, branch, pr_number())
+  local path = ('%s/.git/diffy/%s/threads.json'):format(dir, branch)
   if vim.fn.filereadable(path) == 0 then
     return nil
   end

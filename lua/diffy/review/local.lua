@@ -1,11 +1,13 @@
 -- Local review backend: comments meant to be fed to an LLM. Available in
--- `:Diffy` and `:Diffy branch`. State lives in
--- `.git/diffy/<branch>/local.json`; `:Diffy review submit` renders
+-- `:Diffy` and `:Diffy branch`. Drafts live in the branch's one store
+-- (`review/drafts.lua`); `:Diffy review submit` renders
 -- `.git/diffy/<branch>/review.md`.
-local store = require('diffy.review.store')
+local drafts = require('diffy.review.drafts')
 local model = require('diffy.review.model')
+local track = require('diffy.review.track')
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
+local store = require('diffy.review.store')
 
 local M = {}
 
@@ -41,10 +43,6 @@ function M.author(root)
   return cached_author
 end
 
-local function local_json_path(session, branch)
-  return store.path(session.gitdir, branch, 'local.json')
-end
-
 local function review_md_path(session, branch)
   return store.path(session.gitdir, branch, 'review.md')
 end
@@ -53,18 +51,17 @@ end
 -- (`- [x] resolved`) once the comment is handled.
 local RESOLVED_BOX = '- [ ] resolved'
 
---- Resolve the threads whose comments the agent ticked in `review.md`, and
---- save them. Each tick counts once (`agent_resolved`), so a thread you
---- reopen stays open; only `sent` comments count, since a new comment can
---- reuse a deleted one's id. Returns whether anything changed.
-function M.sync(session, branch, threads)
-  local path = review_md_path(session, branch)
+--- Resolve the threads whose comments the agent ticked in `review.md`. Each
+--- tick counts once (`agent_resolved`), so a thread you reopen stays open;
+--- only `sent` comments count, since ids are only meaningful once sent.
+function M.sync(session)
+  local path = review_md_path(session, session.branch)
   if vim.fn.filereadable(path) == 0 then
-    return false
+    return
   end
   local ticked, current = {}, nil
   for _, l in ipairs(vim.fn.readfile(path)) do
-    local id = l:match('^## (c%d+) ')
+    local id = l:match('^## (c%w+) ')
     if id or l:match('^## ') then
       current = id
     elseif current then
@@ -75,75 +72,36 @@ function M.sync(session, branch, threads)
       end
     end
   end
-  local changed = false
-  for _, t in ipairs(threads) do
-    for _, c in ipairs(t.comments) do
-      if ticked[c.id] and c.state == 'sent' and not c.agent_resolved then
-        c.agent_resolved = true
-        t.resolved = true
-        changed = true
+  if not next(ticked) then
+    return
+  end
+  drafts.change(session, function(threads)
+    local changed = false
+    for _, t in ipairs(threads) do
+      for _, c in ipairs(t.comments) do
+        if ticked[c.id] and c.state == 'sent' and not c.agent_resolved then
+          c.agent_resolved = true
+          t.resolved = true
+          changed = true
+        end
       end
     end
-  end
-  if changed then
-    M.save(session, branch, threads)
-  end
-  return changed
+    return changed
+  end, { quiet = true })
 end
 
---- Persisted threads for `branch`, or `{}` if there is no state yet, with
---- what the agent resolved since (`M.sync`).
-function M.load(session, branch)
-  local data = store.load(local_json_path(session, branch))
-  if not data or not data.threads then
-    return {}
-  end
-  local out = {}
-  for _, t in ipairs(data.threads) do
-    t.comments = t.comments or {}
-    table.insert(out, t)
-  end
-  M.sync(session, branch, out)
-  return out
-end
+M.save = drafts.put
+M.clear = drafts.clear
 
-function M.save(session, branch, threads)
-  store.save(local_json_path(session, branch), { threads = threads })
-end
-
-function M.clear(session, branch)
-  store.delete(local_json_path(session, branch))
-end
-
-local function placement(side, anchor)
-  return { win = side, start_line = anchor.start_line, end_line = anchor.end_line }
-end
-
---- A thread only shows in the exact view it was written in (no
---- cross-commit tracking). Re-locates the excerpt against that view's
---- current lines, updating `thread.anchor` in place on success (persisted
---- on the next `save`); marks the thread `_detached` (session-only) on
---- failure.
+--- Where `thread` shows in the open file, tracked from where it was written.
 function M.place(session, thread)
-  local side = model.pair_side(session.file_pair or session.pair, session.head_sha, thread.anchor)
-  local win = side and session.wins[side]
-  if not win or not vim.api.nvim_win_is_valid(win) then
-    return nil
-  end
-  local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
-  if not model.relocate(thread.anchor, lines) then
-    thread._detached = true
-    return nil
-  end
-  return placement(side, thread.anchor)
+  return track.place(session, thread, session.file_pair or session.pair, session.current_path)
 end
 
 --- Where `thread` shows in `pair` (default: the current one), whichever
---- file is open, or nil. Its last known lines: relocating needs the file's
---- buffer.
+--- file is open, or nil.
 function M.view_place(session, thread, pair)
-  local side = model.pair_side(pair or session.pair, session.head_sha, thread.anchor)
-  return side and placement(side, thread.anchor) or nil
+  return track.place(session, thread, pair or session.pair)
 end
 
 -- ---------------------------------------------------------------------
@@ -206,13 +164,17 @@ local function short_commit(commit)
   return commit:sub(1, 7)
 end
 
-local function side_key(anchor)
-  return anchor.commit .. '\0' .. anchor.path
+local function lines_key(commit, path)
+  return commit .. '\0' .. path
 end
 
 local function diff_key(thread)
   local left, right = hunk_pair(thread)
   return left .. '\0' .. right .. '\0' .. thread.anchor.path
+end
+
+local function range_text(s, e)
+  return s == e and tostring(s) or ('%d-%d'):format(s, e)
 end
 
 --- 3 lines of context around `[start_line, end_line]` in `lines`, numbered.
@@ -246,7 +208,7 @@ local function join(jobs, done)
   end
 end
 
-local function unsent_comments(threads)
+local function unsent_comments(_session, threads)
   local pending = {}
   for _, thread in ipairs(threads) do
     for _, comment in ipairs(thread.comments) do
@@ -258,16 +220,26 @@ local function unsent_comments(threads)
   return pending
 end
 
+--- Where `item`'s lines are read from: its location now, else the commit
+--- it was written on.
+local function shown_side(item)
+  local a = item.thread.anchor
+  if item.now then
+    return a.commit == 'index' and 'index' or 'worktree', item.now.path
+  end
+  return a.commit, a.path
+end
+
 --- Async-fetch every side's lines and every view's hunks that `pending`
 --- needs, deduped; `done(side_lines, diff_hunks)` keyed by
---- `side_key`/`diff_key`.
+--- `lines_key`/`diff_key`.
 local function fetch_sources(session, pending, done)
   local sides, diffs = {}, {}
   for _, item in ipairs(pending) do
-    local a = item.thread.anchor
-    sides[side_key(a)] = { commit = a.commit, path = a.path }
+    local commit, path = shown_side(item)
+    sides[lines_key(commit, path)] = { commit = commit, path = path }
     local left, right = hunk_pair(item.thread)
-    diffs[diff_key(item.thread)] = { left = left, right = right, path = a.path }
+    diffs[diff_key(item.thread)] = { left = left, right = right, path = item.thread.anchor.path }
   end
 
   local side_lines, diff_hunks = {}, {}
@@ -296,22 +268,23 @@ local function fetch_sources(session, pending, done)
   end)
 end
 
---- Append one comment's `review.md` section to `out`. Relocates the
---- anchor against `lines` first (in place).
+--- Append one comment's `review.md` section to `out`, its lines relocated
+--- against `lines` for a worktree or index comment.
 local function render_comment(out, item, lines, hunks)
   local thread, comment = item.thread, item.comment
   local a = thread.anchor
-  model.relocate(a, lines)
-
-  local range = a.start_line == a.end_line and tostring(a.start_line) or ('%d-%d'):format(a.start_line, a.end_line)
+  local s, e = model.relocate(a, lines)
+  if not s then
+    s, e = a.start_line, a.end_line
+  end
   local side_label = a.side == 'old' and 'old side' or 'new side'
   table.insert(
     out,
-    ('## %s \226\128\148 %s:%s (%s) \194\183 commit %s'):format(comment.id, a.path, range, side_label, short_commit(a.commit))
+    ('## %s \226\128\148 %s:%s (%s) \194\183 commit %s'):format(comment.id, a.path, range_text(s, e), side_label, short_commit(a.commit))
   )
   table.insert(out, RESOLVED_BOX)
   table.insert(out, '```' .. (vim.filetype.match({ filename = a.path }) or ''))
-  vim.list_extend(out, numbered_excerpt(lines, a.start_line, a.end_line))
+  vim.list_extend(out, numbered_excerpt(lines, s, e))
   table.insert(out, '```')
 
   local hunk = model.find_hunk(hunks, a.side, a.start_line, a.end_line)
@@ -323,10 +296,11 @@ local function render_comment(out, item, lines, hunks)
   else
     -- no changed hunk covers this anchor (a comment on unchanged
     -- context): synthesize a context-only pseudo-hunk from the excerpt.
-    local count = a.end_line - a.start_line + 1
-    table.insert(out, ('@@ -%d,%d +%d,%d @@'):format(a.start_line, #lines > 0 and count or 0, a.start_line, count))
-    for l = a.start_line, a.end_line do
-      table.insert(out, ' ' .. (lines[l] or ''))
+    local excerpt = a.excerpt or {}
+    local count = #excerpt
+    table.insert(out, ('@@ -%d,%d +%d,%d @@'):format(a.start_line, count, a.start_line, count))
+    for _, l in ipairs(excerpt) do
+      table.insert(out, ' ' .. l)
     end
   end
   table.insert(out, '```')
@@ -383,50 +357,67 @@ end
 function M.submit(session, _event, body, cb)
   local review = session.review
   -- the ticks in the review.md about to be replaced
-  M.sync(session, review.branch, review.threads)
-  local pending = unsent_comments(review.threads)
-  local message = vim.trim(body or '')
-  if #pending == 0 and message == '' then
-    vim.notify('diffy: nothing to send - no new comments and no message', vim.log.levels.WARN)
-    cb(false, {})
-    return
-  end
+  M.sync(session)
+  track.prepare(session, function()
+    local pending = unsent_comments(session, review.threads)
+    local message = vim.trim(body or '')
+    if #pending == 0 and message == '' then
+      vim.notify('diffy: nothing to send - no new comments and no message', vim.log.levels.WARN)
+      cb(false, {})
+      return
+    end
 
-  fetch_sources(session, pending, function(side_lines, diff_hunks)
-    table.sort(pending, function(a, b)
-      if a.thread.anchor.path ~= b.thread.anchor.path then
-        return a.thread.anchor.path < b.thread.anchor.path
+    fetch_sources(session, pending, function(side_lines, diff_hunks)
+      local function key(item)
+        local where = item.now or item.thread.anchor
+        return where.path, where.start_line
       end
-      return a.thread.anchor.start_line < b.thread.anchor.start_line
-    end)
+      table.sort(pending, function(a, b)
+        local pa, la = key(a)
+        local pb, lb = key(b)
+        if pa ~= pb then
+          return pa < pb
+        end
+        return la < lb
+      end)
 
-    local out = {}
-    if message ~= '' then
-      table.insert(out, '## Overall')
-      table.insert(out, '')
-      vim.list_extend(out, vim.split(message, '\n', { plain = true }))
-      table.insert(out, '')
-    end
-    for _, item in ipairs(pending) do
-      render_comment(out, item, side_lines[side_key(item.thread.anchor)] or {}, diff_hunks[diff_key(item.thread)] or {})
-    end
-
-    upstream_base(session, function(base_sha, base_ref)
-      local branch = review.branch
-      local lines = export_header(session, branch, base_sha, base_ref)
-      vim.list_extend(lines, out)
-      local path = review_md_path(session, branch)
-      vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
-      vim.fn.writefile(lines, path)
-
+      local out = {}
+      if message ~= '' then
+        table.insert(out, '## Overall')
+        table.insert(out, '')
+        vim.list_extend(out, vim.split(message, '\n', { plain = true }))
+        table.insert(out, '')
+      end
       for _, item in ipairs(pending) do
-        item.comment.state = 'sent'
+        render_comment(out, item, side_lines[lines_key(shown_side(item))] or {}, diff_hunks[diff_key(item.thread)] or {})
       end
-      M.save(session, branch, review.threads)
 
-      vim.fn.setreg('+', require('diffy').config.review_prompt:format(path))
-      vim.notify(('diffy: review written to %s, prompt copied to +'):format(path))
-      cb(true, {})
+      upstream_base(session, function(base_sha, base_ref)
+        local branch = review.branch
+        local lines = export_header(session, branch, base_sha, base_ref)
+        vim.list_extend(lines, out)
+        local path = review_md_path(session, branch)
+        vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
+        vim.fn.writefile(lines, path)
+
+        local sent = {}
+        for _, item in ipairs(pending) do
+          sent[item.comment.id] = true
+        end
+        drafts.change(session, function(threads)
+          for _, t in ipairs(threads) do
+            for _, c in ipairs(t.comments) do
+              if sent[c.id] then
+                c.state = 'sent'
+              end
+            end
+          end
+        end)
+
+        vim.fn.setreg('+', require('diffy').config.review_prompt:format(path))
+        vim.notify(('diffy: review written to %s, prompt copied to +'):format(path))
+        cb(true, {})
+      end)
     end)
   end)
 end

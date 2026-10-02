@@ -267,8 +267,9 @@ back into the thread. Leaving a comment box or the thread for the diff puts the 
 was. In the compose float, `<C-g>s` inserts a GitHub suggestion block with the commented lines. `gP`
 shows the PR description and its conversation the same way.
 
-**The threads view** lists the review's threads grouped by where they stand: Open, Outdated (no longer
-trackable to HEAD, not resolved), Detached (a local comment whose lines are gone), Resolved, and Resolved,
+**The threads view** lists the review's threads grouped by where they stand: Open, Outdated (its lines
+changed in the worktree, not resolved), Detached (nothing left to place it from: its commit is gone, or a
+worktree comment's text is), Resolved, and Resolved,
 outdated; within a group, under a header per file, the file in the diff first (in bold). Group headers
 carry the count; the resolved groups start folded, and the cursor starts on the first thread of the file in the
 diff. Each row gives the line, who started the thread ("you" for yours), how many replies and who wrote
@@ -293,18 +294,30 @@ Avatars and badges need a terminal with the kitty graphics protocol, `curl` and 
 downloaded once and cached in `stdpath('cache')/diffy/avatars` and `/images`; without them the headers,
 summaries and badges are text only.
 
-Local comments follow the code: after edits they're found again by their text within ±20 lines. When they
-can't be, they're in the threads view as detached.
+Every thread is placed the same way, local or GitHub: from where it was written (a commit, the
+merge-base for an old-side GitHub comment) it's tracked to whatever each view shows, through git's diff
+between the two, and to the worktree through the buffer itself as you type. It shows in every view both
+ends of its range reach through unchanged lines, renames included, and is hidden in the others. It's
+outdated as soon as its first or last line changes in the worktree (in checkout mode, the checked-out
+commit), and back if you undo; a comment on the old side, once it can't be tracked back to the merge-base
+(HEAD without one). A comment written on the worktree or the index is found by its text within ±20 lines; once
+HEAD has that text (you committed it), it becomes a comment on HEAD at those lines and is tracked like
+any other. When its text is gone, it's detached.
+
+Your comments are kept per branch in `.git/diffy/<branch>/threads.json`, whichever review you wrote them
+in; published GitHub comments are fetched each time. Sessions on the same branch, in one nvim or several,
+share them: a comment written, edited or deleted in one shows in the others right away (`local.json` and
+`pr-<number>.json` from older versions are merged into it the first time).
 
 ### Local review, for an LLM agent
 
-Available in `:Diffy` and `:Diffy branch`. Drafts are saved in `.git/diffy/<branch>/local.json`.
+Available in `:Diffy` and `:Diffy branch`.
 
 `:Diffy review submit` opens a box for an overall message (may be left empty); `<C-s>` writes
 `.git/diffy/<branch>/review.md` with that message and every comment not yet sent (location, side, commit,
 the code with context, the diff hunk, the comment), marks them sent and copies the prompt to the `+`
-register: paste it to your agent. A message alone is sent too. `:Diffy review clear` deletes the local
-review.
+register: paste it to your agent. A message alone is sent too. `:Diffy review clear` deletes your comments
+on the branch.
 
 Each comment's section starts with a `- [ ] resolved` box, and the prompt asks the agent to tick it once
 the comment is handled. diffy reads the ticks when it opens the review, on `R`, and before the next submit
@@ -316,10 +329,10 @@ tick counts once, so a thread you reopen with `x` stays open.
 `:Diffy pr` opens the pull request of the checked-out branch. It refuses unless your `HEAD` is the PR head
 on GitHub and the tree is clean.
 
-- Threads are placed like github.com's "Changes" view: in the full view and in each commit's view, at the
-  line they track to, hidden where their lines changed. Outdated threads (not trackable to HEAD) are in
-  the threads view with the others; `<CR>` there opens the commit they were written on.
-- Your comments are local drafts (`.git/diffy/<branch>/pr-<number>.json`) until you push.
+- Threads are placed like every thread (see above), as github.com's "Changes" view does: in the full view
+  and in each commit's view, at the line they track to, hidden where their lines changed. Outdated threads
+  are in the threads view with the others; `<CR>` there opens the commit they were written on.
+- Your comments are drafts in the branch's store until you push.
 - `:Diffy review push` replaces your pending review on GitHub with your drafts. Each lands on the commit
   you wrote it in. Drafts GitHub would reject (outside the diff and its 3 lines of context) stay local
   with a warning.

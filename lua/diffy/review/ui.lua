@@ -4,19 +4,20 @@
 -- `:Diffy threads`.
 --
 -- A backend exposes `name`, `capabilities = {resolve, suggestions, people}`,
--- `branch(session)`, `author(root)`, optionally `avatar_url(login)`,
+-- `author(root)`, optionally `avatar_url(login)`,
 -- `place(session, thread) -> nil | {win, start_line, end_line}` (in the open
 -- file), `view_place(session, thread, pair?)` (any file of a pair), and for
--- authoring `load`/`save`/`clear` (`gc`, `r`, `x` are no-ops without `save`),
--- `submit(session, event, body, cb(ok, warnings))` (`event` nil unless the
--- backend offers review events through `verdicts(session)`).
+-- authoring `save(session, thread, comment?)` (`gc`, `r`, `x` are no-ops
+-- without it), `submit(session, event, body, cb(ok, warnings))` (`event`
+-- nil unless the backend offers review events through `verdicts(session)`).
+-- Drafts live in the branch's one store (`review/drafts.lua`).
 --
 -- `session.review`: nil until `M.ensure` runs, `false` if the range kind
 -- doesn't support review, else
 --   { backend, branch, threads: Thread[], inline (`<leader>dt`),
 --     summaries (`<leader>ds`), hide_resolved (`<leader>dr`),
---     pr (GitHub only, `gP`'s source), merge_base/_diff_cache (GitHub
---     placement plumbing) }
+--     pr (GitHub only, `gP`'s source), merge_base (GitHub), _track
+--     (`review/track.lua`'s diffs) }
 local session_mod = require('diffy.session')
 local model = require('diffy.review.model')
 local run = require('diffy.git.run')
@@ -44,11 +45,10 @@ local function review_available(session)
   return kind == 'default' or kind == 'branch' or kind == 'pr'
 end
 
---- Lazily resolve the backend, branch and persisted threads for `session`.
---- Returns the `session.review` table, or nil if review isn't available for
---- this session's range kind. For `kind='pr'`, `:Diffy pr` has already
---- populated `session.review` asynchronously before any render, so this
---- only seeds an empty thread list rather than fetching synchronously.
+--- Lazily resolve the backend and the branch's stored threads for
+--- `session`. Returns the `session.review` table, or nil if review isn't
+--- available for this session's range kind. For `kind='pr'`, `:Diffy pr`'s
+--- refresh adds the published threads.
 function M.ensure(session)
   if session.review ~= nil then
     return session.review or nil
@@ -57,17 +57,27 @@ function M.ensure(session)
     session.review = false
     return nil
   end
-  local pr = session.range.kind == 'pr'
-  local backend = require(pr and 'diffy.review.github' or 'diffy.review.local')
-  local branch = backend.branch(session)
+  local backend = require(session.range.kind == 'pr' and 'diffy.review.github' or 'diffy.review.local')
   session.review = {
     backend = backend,
-    branch = branch,
-    threads = pr and {} or backend.load(session, branch),
+    branch = session.branch,
+    threads = {},
     inline = true,
     summaries = true,
   }
+  local drafts = require('diffy.review.drafts')
+  drafts.apply(session.review.threads, drafts.attach(session).threads)
+  if backend.sync then
+    backend.sync(session)
+  end
   return session.review
+end
+
+--- Redraw once what placing the threads needs is fetched.
+function M.redraw(session)
+  require('diffy.review.track').prepare(session, function()
+    M.decorate(session)
+  end)
 end
 
 function M.side_of(session, win)
@@ -588,6 +598,12 @@ function M.decorate(session)
     vim.api.nvim_buf_clear_namespace(vim.api.nvim_win_get_buf(w), ns, 0, -1)
   end
 
+  -- live: outdated as soon as an edit touches a thread's lines
+  local track = require('diffy.review.track')
+  for _, t in ipairs(review.threads) do
+    track.status(session, t)
+  end
+
   if not review.inline then
     for _, t in ipairs(review.threads) do
       t._place = nil
@@ -605,9 +621,8 @@ function M.decorate(session)
 
   local placed = { left = {}, right = {} }
   for _, thread in ipairs(review.threads) do
-    thread._detached = nil
     thread._place = nil
-    if thread.anchor.path == session.current_path and not (review.hide_resolved and thread.resolved) then
+    if session.current_path and not (review.hide_resolved and thread.resolved) then
       local place = review.backend.place(session, thread)
       local win = place and wins[place.win]
       if win and vim.api.nvim_win_is_valid(win) then
@@ -1237,7 +1252,7 @@ end
 --- A new draft comment by the user with `body` (buffer lines).
 local function new_draft(session, review, body)
   return {
-    id = model.next_comment_id(review.threads),
+    id = model.new_id('c'),
     author = review.backend.author(session.root),
     body = table.concat(body, '\n'),
     created_at = os.time(),
@@ -1300,21 +1315,17 @@ function M.compose(session, mode)
     if vim.trim(table.concat(body, '\n')) == '' then
       return
     end
-    local backend = review.backend
     local thread = {
-      id = model.next_thread_id(review.threads),
-      backend = backend.name,
+      id = model.new_id('t'),
+      backend = review.backend.name,
       anchor = anchor,
       comments = { new_draft(session, review, body) },
       resolved = false,
-      outdated = false,
-      _has_source = true,
       -- the pair the comment was written against, for review.md's diff hunk
       view = { left = pinned_left, right = pinned_right },
     }
     table.insert(review.threads, thread)
-    backend.save(session, review.branch, review.threads)
-    M.decorate(session)
+    review.backend.save(session, thread, thread.comments[1])
   end, {
     suggestion = suggestion,
     title = start_line == end_line and ('Comment on line %d'):format(start_line) or ('Comment on lines %d–%d'):format(start_line, end_line),
@@ -1343,9 +1354,9 @@ function M.reply(session, thread)
     if vim.trim(table.concat(body, '\n')) == '' then
       return
     end
-    table.insert(thread.comments, new_draft(session, review, body))
-    backend.save(session, review.branch, review.threads)
-    M.decorate(session)
+    local comment = new_draft(session, review, body)
+    table.insert(thread.comments, comment)
+    backend.save(session, thread, comment)
   end, {
     title = backend.capabilities.people and thread.comments[1] and ('Reply to %s'):format(thread.comments[1].author) or 'Reply',
     above = above,
@@ -1372,8 +1383,7 @@ function M.edit_comment(session, thread, comment)
   local win, first, last = thread_anchor(session, thread)
   M.open_compose(session, win, first, last, function(body)
     comment.body = table.concat(body, '\n')
-    backend.save(session, review.branch, review.threads)
-    M.decorate(session)
+    backend.save(session, thread, comment)
   end, {
     prefill = vim.split(comment.body, '\n', { plain = true }),
     title = 'Edit draft',
@@ -1398,15 +1408,6 @@ local function comment_at(heads, row)
     end
   end
   return comment
-end
-
-local function remove(list, item)
-  for i, x in ipairs(list) do
-    if x == item then
-      table.remove(list, i)
-      return
-    end
-  end
 end
 
 --- `fit` (from `beside`) as a set_config position, `width` included if asked.
@@ -1521,8 +1522,7 @@ function M.set_resolved(session, thread, resolved)
     return
   end
   thread.resolved = resolved
-  backend.save(session, review.branch, review.threads)
-  M.decorate(session)
+  backend.save(session, thread)
 end
 
 --- Show `thread` alone in the thread float: over the other diff
@@ -1693,12 +1693,7 @@ function M.show_thread(session, thread, opts)
       return
     end
     M.close_thread(session)
-    remove(thread.comments, comment)
-    if #thread.comments == 0 then
-      remove(review.threads, thread)
-    end
-    backend.save(session, review.branch, review.threads)
-    M.decorate(session)
+    require('diffy.review.drafts').remove(session, { comment.id })
   end, { buffer = buf, desc = 'delete draft' })
   if backend.capabilities.resolve then
     map(session, 'n', 'x', function()

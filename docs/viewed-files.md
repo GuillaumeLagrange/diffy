@@ -5,8 +5,7 @@ Status: draft for review, nothing implemented.
 ## The ask
 
 While reviewing, mark a file as "seen". It gets out of the way until its change changes, then comes back.
-Start with local diffs (`:Diffy`, `:Diffy branch`, ranges); later, PR reviews, synced with GitHub's own
-"Viewed" checkbox.
+Every view works the same way, `:Diffy pr` included: marks are diffy's own, never GitHub's "Viewed" checkbox.
 
 ## What it looks like
 
@@ -85,11 +84,15 @@ the mark matching the current pair only. `:Diffy viewed clear` drops the file.
 - New `viewed.lua`: load/save marks, `is_viewed(entry)`, toggle.
 - `README.md`: tree keys, diff keys, the new highlights.
 
-## GitHub (later)
+## With a PR
 
-Measured on the sandbox (throwaway PR, closed): GitHub keeps one state per viewer, per PR, per path:
-`PullRequestChangedFile.viewerViewedState`, `VIEWED`, `UNVIEWED` or `DISMISSED` ("new changes since last
-viewed"). Set with `markFileAsViewed` / `unmarkFileAsViewed(pullRequestId, path)`.
+The PR layer (`docs/pr-mode.md`) doesn't change marks: they're local, like in every other session. GitHub's
+"Viewed" checkbox is neither read nor written: it holds one state per path for the whole PR, nothing per
+commit, and it can't represent what a mark means here.
+
+What it does, measured on the sandbox (throwaway PR, closed), kept for reference:
+`PullRequestChangedFile.viewerViewedState` is `VIEWED`, `UNVIEWED` or `DISMISSED`, set with
+`markFileAsViewed` / `unmarkFileAsViewed(pullRequestId, path)`, and fails for a path outside the PR.
 
 | After a push where | State |
 |---|---|
@@ -99,17 +102,6 @@ viewed"). Set with `markFileAsViewed` / `unmarkFileAsViewed(pullRequestId, path)
 | a force-push rewrote every sha, no content change | still `VIEWED` |
 | an empty commit | still `VIEWED` |
 | the file was renamed | new path `UNVIEWED` |
-
-Marking a path that isn't in the PR fails ("Filepath must be part of pull request"). Not measured: a merge
-of the base branch that touches the file.
-
-So GitHub compares the file's diff in the whole-PR view, same idea as the pair rule above. Plan:
-
-- In `:Diffy pr` with the whole PR selected, GitHub is the source of truth: read `viewerViewedState` in the
-  existing read query (`files`, paginated), toggle with the mutation right away (like resolve, not part of
-  the pending review). `DISMISSED` shows like a changed local mark.
-- Other selections in a PR session (single commits) use local marks; GitHub has no per-commit state.
-- The mutation fails for a path outside the PR: only offer it on files from the PR's file list.
 
 ## Open questions
 
@@ -132,4 +124,4 @@ So GitHub compares the file's diff in the whole-PR view, same idea as the pair r
 
 - The conflict view (`:Diffy conflicts`, `U` files): nothing to mark.
 - Partial marks (per hunk).
-- Syncing local marks to GitHub outside `:Diffy pr`.
+- Any sync with GitHub's "Viewed" checkbox, either direction.

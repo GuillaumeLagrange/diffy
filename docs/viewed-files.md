@@ -1,6 +1,12 @@
 # Viewed files — design draft
 
-Status: decided, nothing implemented.
+Status: implemented. Where the code differs from this text:
+
+- A seen pair is only stored for a path that has marks: without marks there's no `●` to decide.
+- `]f`/`[f` stop silently at the end of the list while other unviewed files remain; "no unviewed file left"
+  only when there are none.
+- `Unstaged (n)`/`Staged (n)` count viewed files too.
+- An untracked directory (an embedded repository) takes its id from `rev-parse HEAD`, like a submodule.
 
 ## The ask
 

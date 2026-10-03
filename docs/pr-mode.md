@@ -1,6 +1,14 @@
 # PR layer — design draft
 
-Status: decided, nothing implemented. The measurements under Background sync come first.
+Status: implemented. Where the code differs from this text:
+
+- Old-side comments are outdated when they can't be tracked to the merge-base (old-side lines don't exist in
+  the worktree); worktree and index comments not yet on HEAD are detached, never outdated.
+- A GitHub thread with no local commit to start from is Detached (it used to show as Outdated).
+- A pending comment edited on one side and deleted on the other isn't a conflict: the edit wins.
+- A sync conflict blocks a GitHub submit until it's settled.
+- A multi-line draft on an older commit is mirrored at the PR head: the legacy position call takes one line.
+- `R` and the read timer also run with no PR attached, so a PR opened after the session started attaches.
 
 ## The ask
 

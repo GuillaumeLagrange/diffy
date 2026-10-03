@@ -113,7 +113,9 @@ requested`, `bob ✓ approved`), every review with its
 commit (`not in this log` or `no longer in the branch` for a commit the log doesn't list) and the
 conversation. Each submitted review on a commit the log lists also shows as a dim row right above that
 commit: `── alice ✗ 4 threads`. `J`/`K`, `a` and ranges skip both kinds of rows; `<CR>` on a review row
-selects everything above it, what changed since that review.
+selects everything above it, what changed since that review. `<CR>` on the PR row selects the whole PR:
+everything in `:Diffy branch`; in `:Diffy`, the session becomes `:Diffy branch` on the PR's base (leaving
+checkout mode first).
 
 | Key | |
 |---|---|
@@ -121,6 +123,7 @@ selects everything above it, what changed since that review.
 | `v`/`V` + motion, `<CR>` | select a range |
 | `a` | select everything |
 | `<CR>` on a review row | select everything above it |
+| `<CR>` on the PR row | the whole PR (`:Diffy` switches to `:Diffy branch`) |
 | `J` / `K` | select the next / previous entry |
 | `X` | toggle checkout mode (see below) |
 | `<Esc>` | close the commit message float; with none shown, whatever `<Esc>` is mapped to outside diffy |

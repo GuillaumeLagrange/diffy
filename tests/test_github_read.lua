@@ -501,6 +501,28 @@ T['J, K, a and visual ranges never select the PR row or a review marker'] = func
   child.cmd('Diffy close')
 end
 
+T[':Diffy grows the log for the PR row, and <CR> on it opens the whole PR'] = function()
+  fixture_only()
+  -- upstream at HEAD: `:Diffy` lists only the working tree
+  git(dir, { 'update-ref', 'refs/remotes/origin/sandbox/placement', 'HEAD' })
+  git(dir, { 'branch', '-q', '--set-upstream-to', 'origin/sandbox/placement' })
+  ui.arm_ready(child, 'pr')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(pr_status(), '')
+  MiniTest.expect.equality(log_rows()[2], '▌ Working tree')
+  local log = wins().log
+  MiniTest.expect.equality(child.lua_get(('{ vim.fn.line("w0", %d), vim.fn.line("w$", %d) }'):format(log, log)), { 1, 2 })
+
+  log_keys(1, '<CR>', 'render')
+  MiniTest.expect.equality(pr_status(), '')
+  local selected = vim.tbl_map(function(s)
+    return s:match('^%S+')
+  end, ui.log_subjects(child, selected_rows()))
+  MiniTest.expect.equality({ selected[1], selected[2], selected[#selected] }, { 'Working', 'P7', 'P1' })
+  child.cmd('Diffy close')
+end
+
 T['the PR row says where the branch stands against the PR head'] = function()
   fixture_only()
   child.o.columns = 300

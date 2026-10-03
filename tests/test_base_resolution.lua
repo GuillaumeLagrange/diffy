@@ -1,6 +1,6 @@
--- `branch` base resolution order: explicit arg, then
--- the PR base (`gh pr view`), then origin's default branch (`gh repo view`),
--- the last two through the local branch's upstream.
+-- `branch` base resolution order: explicit arg, then the PR base from the
+-- GitHub layer's cache, then `origin/HEAD` (local), then origin's default
+-- branch (`gh repo view`); names through the local branch's upstream.
 -- `gh` is faked via a PATH shim (no network); this is pure repo.lua logic,
 -- no UI involved.
 local repo = require('diffy.git.repo')
@@ -32,44 +32,60 @@ local function with_path(dir, fn)
   end
 end
 
-local function resolve(root, explicit)
+local function resolve(root, explicit, pr_base)
   local result
   repo.resolve_base(root, explicit, function(ref, err)
     result = { ref = ref, err = err }
-  end)
+  end, nil, pr_base)
   vim.wait(2000, function()
     return result ~= nil
   end)
   return result
 end
 
-T['an explicit base wins over the PR base'] = function()
-  local root = tempdir()
-  local shim = fake_gh({ 'echo "release"', 'exit 0' })
+-- gh answering anything is a failure: these must not wait on the network
+local NO_GH = { 'echo "gh called: $*" >&2', 'exit 1' }
+
+local function git_repo()
+  local dir = tempdir()
+  vim.fn.system({ 'git', '-C', dir, 'init', '-q', '-b', 'main' })
+  vim.fn.system({ 'git', '-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'base' })
+  return dir
+end
+
+T['an explicit base wins over the cached PR base'] = function()
   local result
-  with_path(shim, function()
-    result = resolve(root, 'develop')
+  with_path(fake_gh(NO_GH), function()
+    result = resolve(tempdir(), 'develop', 'release')
   end)
   MiniTest.expect.equality(result.ref, 'develop')
 end
 
-T['no explicit base falls back to the PR base of the current branch'] = function()
-  local root = tempdir()
-  local shim = fake_gh({
-    'if [ "$1" = "pr" ]; then echo "release"; exit 0; fi',
-    'echo "unexpected gh subcommand: $1" >&2; exit 1',
-  })
+T['the cached PR base wins over origin/HEAD'] = function()
+  local root = git_repo()
+  vim.fn.system({ 'git', '-C', root, 'update-ref', 'refs/remotes/origin/main', 'HEAD' })
+  vim.fn.system({ 'git', '-C', root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main' })
   local result
-  with_path(shim, function()
-    result = resolve(root, nil)
+  with_path(fake_gh(NO_GH), function()
+    result = resolve(root, nil, 'release')
   end)
   MiniTest.expect.equality(result.ref, 'release')
 end
 
-T['no PR falls back to origin default branch'] = function()
-  local root = tempdir()
+T['without a cached PR base, origin/HEAD is used without asking gh'] = function()
+  local root = git_repo()
+  vim.fn.system({ 'git', '-C', root, 'update-ref', 'refs/remotes/origin/trunk', 'HEAD' })
+  vim.fn.system({ 'git', '-C', root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk' })
+  local result
+  with_path(fake_gh(NO_GH), function()
+    result = resolve(root, nil)
+  end)
+  MiniTest.expect.equality(result.ref, 'origin/trunk')
+end
+
+T['without origin/HEAD, falls back to origin default branch from gh'] = function()
+  local root = git_repo()
   local shim = fake_gh({
-    'if [ "$1" = "pr" ]; then exit 1; fi',
     'if [ "$1" = "repo" ]; then echo "main"; exit 0; fi',
     'exit 1',
   })
@@ -80,12 +96,10 @@ T['no PR falls back to origin default branch'] = function()
   MiniTest.expect.equality(result.ref, 'main')
 end
 
-T['neither PR nor origin default available surfaces an error'] = function()
-  local root = tempdir()
-  local shim = fake_gh({ 'exit 1' })
+T['neither origin/HEAD nor origin default available surfaces an error'] = function()
   local result
-  with_path(shim, function()
-    result = resolve(root, nil)
+  with_path(fake_gh({ 'exit 1' }), function()
+    result = resolve(git_repo(), nil)
   end)
   MiniTest.expect.equality(result.ref, nil)
   MiniTest.expect.equality(type(result.err), 'string')
@@ -109,11 +123,11 @@ local function repo_with_remote(refs)
   return dir, git
 end
 
---- `resolve` with `gh pr view` answering `base`.
+--- `resolve` with `base` as the cached PR base.
 local function resolve_pr_base(root, base)
   local result
-  with_path(fake_gh({ ('if [ "$1" = "pr" ]; then echo %q; exit 0; fi'):format(base), 'exit 1' }), function()
-    result = resolve(root, nil)
+  with_path(fake_gh(NO_GH), function()
+    result = resolve(root, nil, base)
   end)
   return result.ref
 end

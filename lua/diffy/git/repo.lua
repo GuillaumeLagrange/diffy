@@ -72,10 +72,11 @@ function M.base_ref(root, name, on_exit, session)
   end)
 end
 
---- `:Diffy branch` base resolution: explicit arg as given, else the PR base
---- of the current branch (`gh pr view`), else `origin`'s default branch
---- (`gh repo view`), both through `M.base_ref`. `on_exit(ref, err)`.
-function M.resolve_base(root, explicit, on_exit, session)
+--- `:Diffy branch` base resolution, never waiting on the network when it
+--- can help it: `explicit` as given, else `pr_base` (the PR base from the
+--- layer's cache), else `origin/HEAD` (local), else `origin`'s default
+--- branch (`gh repo view`); names through `M.base_ref`. `on_exit(ref, err)`.
+function M.resolve_base(root, explicit, on_exit, session, pr_base)
   if explicit and explicit ~= '' then
     on_exit(explicit, nil)
     return
@@ -85,14 +86,18 @@ function M.resolve_base(root, explicit, on_exit, session)
       on_exit(ref, nil)
     end, session)
   end
-  run.run({ 'gh', 'pr', 'view', '--json', 'baseRefName', '-q', '.baseRefName' }, {
+  if pr_base then
+    found(pr_base)
+    return
+  end
+  run.git({ 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD' }, {
     cwd = root,
     session = session,
     notify_on_error = false,
     on_exit = function(res)
-      local base = vim.trim(res.stdout or '')
-      if res.code == 0 and base ~= '' then
-        found(base)
+      local ref = vim.trim(res.stdout or '')
+      if res.code == 0 and ref ~= '' then
+        on_exit(ref, nil)
         return
       end
       run.run({ 'gh', 'repo', 'view', '--json', 'defaultBranchRef', '-q', '.defaultBranchRef.name' }, {

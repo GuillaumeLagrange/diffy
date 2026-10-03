@@ -15,7 +15,8 @@ keys do what they do elsewhere outside the session's tab.
 
 - Neovim ≥ 0.12, git ≥ 2.36
 - [vim-fugitive](https://github.com/tpope/vim-fugitive): blob and index buffers
-- [`gh`](https://cli.github.com), authenticated: `:Diffy pr`, and base-branch detection for `:Diffy branch`
+- [`gh`](https://cli.github.com), authenticated: the GitHub layer (see GitHub review), and base-branch
+  detection for `:Diffy branch` when `origin/HEAD` isn't set
 - Optional, for GitHub avatars: a terminal with the kitty graphics protocol (kitty, ghostty, WezTerm; also
   inside zellij ≥ 0.45, not tmux), `curl` and ImageMagick
 
@@ -37,6 +38,9 @@ require('diffy').setup({
   -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
   avatars = true,                 -- GitHub avatars in comment headers and summaries, when the terminal can draw them
+  -- the GitHub layer over :Diffy and :Diffy branch (false: off); read_interval: seconds between reads
+  -- while the session's tab is current (0: no timer)
+  github = { read_interval = 300 },
 })
 ```
 
@@ -47,14 +51,14 @@ require('diffy').setup({
 | `:Diffy` | Working tree, commits `@{u}..HEAD` (or the last 20) | Working tree |
 | `:Diffy branch [base]` | Working tree, commits since the merge-base with `base` | all, working tree included |
 | `:Diffy A..B`, `:Diffy A...B` | the commits of the range | all |
-| `:Diffy pr` | the commits of the current branch's pull request | all |
+| `:Diffy pr` | `:Diffy branch` on the base of the current branch's open pull request; warns when there's none | all, working tree included |
 | `:Diffy file [path]` | commits touching the file (default: current buffer), across renames | newest |
 | `:Diffy conflicts` | conflicted files, in the conflict view | first file |
 | `:Diffy panel` | hide/show the panel column | |
 | `:Diffy viewed [clear]` | mark the file shown viewed, or unmark it; `clear` drops all its marks. See Viewed files | |
 | `:Diffy threads [file] [author=… state=… review=…]` | the threads view: every review thread, grouped; `file`: those of the file in the diff (`state`: open, resolved, outdated, detached). See Review | |
-| `:Diffy review submit\|clear` | local review, see below | |
-| `:Diffy review submit [comment\|approve\|request_changes]\|push\|pull` | GitHub review, see below | |
+| `:Diffy review submit\|clear` | to the agent, or to GitHub when the branch has an open PR, see Review | |
+| `:Diffy review submit [comment\|approve\|request_changes]\|push\|pull` | GitHub review, when the branch has an open PR, see below | |
 | `:Diffy restore` | go back to your branch after an interrupted full checkout | |
 | `:Diffy feedback` | describe what bothers you in the current session, see below | |
 | `:Diffy close` | close the session | |
@@ -62,10 +66,12 @@ require('diffy').setup({
 `<Tab>` completes subcommands and their arguments: the review subcommands and events the current session
 offers, `:Diffy threads` filters, paths for `file`, branches for `branch`, `clear` for `viewed`.
 
-`:Diffy branch` without an argument uses the PR base of the current branch, then `origin`'s default branch.
-Either is taken through the base branch's upstream (usually `origin/main`: the remote's tip as of your last
-fetch, not a local `main` that may be behind), else the local branch, else the one remote-tracking branch
-of that name. `:Diffy pr` resolves the PR's base the same way. An explicit `base` is used as given.
+`:Diffy branch` without an argument uses the PR base the GitHub layer read last time, else `origin/HEAD`
+(local, no network), else `origin`'s default branch from `gh repo view`. A base name is taken through
+the base branch's upstream (usually `origin/main`: the remote's tip as of your last fetch, not a local
+`main` that may be behind), else the local branch, else the one remote-tracking branch of that name. When
+the layer then finds the PR on another base, the session is rebuilt once on it, keeping the selected
+commits when they're still listed. An explicit `base` is used as given.
 
 `:Diffy feedback` opens a box to describe something you don't like in the current session; `<C-s>` sends
 it, `q` cancels. diffy doesn't store it: it fires `User DiffyFeedback` with `data.text`, right after the box
@@ -87,18 +93,29 @@ vim.api.nvim_create_autocmd('User', {
 selected entry, right is the newest one. `Working tree` means HEAD → worktree, index included; selected
 alone, the tree splits it into its unstaged and staged parts (see Files). With commits, it's one tree from
 the oldest commit's parent to the worktree. `J`/`K` and `]r`/`[r` treat it like a commit.
-Merge commits are dimmed and skipped. In branch and PR views, a selection reaching the oldest commit
+Merge commits are dimmed and skipped. In branch views, a selection reaching the oldest commit
 compares against the merge-base, like github.com, so changes merged in from the base branch don't show up.
 
 Resting the cursor on a commit shows its full message in a float beside the log: short sha, author, date,
 then the message wrapped to fit. It closes on a non-commit row, when you leave the log, or on `<Esc>`
 (until you move to another row).
 
+With an open PR (see GitHub review), the log's first row is the PR: `#42 Retry failed uploads · 2 unpushed`.
+After the number and title, where your branch stands against the PR head on GitHub: nothing when in sync,
+`N unpushed`, `behind N`, `diverged`, or `GitHub has newer commits` when the PR head isn't a local commit
+(diffy never fetches); then `offline` when the last read failed. Resting the cursor on it shows the PR's
+description, each reviewer's state (`alice ✗ changes requested`, `bob ✓ approved`), every review with its
+commit (`not in this log` or `no longer in the branch` for a commit the log doesn't list) and the
+conversation. Each submitted review on a commit the log lists also shows as a dim row right above that
+commit: `── alice ✗ 4 threads`. `J`/`K`, `a` and ranges skip both kinds of rows; `<CR>` on a review row
+selects everything above it, what changed since that review.
+
 | Key | |
 |---|---|
 | `<CR>` | select the entry under the cursor |
 | `v`/`V` + motion, `<CR>` | select a range |
 | `a` | select everything |
+| `<CR>` on a review row | select everything above it |
 | `J` / `K` | select the next / previous entry |
 | `X` | toggle checkout mode (see below) |
 | `<Esc>` | close the commit message float; with none shown, whatever `<Esc>` is mapped to outside diffy |
@@ -153,8 +170,9 @@ its old path. `:Diffy viewed clear` drops every mark of the file shown. Marks ar
 
 The right side is the real file (LSP, editable) when it shows the worktree, or HEAD for a file with no
 uncommitted changes. Otherwise both sides are read-only fugitive blobs. Comment bars and summaries follow
-your edits as you make them; `:w` on either side refreshes like `R`, so the tree's counts and sections stay
-current. An added or deleted file takes the
+your edits as you make them; `:w` on either side rebuilds like `R`, so the tree's counts and sections stay
+current (without reading GitHub again).
+An added or deleted file takes the
 whole diff area on its own, coloured as added or deleted. Jumping to another file from the right side
 (go-to-definition, `gf`, `:e`, a picker) loads that file's pair if it's part of the diff; otherwise diff mode turns
 off until you come back (`<C-o>`, `<C-t>` or the tree). A jump from the left side opens in the right
@@ -166,7 +184,7 @@ session.
 | `]f` / `[f` | next / previous file, skipping viewed files |
 | `<leader>m` | mark the file shown viewed (and open the next unviewed one), or unmark it |
 | `]r` / `[r` | next / previous commit |
-| `R` | refresh everything: git state, panels, window sizes |
+| `R` | refresh everything: git state, panels, window sizes; and read the PR again (see GitHub review) |
 | `<leader>e` | hide the panel column, the cursor staying where it is; or show it and go to the file tree |
 
 The `]`/`[` keys (`]f`, `]r`, `]t`, `]x`, here and in the panels) take a count: `3]f` moves three files
@@ -227,7 +245,7 @@ the file has comments, and put your own back otherwise.
 | `<leader>dr` | hide / show resolved threads |
 | `<leader>dt` | hide / show comments inline altogether |
 | `<leader>dc` | the threads view: every thread, the file in the diff first (`:Diffy threads`) |
-| `gP` | PR description and conversation (`:Diffy pr`) |
+| `gP` | PR description and conversation (when the branch has an open PR) |
 
 Threads open as a framed card over the other diff window; on an added or deleted file, where there is only
 one, right under the commented lines (above them when there's more room there), so they stay visible;
@@ -305,9 +323,10 @@ HEAD has that text (you committed it), it becomes a comment on HEAD at those lin
 any other. When its text is gone, it's detached.
 
 Your comments are kept per branch in `.git/diffy/<branch>/threads.json`, whichever review you wrote them
-in; published GitHub comments are fetched each time. Sessions on the same branch, in one nvim or several,
-share them: a comment written, edited or deleted in one shows in the others right away (`local.json` and
-`pr-<number>.json` from older versions are merged into it the first time).
+in, next to what the GitHub layer read last (the PR, its published threads and reviews), replaced by each
+read. Sessions on the same branch, in one nvim or several, share them: a comment written, edited or
+deleted in one shows in the others right away (`local.json` and `pr-<number>.json` from older versions
+are merged into it the first time).
 
 ### Local review, for an LLM agent
 
@@ -328,9 +347,21 @@ tick counts once, so a thread you reopen with `x` stays open.
 
 ### GitHub review
 
-`:Diffy pr` opens the pull request of the checked-out branch. It refuses unless your `HEAD` is the PR head
-on GitHub and the tree is clean.
+When the session's branch has an open pull request on GitHub, a layer loads over `:Diffy` and
+`:Diffy branch` (not ranges, `:Diffy file` or `:Diffy conflicts`): the PR row and review rows in the log
+(see The panels), the published threads, `gP`, and GitHub as a place to submit. The session doesn't wait
+for it: it renders first, and the layer attaches when `gh` answers. The PR is the one
+`gh pr view <branch>` finds (it follows the branch's upstream, forks included); every read and write goes
+to that PR's repository. Merged or closed PRs don't attach, and an attached layer goes when a read finds
+the PR merged or closed: its row, its threads and what was read, not your drafts. `github = false` in
+`setup` turns the layer off.
 
+- **Reading**: when the session opens, on `R`, on `FocusGained`, and every `github.read_interval` seconds
+  (5 minutes) while the session's tab is current; entering the tab reads when the last read is older than
+  that. One read at a time, one more queued behind it. A read fetches everything, page after page. `:w` and
+  other rebuilds don't read: they place the threads from the last read again.
+- **Offline** (or without `gh`): the layer comes back from the last read, the PR row saying `offline`;
+  with nothing read before, there's no layer and no warning.
 - Threads are placed like every thread (see above), as github.com's "Changes" view does: in the full view
   and in each commit's view, at the line they track to, hidden where their lines changed. Outdated threads
   are in the threads view with the others; `<CR>` there opens the commit they were written on.
@@ -339,12 +370,13 @@ on GitHub and the tree is clean.
   you wrote it in. Drafts GitHub would reject (outside the diff and its 3 lines of context) stay local
   with a warning.
 - `:Diffy review pull` imports your pending review from GitHub (it asks before replacing local drafts).
-- `:Diffy review submit` opens a box for the review message; `<C-s>` then asks `c` comment, `a` approve or
-  `r` request changes (`q` goes back to the message). It pushes your drafts and submits; with no drafts,
-  it submits the message alone (approving without comments). An argument picks the event and skips the
-  question; on your own PR, where GitHub only allows a comment, there's no question either.
-- `x` resolves or unresolves a thread on GitHub immediately.
-- `R` refreshes from GitHub.
+- `:Diffy review submit` opens a box for the review message; `<C-s>` then asks where it goes: `a` the agent
+  (as without a PR, see above: only your comments, marked sent) or `g` GitHub, which then asks `c` comment,
+  `a` approve or `r` request changes (`q` goes back to the message). GitHub gets your drafts pushed and the
+  review submitted; with no drafts, the message alone (approving without comments). An argument picks the
+  event and means GitHub, skipping both questions; on your own PR, where GitHub only allows a comment,
+  there's no second question.
+- `x` resolves or unresolves a published thread on GitHub immediately.
 
 ## Highlights
 

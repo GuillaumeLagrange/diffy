@@ -73,3 +73,9 @@ vim.cmd('runtime plugin/fugitive.vim')
 vim.cmd('runtime plugin/diffy.lua')
 
 require('mini.test').setup()
+
+-- The GitHub layer reads on every `:Diffy`/`:Diffy branch`: offline, no
+-- branch has a PR unless a test installs its own fake.
+if not vim.env.DIFFY_TESTGH then
+  require('tests.helpers.fake_github').install({})
+end

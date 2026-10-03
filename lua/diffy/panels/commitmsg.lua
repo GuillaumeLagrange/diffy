@@ -1,5 +1,6 @@
 -- The commit message float: resting the cursor on a commit row of the log
--- shows its full message next to the log window.
+-- shows its full message next to the log window; on the GitHub layer's PR
+-- row, the PR's description, reviewers and conversation.
 local run = require('diffy.git.run')
 local session_mod = require('diffy.session')
 
@@ -62,8 +63,86 @@ local function wrap(text, width, out)
   end
 end
 
---- Header and wrapped body for `msg`, plus the header's highlight spans.
-local function content(msg, width)
+local STATE_TEXT = { APPROVED = 'approved', CHANGES_REQUESTED = 'changes requested', COMMENTED = 'commented', DISMISSED = 'dismissed' }
+
+--- The PR row's float: description, each reviewer's latest state, every
+--- review with where its commit is, then the conversation.
+local function pr_content(session, width)
+  local l = session.layer
+  local pr = l.cache.pr
+  local icon = require('diffy.panels.log').STATE_ICON
+  local head = ('#%d'):format(pr.number)
+  local lines = { head .. ' ' .. (pr.title or '') }
+  local spans = { { 0, #head, 'DiffySha' } }
+  local function section(title)
+    table.insert(lines, '')
+    table.insert(lines, title)
+    table.insert(spans, { #lines - 1, 0, #title, 'DiffyLabel' })
+  end
+  table.insert(lines, '')
+  local body = vim.trim((pr.body or ''):gsub('\r', ''))
+  for _, b in ipairs(vim.split(body ~= '' and body or 'No description provided.', '\n', { plain = true })) do
+    wrap(b, width, lines)
+  end
+  local listed = {}
+  for _, e in ipairs(session.entries or {}) do
+    if e.kind == 'commit' then
+      listed[e.sha] = true
+    end
+  end
+  local latest, order = {}, {}
+  local reviews = vim.tbl_filter(function(rv)
+    return rv.state ~= 'PENDING'
+  end, pr.reviews or {})
+  for _, rv in ipairs(reviews) do
+    local who = rv.author or 'unknown'
+    if not latest[who] then
+      table.insert(order, who)
+    end
+    -- a comment doesn't replace an approval or a change request
+    if not latest[who] or rv.state ~= 'COMMENTED' or latest[who] == 'COMMENTED' then
+      latest[who] = rv.state
+    end
+  end
+  if #order > 0 then
+    section('Reviewers')
+    for _, who in ipairs(order) do
+      local s = latest[who]
+      table.insert(lines, ('  %s %s %s'):format(who, icon[s] or '○', STATE_TEXT[s] or s:lower()))
+    end
+    section('Reviews')
+    for _, rv in ipairs(reviews) do
+      local line = ('  %s %s %s'):format(rv.author or 'unknown', icon[rv.state] or '○', (rv.commit or ''):sub(1, 7))
+      if rv.commit and not listed[rv.commit] then
+        line = line .. ((l.reach or {})[rv.commit] and '  not in this log' or '  no longer in the branch')
+      end
+      table.insert(lines, line)
+    end
+  end
+  if #(pr.conversation or {}) > 0 then
+    section('Conversation')
+    for _, c in ipairs(pr.conversation) do
+      local who = ('  %s  %s'):format(c.author or 'unknown', (c.created_at or ''):sub(1, 10))
+      table.insert(lines, who)
+      table.insert(spans, { #lines - 1, 2, 2 + #(c.author or 'unknown'), 'DiffyThreadAuthor' })
+      for _, b in ipairs(vim.split(vim.trim((c.body or ''):gsub('\r', '')), '\n', { plain = true })) do
+        local wrapped = {}
+        wrap(b, width - 4, wrapped)
+        for _, w in ipairs(#wrapped > 0 and wrapped or { '' }) do
+          table.insert(lines, '    ' .. w)
+        end
+      end
+    end
+  end
+  return lines, spans
+end
+
+--- Header and wrapped body for `msg`, plus highlight spans (`{ col, end,
+--- group }` on the first line, or `{ line, col, end, group }`).
+local function content(session, msg, width)
+  if msg.pr then
+    return pr_content(session, width)
+  end
   local sha = msg.sha:sub(1, 7)
   local header = sha .. '  ' .. msg.author .. '  ' .. msg.date
   local spans = {
@@ -133,7 +212,7 @@ end
 local function draw(session, msg)
   local st = state(session)
   local cfg, lines, spans = config(session, function(w)
-    return content(msg, w)
+    return content(session, msg, w)
   end)
   local win = session.wins.commitmsg
   local buf = session.bufs.commitmsg
@@ -147,7 +226,9 @@ local function draw(session, msg)
   local ns = session_mod.namespace(session, 'commitmsg')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for _, sp in ipairs(spans) do
-    vim.api.nvim_buf_set_extmark(buf, ns, 0, sp[1], { end_col = sp[2], hl_group = sp[3] })
+    local line = #sp == 4 and sp[1] or 0
+    local s = #sp == 4 and { sp[2], sp[3], sp[4] } or sp
+    vim.api.nvim_buf_set_extmark(buf, ns, line, s[1], { end_col = math.min(s[2], #lines[line + 1]), hl_group = s[3] })
   end
   if valid(win) then
     vim.api.nvim_win_set_config(win, cfg)
@@ -172,12 +253,15 @@ local function parse(stdout)
   return { sha = vim.trim(sha), author = author, date = date, body = body }
 end
 
---- Show the float for the cursor row, or close it when that row isn't a commit.
+--- Show the float for the cursor row, or close it when that row isn't a
+--- commit or the PR row.
 function M.update(session)
   local st = state(session)
   local row = cursor_row(session)
+  local e = row and session.entries and session.entries[row]
+  local pr_row = e and e.kind == 'pr' and session.layer and session.layer.attached
   local entry = commit_at(session, row)
-  if not entry or st.suppressed == row then
+  if not (entry or pr_row) or st.suppressed == row then
     local was_open = valid(session.wins.commitmsg)
     M.close(session)
     if was_open then
@@ -186,6 +270,10 @@ function M.update(session)
     return
   end
   st.row = row
+  if pr_row then
+    draw(session, { pr = true })
+    return
+  end
   session.commit_msgs = session.commit_msgs or {}
   local cached = session.commit_msgs[entry.sha]
   if cached then

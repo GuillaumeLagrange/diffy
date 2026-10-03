@@ -307,9 +307,9 @@ end
 function M.map_panel_keys(session, buf)
   session_mod.map(session, 'n', 'R', function()
     if session.refresh then
-      session.refresh(session)
+      session.refresh(session, { read = true })
     end
-  end, { buffer = buf, desc = 'rebuild' })
+  end, { buffer = buf, desc = 'rebuild and read GitHub again' })
   M.map_toggle(session, buf)
 end
 

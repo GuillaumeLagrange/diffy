@@ -22,6 +22,10 @@ M.config = {
   -- GitHub avatars in comment headers, on terminals with the kitty graphics
   -- protocol (needs curl and ImageMagick)
   avatars = true,
+  -- the GitHub layer: the open PR of the session's branch over `:Diffy` and
+  -- `:Diffy branch`; `false` turns it off. `read_interval`: seconds between
+  -- reads while the session's tab is current, 0 for no timer.
+  github = { read_interval = 300 },
 }
 
 function M.setup(opts)
@@ -76,13 +80,9 @@ local VERDICTS = {
   { event = 'REQUEST_CHANGES', arg = 'request_changes', key = 'r', label = 'request changes', title = 'Request changes' },
 }
 
---- The VERDICTS entries `review`'s backend offers in session `s`, or nil
---- when it has no review events (local review).
-local function offered_verdicts(s, review)
-  if type(review.backend.verdicts) ~= 'function' then
-    return nil
-  end
-  local events = review.backend.verdicts(s)
+--- The VERDICTS entries GitHub offers in session `s`.
+local function offered_verdicts(s, github)
+  local events = github.verdicts(s)
   return vim.tbl_filter(function(v)
     return vim.tbl_contains(events, v.event)
   end, VERDICTS)
@@ -117,11 +117,11 @@ function review_subcommands.pull(s, review)
 end
 
 --- `:Diffy review submit [comment|approve|request_changes]`: a modal for
---- the review message, then (GitHub) a key prompt for the review event,
---- skipped when the argument names it or only one applies. The local
---- review sends the message and the new comments to the agent instead.
+--- the review message. Without a PR it goes to the agent. With one, `a`
+--- agent or `g` GitHub, then the review event (skipped when the argument
+--- names it, which also means GitHub, or when only one applies).
 function review_subcommands.submit(s, review, ui, args)
-  local verdicts = offered_verdicts(s, review)
+  local verdicts = review.pr and offered_verdicts(s, require('diffy.review.github')) or nil
   local preset = args[2]
   if preset then
     local match = vim.tbl_filter(function(v)
@@ -133,23 +133,37 @@ function review_subcommands.submit(s, review, ui, args)
       end, verdicts or {})
       vim.notify(
         #expected > 0 and ('diffy: `review submit` expects %s'):format(table.concat(expected, '|'))
-          or ('diffy: `review submit` takes no argument for %s'):format(review.backend.name),
+          or "diffy: `review submit` takes no argument when the branch has no open PR",
         vim.log.levels.WARN
       )
       return
     end
     verdicts = match
   end
-  local choices = verdicts and vim.tbl_map(function(v)
-    return { v.key, v.label, v.event }
-  end, verdicts)
-  local title = 'Send review to the agent'
-  if verdicts then
-    title = #verdicts == 1 and verdicts[1].title or 'Submit review'
+  local to_agent = function(body)
+    require('diffy.review.local').submit(s, nil, body, report_remote(s))
   end
-  ui.open_submit_body(s, function(body, event)
-    review.backend.submit(s, event, body, report_remote(s, verdicts and 'diffy: review submitted' or nil))
-  end, { title = title, action = verdicts and 'submit' or 'send', choices = choices })
+  if not verdicts then
+    ui.open_submit_body(s, to_agent, { title = 'Send review to the agent', action = 'send' })
+    return
+  end
+  local github_choice = {
+    'g',
+    'GitHub',
+    'github',
+    sub = vim.tbl_map(function(v)
+      return { v.key, v.label, v.event }
+    end, verdicts),
+    sub_title = 'Submit as',
+  }
+  local choices = preset and { github_choice } or { { 'a', 'agent', 'agent' }, github_choice }
+  ui.open_submit_body(s, function(body, value)
+    if value == 'agent' then
+      to_agent(body)
+    else
+      require('diffy.review.github').submit(s, value, body, report_remote(s, 'diffy: review submitted'))
+    end
+  end, { title = 'Submit review', action = 'submit', choices = choices, choose_title = 'Send to' })
 end
 
 local REVIEW_SUBCOMMANDS = { 'clear', 'pull', 'push', 'submit' }
@@ -164,7 +178,7 @@ function M.dispatch.review(args)
   local ui = require('diffy.review.ui')
   local review = ui.ensure(s)
   if not review then
-    vim.notify('diffy: review is only available in :Diffy, :Diffy branch and :Diffy pr', vim.log.levels.WARN)
+    vim.notify('diffy: review is only available in :Diffy and :Diffy branch', vim.log.levels.WARN)
     return
   end
   local sub = args[1]
@@ -265,67 +279,85 @@ local function keep_selection(old_entries, old_sel, entries)
   return nil
 end
 
---- Build (or rebuild, on `R`) the log/tree/diff-pair content for `s` from
---- its stored `s.root`/`s.range`: entries, default/kept selection, HEAD and
---- repo status, then the panels. Fires `User DiffyReady` once rendering
---- finishes.
-function M.build(s)
+--- Build (or rebuild, on `R`/`:w`) the log/tree/diff-pair content for `s`
+--- from its stored `s.root`/`s.range`: entries, default/kept selection, HEAD
+--- and repo status, then the panels. Fires `User DiffyReady` once rendering
+--- finishes, then `done()` if given. Never reads GitHub: an attached layer's
+--- threads are placed again from what it last read.
+function M.build(s, done)
   local log_panel = require('diffy.panels.log')
   local tree_panel = require('diffy.panels.tree')
   local run = require('diffy.git.run')
   local selection = require('diffy.selection')
+  local github = require('diffy.review.github')
 
-  log_panel.build_entries(s.root, s.range, function(entries, err)
-    if not entries then
-      vim.notify('diffy: ' .. tostring(err), vim.log.levels.ERROR)
-      return
+  local function build()
+    local range = s.range
+    if range.kind == 'branch' and not range.base and not range.pr_base and github.enabled(s) then
+      local cache = github.load_cache(s.gitdir, s.branch)
+      range.pr_base = cache and cache.pr.base
     end
-    local kept = keep_selection(s.entries, s.sel, entries)
-    s.entries = entries
-    s.follow_pathspec = entries.follow_pathspec
-    s.sel = kept or log_panel.default_selection(entries, s.range)
-    if not s.sel then
-      vim.notify('diffy: nothing to show for this selection', vim.log.levels.WARN)
-      return
-    end
-    repo.head_sha(s.root, function(head_sha)
-      s.head_sha = head_sha
-      -- what the session's stores are keyed by; read once, since checkout mode detaches HEAD
-      s.branch = s.branch or require('diffy.review.local').branch(s)
-      repo.status(s.root, function(status_entries)
-        s.status_entries = status_entries or {}
-        s.pair = selection.resolve(s.entries, s.sel.top, s.sel.bottom)
-        if not s.setup_done then
-          log_panel.setup(s)
-          tree_panel.setup(s)
-          require('diffy.navigation').setup(s)
-          require('diffy.diffpair').track_edits(s)
-          require('diffy.diffpair').keep_bound_cursor_visible(s)
-          s.setup_done = true
+    log_panel.build_entries(s.root, range, function(entries, err)
+      if not entries then
+        vim.notify('diffy: ' .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      github.remeasure(s, function()
+        entries = log_panel.with_layer(s, entries)
+        local kept = keep_selection(s.entries, s.sel, entries)
+        s.entries = entries
+        s.follow_pathspec = entries.follow_pathspec
+        s.sel = kept or log_panel.default_selection(entries, s.range)
+        if not s.sel then
+          vim.notify('diffy: nothing to show for this selection', vim.log.levels.WARN)
+          return
         end
-        local function finish()
-          require('diffy.layout').relayout(s)
-          log_panel.render(s)
-          tree_panel.render(s, function()
-            run.ready({ session = s.id, event = 'render' })
-          end)
-        end
-        -- PR threads/reviews/description are cached per session and refreshed
-        -- by `R`; fetch them, and what placing threads needs, before the
-        -- final render so its decorate pass finds them.
-        if s.range.kind == 'pr' then
-          require('diffy.review.github').refresh(s, finish)
-        else
-          local ui = require('diffy.review.ui')
-          local review = ui.ensure(s)
-          -- what the agent resolved in review.md since the last build
-          if review and review.backend.sync then
-            review.backend.sync(s)
-          end
-          require('diffy.review.track').prepare(s, finish, { fresh = true })
-        end
-      end, s)
+        repo.head_sha(s.root, function(head_sha)
+          s.head_sha = head_sha
+          repo.status(s.root, function(status_entries)
+            s.status_entries = status_entries or {}
+            s.pair = selection.resolve(s.entries, s.sel.top, s.sel.bottom)
+            if not s.setup_done then
+              log_panel.setup(s)
+              tree_panel.setup(s)
+              require('diffy.navigation').setup(s)
+              require('diffy.diffpair').track_edits(s)
+              require('diffy.diffpair').keep_bound_cursor_visible(s)
+              s.setup_done = true
+            end
+            local function finish()
+              require('diffy.layout').relayout(s)
+              log_panel.render(s)
+              tree_panel.render(s, function()
+                run.ready({ session = s.id, event = 'render' })
+                if done then
+                  done()
+                end
+                -- the first render doesn't wait on GitHub
+                github.start(s)
+              end)
+            end
+            local review = require('diffy.review.ui').ensure(s)
+            -- what the agent resolved in review.md since the last build
+            if review and review.backend.sync then
+              review.backend.sync(s)
+            end
+            require('diffy.review.track').prepare(s, finish, { fresh = true })
+          end, s)
+        end, s)
+      end)
     end, s)
+  end
+
+  if s.branch then
+    build()
+    return
+  end
+  repo.head_sha(s.root, function(head_sha)
+    s.head_sha = head_sha
+    -- what the session's stores are keyed by; read once, since checkout mode detaches HEAD
+    s.branch = require('diffy.review.local').branch(s)
+    build()
   end, s)
 end
 
@@ -358,8 +390,11 @@ function M.start(spec)
       end)
     end)
   end
-  s.refresh = function(sess)
+  s.refresh = function(sess, opts)
     M.build(sess)
+    if opts and opts.read and sess.layer then
+      require('diffy.review.github').read(sess)
+    end
   end
 
   repo.root(vim.fn.getcwd(), function(root, err)
@@ -384,14 +419,13 @@ function M.dispatch.branch(args)
   M.start({ kind = 'branch', base = args[1] })
 end
 
---- `:Diffy pr`: only on the checked-out branch, only when local HEAD equals
---- the PR head on GitHub and the tree is clean. Log = PR commits
---- (`merge-base(base)..HEAD`), all selected by default.
+--- `:Diffy pr`: `:Diffy branch` on the base of the branch's open PR; warns
+--- (`DiffyReady` `pr`, no session) when there's none.
 function M.dispatch.pr(_args)
   local run = require('diffy.git.run')
   local github = require('diffy.review.github')
   local function refuse(reason)
-    vim.notify('diffy: `:Diffy pr` refused - ' .. tostring(reason), vim.log.levels.WARN)
+    vim.notify('diffy: `:Diffy pr` - ' .. reason, vim.log.levels.WARN)
     run.ready({ event = 'pr' })
   end
   repo.root(vim.fn.getcwd(), function(root, err)
@@ -400,25 +434,26 @@ function M.dispatch.pr(_args)
       run.ready({ event = 'pr' })
       return
     end
-    github.find_pr(root, function(pr, ferr)
-      if not pr then
-        refuse(ferr)
-        return
-      end
-      repo.head_sha(root, function(head_sha)
-        repo.is_clean(root, nil, function(clean)
-          github.pr_readiness(root, head_sha, pr.headRefOid, clean, function(ok, reason)
-            if not ok then
-              refuse(reason)
-              return
-            end
-            repo.base_ref(root, pr.baseRefName, function(base)
-              M.start({ kind = 'pr', base = base, pr_number = pr.number })
-            end)
+    run.git({ 'branch', '--show-current' }, {
+      cwd = root,
+      notify_on_error = false,
+      on_exit = function(res)
+        local branch = vim.trim(res.stdout or '')
+        if branch == '' then
+          refuse('not on a branch')
+          return
+        end
+        github.pr_view(root, branch, function(pr, ferr)
+          if not (pr and pr.state == 'OPEN') then
+            refuse(ferr or ('branch `%s` has no open PR'):format(branch))
+            return
+          end
+          repo.base_ref(root, pr.baseRefName, function(base)
+            M.start({ kind = 'branch', base = base })
           end)
         end)
-      end)
-    end)
+      end,
+    })
   end)
 end
 
@@ -487,9 +522,7 @@ local function completion_backend()
     return s, s.review.backend
   end
   local kind = s.range.kind
-  if kind == 'pr' then
-    return s, require('diffy.review.github')
-  elseif kind == 'default' or kind == 'branch' then
+  if kind == 'default' or kind == 'branch' then
     return s, require('diffy.review.local')
   end
   return s, nil

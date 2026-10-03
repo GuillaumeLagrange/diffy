@@ -1,15 +1,18 @@
 -- Fake GitHub transport, swapped in for `review/github.lua`'s `M.transport`
--- in a child nvim before opening a session:
+-- and `M.pr_view` in a child nvim before opening a session:
 --
 --   child.lua([[
 --     local fake = require('tests.helpers.fake_github')
 --     local state = fake.load_fixture('tests/fixtures/github/pr2.json', 2)
---     state.find_pr = { ['sandbox/placement'] = { number = 2, baseRefName = 'base/placement', headRefOid = '865a585...' } }
---     require('diffy.review.github').transport = fake.new(state).transport
+--     state.branches = { ['sandbox/placement'] = 2 }
+--     fake.install(state)
 --   ]])
 --
 -- `state` is plain Lua tables, so a test can hand-build one instead of a
--- recorded fixture. For push/pull/submit/reply/resolve it also takes:
+-- recorded fixture. It takes:
+--   state.branches     branch -> PR number, what `gh pr view <branch>` finds
+--   state.offline      every request fails, as without network
+--   state.hold         `gh pr view` doesn't answer until `M.release(state)`
 --   state.repo_dir     the fixture repo, for real `git diff` validation
 --                      (GitHub's "changed line or ±3 context of
 --                      merge-base...commit" rule)
@@ -17,8 +20,9 @@
 --   state.viewer       login owning the (one, per-user) pending review;
 --                      defaults to 'diffy-test-user'
 -- Every PR touched gets a mutable "db" deep-copied once from
--- `state.reads[number]`, so later reads reflect the mutations; `state.reads`
--- itself is never modified.
+-- `state.reads[number]` (`M.db`), so later reads reflect the mutations
+-- (`db.state = 'MERGED'` merges it); `state.reads` itself is never modified.
+-- Connections are paginated at the `$k` the request asks for.
 local model = require('diffy.review.model')
 
 local M = {}
@@ -35,6 +39,7 @@ local function db_for(state, number)
   local pr = fixture and fixture.repository and fixture.repository.pullRequest
   local db = {
     id = pr and pr.id or ('FAKE_PR_%d'):format(number),
+    state = pr and pr.state or 'OPEN',
     base = pr and pr.baseRefName,
     head = pr and pr.headRefOid,
     title = pr and pr.title,
@@ -58,6 +63,40 @@ local function db_for(state, number)
   end
   state._db[number] = db
   return db
+end
+M.db = db_for
+
+local URL = 'https://github.com/GuillaumeLagrange/diffy-tests/pull/%d'
+
+--- `nodes[after+1 .. after+k]` as a connection; cursors are indices.
+local function page(nodes, k, after)
+  local from = tonumber(after or '0')
+  local out = {}
+  for i = from + 1, math.min(#nodes, from + k) do
+    table.insert(out, nodes[i])
+  end
+  local last = from + #out
+  return { pageInfo = { hasNextPage = last < #nodes, endCursor = tostring(last) }, nodes = out }
+end
+
+--- A thread node with its comments cut to the first page.
+local function thread_page(t, k)
+  local copy = {}
+  for key, v in pairs(t) do
+    if key ~= 'comments' and not tostring(key):match('^_') then
+      copy[key] = v
+    end
+  end
+  copy.comments = page(t.comments.nodes, k)
+  return copy
+end
+
+local function threads_page(db, k, after)
+  local p = page(db.threads, k, after)
+  p.nodes = vim.tbl_map(function(t)
+    return thread_page(t, k)
+  end, p.nodes)
+  return p
 end
 
 local function fresh_id(db, prefix)
@@ -195,14 +234,15 @@ local function thread_node(id, path, side, first_comment)
   return { id = id, isResolved = false, path = path, diffSide = side, comments = { nodes = { first_comment } } }
 end
 
---- Build `{ transport = fun(query, variables, cb) }` backed by `state`.
---- Matches the query/mutation by a distinctive substring of the exact
---- shapes this codebase sends.
+--- Build `{ transport = fun(query, variables, cb), pr_view = fun(root,
+--- branch, cb) }` backed by `state`. Matches the query/mutation by a
+--- distinctive substring of the exact shapes this codebase sends.
 function M.new(state)
   state.viewer = state.viewer or 'diffy-test-user'
   local self = { state = state }
 
   local function respond(cb, data)
+    data = vim.deepcopy(data)
     vim.schedule(function()
       cb(data, nil)
     end)
@@ -213,14 +253,41 @@ function M.new(state)
     end)
   end
 
-  self.transport = function(query, variables, cb)
-    if query:find('pullRequests(headRefName', 1, true) then
-      local found = state.find_pr and state.find_pr[variables.h]
-      respond(cb, { repository = { pullRequests = { nodes = found and { found } or {} } } })
+  -- `gh pr view <branch> --json number,url,state,baseRefName,headRefOid`
+  local function pr_view(branch, cb)
+    if state.offline then
+      fail(cb, 'error connecting to api.github.com')
       return
     end
+    local number = state.branches and state.branches[branch]
+    if not number then
+      vim.schedule(function()
+        cb(nil, nil)
+      end)
+      return
+    end
+    local db = db_for(state, number)
+    respond(cb, { number = number, url = URL:format(number), state = db.state, baseRefName = db.base, headRefOid = db.head })
+  end
+  self.pr_view = function(_root, branch, cb)
+    if state.hold then
+      state.held = state.held or {}
+      table.insert(state.held, function()
+        pr_view(branch, cb)
+      end)
+      return
+    end
+    pr_view(branch, cb)
+  end
 
-    if query:find('reviewThreads(', 1, true) then
+  self.transport = function(query, variables, cb)
+    if state.offline then
+      fail(cb, 'error connecting to api.github.com')
+      return
+    end
+    local k = variables.k
+
+    if query:find('query DiffyRead(', 1, true) then
       local db = db_for(state, variables.n)
       local pending_nodes = {}
       for _, p in pairs(db.pending) do
@@ -240,18 +307,46 @@ function M.new(state)
           pullRequest = {
             id = db.id,
             number = variables.n,
+            state = db.state,
             title = db.title,
             body = db.body,
             baseRefName = db.base,
             headRefOid = db.head,
             author = { login = 'diffy-fixture-author' },
-            comments = { nodes = db.conversation },
-            reviews = { nodes = db.reviews },
+            comments = page(db.conversation, k),
+            reviews = page(db.reviews, k),
             pendingReviews = { nodes = db.pending[state.viewer] and { { id = db.pending[state.viewer].id, comments = { nodes = pending_nodes } } } or {} },
-            reviewThreads = { pageInfo = { hasNextPage = false, endCursor = nil }, nodes = db.threads },
+            reviewThreads = threads_page(db, k),
           },
         },
       })
+      return
+    end
+
+    for name, field in pairs({ DiffyConversation = 'comments', DiffyReviews = 'reviews', DiffyThreads = 'reviewThreads' }) do
+      if query:find('query ' .. name .. '(', 1, true) then
+        local db = db_for(state, variables.n)
+        local conn
+        if field == 'reviewThreads' then
+          conn = threads_page(db, k, variables.after)
+        else
+          conn = page(field == 'comments' and db.conversation or db.reviews, k, variables.after)
+        end
+        respond(cb, { repository = { pullRequest = { [field] = conn } } })
+        return
+      end
+    end
+
+    if query:find('query DiffyThreadComments(', 1, true) then
+      for _, db in pairs(state._db or {}) do
+        for _, t in ipairs(db.threads) do
+          if t.id == variables.id then
+            respond(cb, { node = { comments = page(t.comments.nodes, k, variables.after) } })
+            return
+          end
+        end
+      end
+      fail(cb, 'no such thread')
       return
     end
 
@@ -540,6 +635,26 @@ function M.load_fixture(path, number, state)
   local text = table.concat(vim.fn.readfile(path), '\n')
   state.reads[number] = vim.json.decode(text, { luanil = { object = true, array = true } }).data
   return state
+end
+
+--- Point `review/github.lua` at a fake backed by `state` (`{}`: no PRs).
+--- Returns the fake.
+function M.install(state)
+  local fake = M.new(state)
+  local github = require('diffy.review.github')
+  github.transport = fake.transport
+  github.pr_view = fake.pr_view
+  return fake
+end
+
+--- Answer the `gh pr view` calls `state.hold` kept waiting, and stop holding.
+function M.release(state)
+  state.hold = false
+  local held = state.held or {}
+  state.held = {}
+  for _, f in ipairs(held) do
+    f()
+  end
 end
 
 return M

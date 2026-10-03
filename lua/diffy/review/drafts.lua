@@ -15,8 +15,13 @@ local M = {}
 -- threads.json path -> { path, threads, sessions = { [session] = true }, watch }
 local entries = {}
 
+--- `threads.json` of `branch`.
+function M.path(gitdir, branch)
+  return store.path(gitdir, branch, 'threads.json')
+end
+
 local function path_of(session)
-  return store.path(session.gitdir, session.branch, 'threads.json')
+  return M.path(session.gitdir, session.branch)
 end
 
 local function stored_comment(c)
@@ -289,10 +294,13 @@ function M.remove(session, ids, opts)
   end, opts)
 end
 
---- `:Diffy review clear`: every stored comment of the branch.
+--- `:Diffy review clear`: every stored comment of the branch (the GitHub
+--- cache stays).
 function M.clear(session)
   local e = M.attach(session)
-  store.delete(e.path)
+  store.update(e.path, function(data)
+    data.threads = nil
+  end)
   e.threads = {}
   broadcast(e)
 end

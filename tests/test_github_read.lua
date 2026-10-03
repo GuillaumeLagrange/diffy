@@ -1,11 +1,13 @@
--- The GitHub backend's read side through `:Diffy pr`: placement tracked across
--- commits, fold opening around a thread, and the readiness refusal.
+-- The GitHub layer's read side over `:Diffy branch`: loading, the PR row,
+-- review markers, offline cache, detaching, reading cadence, placement
+-- tracked across commits, `:Diffy pr`.
 --
 -- Fixture repo: a `git bundle` of the sandbox PR #2's `base/placement` and
 -- `sandbox/placement` branches (`tests/fixtures/github/placement.bundle`), so
 -- shas match the recorded GraphQL fixture (`tests/fixtures/github/pr2.json`)
 -- and line tracking runs real `git diff` offline.
--- `make test-gh`: only the refusal cases run live (fresh PR per case).
+-- `make test-gh`: only the cases that don't need a hand-built PR state run
+-- live (fresh PR per case).
 local leak = require('tests.helpers.leak')
 local live = require('tests.helpers.github_live')
 local ui = require('tests.helpers.ui')
@@ -25,17 +27,16 @@ local function clone_placement()
   return live.clone_sandbox(BUNDLE, 'placement')
 end
 
---- Swap `review/github.lua`'s transport for the fake,
---- loaded with the real PR #2 read fixture and a `find_pr` entry matching
---- `sandbox/placement`.
+--- Swap `review/github.lua`'s transport for the fake, loaded with the real
+--- PR #2 read fixture, `sandbox/placement` having PR #2.
 local function install_fake(c)
   c.lua(([[
     local fake = require('tests.helpers.fake_github')
     local state = fake.load_fixture(%q, 2)
-    state.find_pr = { ['sandbox/placement'] = { number = 2, baseRefName = %q, headRefOid = %q } }
+    state.branches = { ['sandbox/placement'] = 2 }
     _G.__fake_state = state
-    require('diffy.review.github').transport = fake.new(state).transport
-  ]]):format(PR2_FIXTURE, BASE, HEAD_SHA))
+    fake.install(state)
+  ]]):format(PR2_FIXTURE))
 end
 
 --- Adds a published thread on head `line` of f.txt to the fake PR #2
@@ -308,27 +309,316 @@ T['<CR> in the threads view opens an outdated thread where it was written: its c
   child.cmd('Diffy close')
 end
 
-local function expect_refused()
-  vim.wait(live.timeout, function()
-    return #ui.warnings(child) > 0
-  end, 10)
-  MiniTest.expect.equality(#ui.warnings(child) > 0, true)
+local function log_rows()
+  return ui.layout(child).log
+end
+
+--- Log rows drawn as selected, without the selection mark.
+local function selected_rows()
+  return vim.tbl_map(function(r)
+    return vim.trim((r:gsub('^\226\150\140', '')))
+  end, ui.rows_with(child, 'log', 'DiffySelection'))
+end
+
+local function fake(code)
+  child.lua('local fake = require("tests.helpers.fake_github"); local state = _G.__fake_state; ' .. code)
+end
+
+local function threads_json()
+  local path = dir .. '/.git/diffy/sandbox/placement/threads.json'
+  return vim.fn.filereadable(path) == 1 and vim.json.decode(table.concat(vim.fn.readfile(path), '\n')) or {}
+end
+
+--- `keys` typed in the log at row `row`, waiting for `event`.
+local function log_keys(row, keys, event)
+  child.api.nvim_set_current_win(wins().log)
+  child.api.nvim_win_set_cursor(wins().log, { row, 0 })
+  ui.arm_ready(child, event)
+  child.type_keys(keys)
+  ui.wait_ready(child)
+end
+
+--- The PR row's float, after resting the cursor on it.
+local function pr_float()
+  child.api.nvim_set_current_win(wins().log)
+  ui.arm_ready_raw(child, 'commitmsg')
+  child.api.nvim_win_set_cursor(wins().log, { 1, 0 })
+  ui.wait_ready_raw(child)
+  return child.lua_get([[(function()
+    local s = require('diffy.session').current()
+    return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(s.wins.commitmsg), 0, -1, false)
+  end)()]])
+end
+
+--- The PR row's status after the (cut) title: '' when in sync and online,
+--- nil when there's no PR row.
+local function pr_status()
+  local r = log_rows()[1]
+  if not r:match('^  #2 P') then
+    return nil
+  end
+  return r:match(' (· .*)$') or ''
+end
+
+local function fixture_only()
+  if live.enabled then
+    MiniTest.skip('hand-built PR state: recorded-fixture only')
+  end
+end
+
+T[':Diffy branch renders before gh answers, and the PR row appears once it does'] = function()
+  fixture_only()
+  child.o.columns = 300
+  fake('state.hold = true')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(log_rows()[1], '▌ Working tree')
+
+  ui.arm_ready(child, 'pr')
+  fake('fake.release(state)')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(pr_status(), '')
+  MiniTest.expect.equality(log_rows()[2], '▌ Working tree')
+  child.cmd('Diffy close')
+end
+
+T['a branch without a PR, or with gh failing and nothing cached, gets no PR row and no warning'] = function()
+  fixture_only()
+  ui.capture_warnings(child)
+  for _, setup in ipairs({ 'state.branches = {}', 'state.offline = true' }) do
+    fake(setup)
+    open_pr()
+    MiniTest.expect.equality(log_rows()[1], '▌ Working tree')
+    MiniTest.expect.equality(ui.warnings(child), {})
+    child.cmd('Diffy close')
+  end
+end
+
+T['offline, the layer comes back from the last read: its threads and an offline PR row'] = function()
+  fixture_only()
+  child.o.columns = 300
+  open_pr()
+  child.cmd('Diffy close')
+
+  fake('state.offline = true')
+  open_pr()
+  MiniTest.expect.equality(pr_status(), '· offline')
+  open_file('f.txt')
+  -- B1, tracked to head line 13
+  MiniTest.expect.equality(lines_with_signs('right')[13], true)
+  child.cmd('Diffy close')
+end
+
+T['a PR merged since the last read detaches: the row, its threads and the cache go, your drafts stay'] = function()
+  fixture_only()
+  vim.fn.mkdir(dir .. '/.git/diffy/sandbox/placement', 'p')
+  vim.fn.writefile({ vim.json.encode({ threads = { {
+    id = 'tmine', backend = 'local', resolved = false,
+    anchor = { path = 'f.txt', side = 'new', start_line = 2, end_line = 2, commit = HEAD_SHA },
+    comments = { { id = 'cmine', author = 'me', body = 'my draft', created_at = 0, state = 'draft' } },
+  } } }) }, dir .. '/.git/diffy/sandbox/placement/threads.json')
+  open_pr()
+  open_file('f.txt')
+  local before = lines_with_signs('right')
+  MiniTest.expect.equality({ before[2], before[13] }, { true, true })
+  MiniTest.expect.equality(threads_json().github ~= nil, true)
+
+  fake('fake.db(state, 2).state = "MERGED"')
+  log_keys(2, 'R', 'pr')
+  MiniTest.expect.equality(log_rows()[1], '▌ Working tree')
+  MiniTest.expect.equality(lines_with_signs('right'), { [2] = true })
+  local stored = threads_json()
+  MiniTest.expect.equality(stored.github, nil)
+  MiniTest.expect.equality(stored.threads[1].comments[1].body, 'my draft')
+  child.cmd('Diffy close')
+end
+
+T['the log starts on origin/HEAD, then moves once to the PR base, keeping the selected commit'] = function()
+  fixture_only()
+  -- origin/HEAD at P5: before gh answers, the log only has P6 and P7
+  git(dir, { 'update-ref', 'refs/remotes/origin/base/placement', '8259525' })
+  fake('state.hold = true')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch')
+  ui.wait_ready(child)
+  local first = ui.log_subjects(child)
+  MiniTest.expect.equality(first[#first]:match('^%S+'), 'P6')
+  log_keys(3, '<CR>', 'select') -- P6
+  local function selected_ids()
+    return vim.tbl_map(function(s)
+      return s:match('^%S+')
+    end, ui.log_subjects(child, selected_rows()))
+  end
+  MiniTest.expect.equality(selected_ids(), { 'P6' })
+
+  ui.arm_ready(child, 'pr')
+  fake('fake.release(state)')
+  ui.wait_ready(child)
+  local after = ui.log_subjects(child)
+  MiniTest.expect.equality(after[#after]:match('^%S+'), 'P1')
+  MiniTest.expect.equality(selected_ids(), { 'P6' })
+  child.cmd('Diffy close')
+
+  -- the next session starts on the cached PR base
+  fake('state.hold = true')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch')
+  ui.wait_ready(child)
+  local cached = ui.log_subjects(child)
+  MiniTest.expect.equality(cached[#cached]:match('^%S+'), 'P1')
+  fake('fake.release(state)')
+  child.cmd('Diffy close')
+end
+
+T['J, K, a and visual ranges never select the PR row or a review marker'] = function()
+  fixture_only()
+  open_pr()
+  log_keys(2, '<CR>', 'select')
+  MiniTest.expect.equality(selected_rows(), { 'Working tree' })
+  log_keys(2, 'K', 'select')
+  MiniTest.expect.equality(selected_rows(), { 'Working tree' })
+  -- the marker above P7 sits between the working tree and P7
+  log_keys(2, 'J', 'select')
+  MiniTest.expect.equality(ui.log_subjects(child, selected_rows()), { 'P7 unrelated: g.txt only' })
+  log_keys(4, 'K', 'select')
+  MiniTest.expect.equality(selected_rows(), { 'Working tree' })
+  log_keys(1, 'a', 'select')
+  local all = selected_rows()
+  MiniTest.expect.equality(all[1], 'Working tree')
+  MiniTest.expect.equality(vim.tbl_contains(all, log_rows()[1]:sub(3)), false)
+  log_keys(1, 'Vj<CR>', 'select')
+  MiniTest.expect.equality(selected_rows(), { 'Working tree' })
+  child.cmd('Diffy close')
+end
+
+T['the PR row says where the branch stands against the PR head'] = function()
+  fixture_only()
+  child.o.columns = 300
+  git(dir, { 'commit', '-q', '--allow-empty', '-m', 'local 1' })
+  git(dir, { 'commit', '-q', '--allow-empty', '-m', 'local 2' })
+  open_pr()
+  MiniTest.expect.equality(pr_status(), '· 2 unpushed')
+  child.cmd('Diffy close')
+
+  fake('fake.db(state, 2).head = ("1"):rep(40); state.reads[2].repository.pullRequest.headRefOid = ("1"):rep(40); state._db = nil')
+  open_pr()
+  MiniTest.expect.equality(pr_status(), '· GitHub has newer commits')
+  child.cmd('Diffy close')
+end
+
+T['a review shows as a marker above its commit; <CR> on it selects everything above'] = function()
+  fixture_only()
+  open_pr()
+  local rows = log_rows()
+  local at
+  for i, r in ipairs(rows) do
+    if r:find('P1 edit', 1, true) then
+      at = i
+    end
+  end
+  MiniTest.expect.equality(vim.trim(rows[at - 1]), '── GuillaumeLagrange ○ 4 threads')
+  log_keys(at - 1, '<CR>', 'select')
+  local sel = ui.log_subjects(child, selected_rows())
+  MiniTest.expect.equality(sel[1], 'Working tree')
+  MiniTest.expect.equality(sel[#sel], 'P2 edit f 50, re-edit f 11')
+  child.cmd('Diffy close')
+end
+
+T["the PR row's float lists every review, those on commits the log doesn't list with why"] = function()
+  fixture_only()
+  child.o.columns = 300
+  -- a review on the merge-base: in the branch, not in its log
+  fake(([[table.insert(state.reads[2].repository.pullRequest.reviews.nodes, {
+    id = 'PRR_base', author = { login = 'alice' }, state = 'CHANGES_REQUESTED', body = '', submittedAt = '2026-09-28T00:00:00Z', commit = { oid = %q } })]]):format(git(dir, { 'merge-base', BASE, HEAD_SHA })))
+  open_pr()
+  local float = pr_float()
+  local function after(title)
+    local out, on = {}, false
+    for _, l in ipairs(float) do
+      if on and l == '' then
+        break
+      end
+      if on then
+        table.insert(out, l)
+      end
+      on = on or l == title
+    end
+    return out
+  end
+  MiniTest.expect.equality(after('Reviewers'), { '  GuillaumeLagrange ○ commented', '  alice ✗ changes requested' })
+  MiniTest.expect.equality(after('Reviews'), {
+    '  GuillaumeLagrange ○ 15a977e  no longer in the branch',
+    '  GuillaumeLagrange ○ 786410a',
+    '  GuillaumeLagrange ○ 6980f1a',
+    '  GuillaumeLagrange ○ 865a585',
+    '  alice ✗ ' .. git(dir, { 'merge-base', BASE, HEAD_SHA }):sub(1, 7) .. '  not in this log',
+  })
+  child.cmd('Diffy close')
+end
+
+T['R reads GitHub again, writing a file does not'] = function()
+  fixture_only()
+  child.o.columns = 300
+  open_pr()
+  open_file('f.txt')
+  fake('fake.db(state, 2).title = "Renamed"')
+  child.api.nvim_set_current_win(wins().right)
+  ui.arm_ready(child, 'render')
+  child.cmd('normal! Gox')
+  child.cmd('write')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(pr_status(), '')
+  log_keys(2, 'R', 'pr')
+  MiniTest.expect.equality(log_rows()[1], '  #2 Renamed')
+  child.cmd('Diffy close')
+end
+
+T['a thread with more comments than one page shows all of them'] = function()
+  fixture_only()
+  child.lua('require("diffy.review.github").page_size = 2')
+  fake([[
+    local t = state.reads[2].repository.pullRequest.reviewThreads.nodes[1]
+    local first = t.comments.nodes[1]
+    for i = 2, 5 do
+      local c = vim.deepcopy(first)
+      c.id, c.body = 'PRRC_more' .. i, 'reply ' .. i
+      table.insert(t.comments.nodes, c)
+    end
+    _G.__first_thread = t.comments.nodes[1].body:match('^%S+')
+  ]])
+  child.o.columns = 200
+  open_pr()
+  local id = child.lua_get('_G.__first_thread')
+  local found
+  for _, g in ipairs(ui.all_threads(child, 'Diffy threads') or {}) do
+    for _, row in ipairs(g.rows) do
+      if row:find(id, 1, true) then
+        found = row
+      end
+    end
+  end
+  MiniTest.expect.equality(found ~= nil and found:find('+4', 1, true) ~= nil, true)
+  child.cmd('Diffy close')
+end
+
+T[':Diffy pr opens :Diffy branch on the PR base, and warns on a branch without an open PR'] = function()
+  fixture_only()
+  child.o.columns = 300
+  ui.arm_ready(child, 'pr')
+  child.cmd('Diffy pr')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(pr_status(), '')
+  child.cmd('Diffy close')
+
+  fake('state.branches = {}')
+  ui.capture_warnings(child)
+  ui.arm_ready(child, 'pr')
+  child.cmd('Diffy pr')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(#ui.warnings(child, 'WARN'), 1)
   MiniTest.expect.equality(child.fn.tabpagenr('$'), 1)
   MiniTest.expect.equality(ui.diffy_buffers(child), {})
-end
-
-T[':Diffy pr refuses to open when local HEAD differs from the PR head on GitHub'] = function()
-  git(dir, { 'commit', '--amend', '-q', '--allow-empty', '-m', 'local-only amend' })
-  ui.capture_warnings(child)
-  child.cmd('Diffy pr')
-  expect_refused()
-end
-
-T[':Diffy pr refuses to open when the tree is dirty'] = function()
-  vim.fn.writefile({ 'dirty' }, dir .. '/f.txt')
-  ui.capture_warnings(child)
-  child.cmd('Diffy pr')
-  expect_refused()
 end
 
 return T

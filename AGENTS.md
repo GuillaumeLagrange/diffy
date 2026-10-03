@@ -29,8 +29,9 @@ lua/diffy/
   git/parse.lua         pure parsers for git's -z formats (log, name-status, raw, numstat, status v2, ls-files -u)
   git/repo.lua          root, merge-base, base resolution, status, default range, diff args
   selection.lua         log selection -> (left rev, right rev); the real-file rule
-  panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), selection keys
-  panels/commitmsg.lua  full commit message float beside the column while the log cursor rests on a commit
+  panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), the GitHub layer's
+                        PR row and review markers, selection keys
+  panels/commitmsg.lua  float beside the column while the log cursor rests on a commit (its message) or the PR row
   panels/tree.lua       files view: tree rows (Unstaged/Staged sections for the working tree, Viewed groups), right blob
                         ids for worktree files, staging and viewed keys, file navigation
   viewed.lua            viewed marks (blob pair per path) in viewed.json: shared per nvim, watched across nvims
@@ -53,7 +54,8 @@ lua/diffy/
   review/store.lua      JSON in .git/diffy/<branch>/: atomic writes, read-apply-write updates, file watch
   review/drafts.lua     the branch's one store of your comments (threads.json), shared by sessions, migration
   review/local.lua      local backend + review.md export
-  review/github.lua     GitHub backend: gh transport, read, push/pull/submit
+  review/github.lua     the GitHub layer: `gh pr view` lookup, paginated read, cache in threads.json, attach/detach,
+                        read cadence; gh transport; push/pull/submit
 ```
 
 Conventions the code relies on:
@@ -77,12 +79,19 @@ Conventions the code relies on:
   dropping one link drops the chain.
 - **DiffyReady.** `run.ready({ session, event })` fires `User DiffyReady` when something finished drawing.
   Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `choose`, `conflict`,
-  `checkout`, `restore`, `pr`, `close`, `commitmsg`, `feedback`, `viewed`. Tests wait on these; never sleep.
+  `checkout`, `restore`, `pr` (a GitHub layer read finished, attached or not; `:Diffy pr` warning), `close`,
+  `commitmsg`, `feedback`, `viewed`. Tests wait on these; never sleep.
+- **The GitHub layer.** `:Diffy` and `:Diffy branch` render without GitHub; `github.start` then reads
+  (`session.layer`). Attaching swaps `session.review.backend` to `review/github.lua` and adds the
+  published threads and `review.pr`; detaching swaps back to `review/local.lua`. The log's layer rows
+  (`kind = 'pr'`/`'marker'`) are entries that `selection.selectable` refuses; `log.apply_layer` redoes
+  them, keeping the selection by entry identity. The last read lives under `github` in threads.json;
+  rebuilds (`M.build`, `:w`) never read GitHub, `R` does.
 - **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `author`,
   `place(session, thread) -> {win, start_line, end_line} | nil` (in the open file), `view_place` (the same
   for any file of the current pair, or of a given pair: the threads view uses it to pick a selection that
   shows a thread), and for authoring `save(session, thread, comment?)`, `clear`,
-  `export` (local) or `push`/`pull`/`submit`/`resolve_thread` (GitHub). Both place through `review/track.lua`,
+  `submit` (local: to the agent) or `push`/`pull`/`submit`/`resolve_thread` (GitHub). Both place through `review/track.lua`,
   so a thread shows in every view it tracks to, whichever backend wrote it. `review/ui.lua` only draws what
   `place` returns and caches it on `thread._place`.
 - **One store per branch.** Your comments live in `.git/diffy/<branch>/threads.json`, keyed by
@@ -131,9 +140,10 @@ Rules for every test:
 9. Screenshots only for the layout, the mirrored comment alignment and the conflict view. Reference files in
    `tests/screenshots/` are named after the case: renaming a case means renaming its reference file.
 
-GitHub tests: `review/github.lua` sends everything through `M.transport`; tests swap it for
-`tests/helpers/fake_github.lua`, which implements the GitHub behaviour listed below. Read responses are
-real GraphQL recorded from sandbox PRs #2–#4 (`tests/fixtures/github/pr*.json`), with git bundles of their
+GitHub tests: `review/github.lua` sends everything through `M.transport` and `M.pr_view` (`gh pr view`);
+tests swap both with `fake_github.install(state)`, which implements the GitHub behaviour listed below.
+`minimal_init.lua` installs one with no PRs, so no test reaches the network outside `make test-gh`. Read
+responses are real GraphQL recorded from sandbox PRs #2–#4 (`tests/fixtures/github/pr*.json`), with git bundles of their
 branches so shas match. `make test-gh` (`DIFFY_TESTGH=1`) runs the same test files against the real sandbox,
 one fresh PR per case, closed afterwards; placement cases are fake-only because they depend on PR #2's
 between-pushes state. When fake and GitHub disagree, fix the fake.

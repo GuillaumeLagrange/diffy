@@ -42,13 +42,13 @@ end
 
 local function review_available(session)
   local kind = session.range and session.range.kind
-  return kind == 'default' or kind == 'branch' or kind == 'pr'
+  return kind == 'default' or kind == 'branch'
 end
 
---- Lazily resolve the backend and the branch's stored threads for
---- `session`. Returns the `session.review` table, or nil if review isn't
---- available for this session's range kind. For `kind='pr'`, `:Diffy pr`'s
---- refresh adds the published threads.
+--- Lazily load the branch's stored threads for `session`. Returns the
+--- `session.review` table, or nil if review isn't available for this
+--- session's range kind. The backend is the local one until the GitHub
+--- layer attaches (`review/github.lua`), which adds the published threads.
 function M.ensure(session)
   if session.review ~= nil then
     return session.review or nil
@@ -57,7 +57,7 @@ function M.ensure(session)
     session.review = false
     return nil
   end
-  local backend = require(session.range.kind == 'pr' and 'diffy.review.github' or 'diffy.review.local')
+  local backend = require('diffy.review.local')
   session.review = {
     backend = backend,
     branch = session.branch,
@@ -1512,12 +1512,15 @@ function M.render_thread(session, buf, thread, opts)
   })
 end
 
---- Resolve (or unresolve) `thread`: on GitHub right away, in a local review
---- in its saved drafts. Redraws once done.
+--- Resolve (or unresolve) `thread`: a published thread on GitHub right
+--- away, your own in its saved drafts. Redraws once done.
 function M.set_resolved(session, thread, resolved)
   local review = session.review
   local backend = review.backend
-  if type(backend.resolve_thread) == 'function' then
+  local published = vim.iter(thread.comments):any(function(c)
+    return c.state == 'published' or c.state == 'pending'
+  end)
+  if published and type(backend.resolve_thread) == 'function' then
     backend.resolve_thread(session, thread, resolved, function() end)
     return
   end
@@ -1770,7 +1773,7 @@ local function selection_for(session, thread)
   end
   table.insert(candidates, require('diffy.panels.log').default_selection(entries, session.range))
   for i, e in ipairs(entries) do
-    if not (e.kind == 'commit' and e.merge) then
+    if require('diffy.selection').selectable(e) then
       table.insert(candidates, { top = i, bottom = i })
     end
   end
@@ -2050,8 +2053,8 @@ end
 --- session.
 function M.open_pr_description(session)
   local review = session.review
-  if not review or review.backend.name ~= 'github' or not review.pr then
-    vim.notify('diffy: `gP` is only available in :Diffy pr', vim.log.levels.WARN)
+  if not review or not review.pr then
+    vim.notify('diffy: `gP` needs the branch to have an open PR', vim.log.levels.WARN)
     return
   end
   local pr = review.pr
@@ -2106,10 +2109,11 @@ end
 
 --- `:Diffy review submit`'s modal, centered since a review body isn't
 --- anchored to any line: write the message, then `<C-s>`/`:w`. With
---- several `opts.choices` (`{ { key, label, value }, … }`) a key prompt
---- picks one (cancelling it goes back to the message); `on_save(body,
---- value)` then runs (body blank if left empty, value the only choice's, or
---- nil without choices) and the modal closes. `q` cancels.
+--- several `opts.choices` (`{ { key, label, value, sub?, sub_title? }, … }`)
+--- a key prompt picks one, then one of its `sub` choices if it has any
+--- (cancelling goes back to the message); `on_save(body, value)` then runs
+--- (body blank if left empty, value the leaf choice's, or nil without
+--- choices) and the modal closes. `q` cancels.
 function M.open_submit_body(session, on_save, opts)
   opts = opts or {}
   local choices = opts.choices or {}
@@ -2141,27 +2145,45 @@ function M.open_submit_body(session, on_save, opts)
     on_save(body, value)
   end
 
+  --- Pick among `list`: a lone choice is taken without asking.
+  local function pick(list, title)
+    if #list < 2 then
+      local c = list[1]
+      if c and c.sub then
+        pick(c.sub, c.sub_title)
+      else
+        finish(c and c[3])
+      end
+      return
+    end
+    vim.cmd('stopinsert')
+    -- after the write: `:w` isn't done with this window yet
+    vim.schedule(function()
+      prompt.choose(session, title or 'Submit as', list, function(value)
+        local chosen
+        for _, c in ipairs(list) do
+          if value ~= nil and c[3] == value then
+            chosen = c
+          end
+        end
+        if chosen and chosen.sub then
+          pick(chosen.sub, chosen.sub_title)
+        elseif chosen then
+          finish(value)
+        elseif vim.api.nvim_win_is_valid(win) then
+          vim.api.nvim_set_current_win(win)
+        end
+      end)
+      run.ready({ session = session.id, event = 'choose' })
+    end)
+  end
+
   vim.api.nvim_create_autocmd('BufWriteCmd', {
     group = session.augroup,
     buffer = buf,
     callback = function()
       vim.bo[buf].modified = false
-      if #choices < 2 then
-        finish(choices[1] and choices[1][3])
-        return
-      end
-      vim.cmd('stopinsert')
-      -- after the write: `:w` isn't done with this window yet
-      vim.schedule(function()
-        prompt.choose(session, opts.choose_title or 'Submit as', choices, function(value)
-          if value ~= nil then
-            finish(value)
-          elseif vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_set_current_win(win)
-          end
-        end)
-        run.ready({ session = session.id, event = 'choose' })
-      end)
+      pick(choices, opts.choose_title)
     end,
   })
   session_mod.map(session, { 'n', 'i' }, '<C-s>', function()

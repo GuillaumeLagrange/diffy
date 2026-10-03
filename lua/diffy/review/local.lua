@@ -208,7 +208,8 @@ local function join(jobs, done)
   end
 end
 
---- Every comment not sent yet, with where its thread is now: tracked to the
+--- Every comment of yours not sent yet (published and pending ones are
+--- GitHub's), with where its thread is now: tracked to the
 --- worktree (to the index for an index comment). Old-side, outdated and
 --- detached comments have no location now.
 local function unsent_comments(session, threads)
@@ -220,7 +221,7 @@ local function unsent_comments(session, threads)
       now = track.now(session, thread)
     end
     for _, comment in ipairs(thread.comments) do
-      if comment.state ~= 'sent' then
+      if comment.state ~= 'sent' and comment.state ~= 'published' and comment.state ~= 'pending' then
         table.insert(pending, { thread = thread, comment = comment, now = now })
       end
     end

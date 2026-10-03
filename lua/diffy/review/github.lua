@@ -43,6 +43,11 @@ end
 M.save = drafts.put
 M.clear = drafts.clear
 
+--- The agent's ticks in `review.md`, as without a PR.
+function M.sync(session)
+  require('diffy.review.local').sync(session)
+end
+
 -- ---------------------------------------------------------------------
 -- transport: every gh request goes through `M.transport`. Tests replace
 -- this field with `tests/helpers/fake_github.lua`'s function.
@@ -72,246 +77,218 @@ function M.transport(query, variables, cb)
   end)
 end
 
---- `owner`/`name` parsed from the `origin` remote URL. `cb(owner, name, err)`,
---- dropped once `session` (optional) closes.
-local function owner_repo(root, cb, session)
-  run.git({ 'remote', 'get-url', 'origin' }, {
+--- `gh pr view <branch>`: the PR gh finds for the branch (its upstream,
+--- forks included). `cb(pr, err)`; `pr = { number, url, state, baseRefName,
+--- headRefOid }`, both nil when the branch has no PR. Tests replace this
+--- field along with `M.transport`.
+function M.pr_view(root, branch, cb)
+  local cmd = { 'gh', 'pr', 'view', branch, '--json', 'number,url,state,baseRefName,headRefOid' }
+  local ok, err = pcall(run.run, cmd, {
     cwd = root,
-    session = session,
     notify_on_error = false,
     on_exit = function(res)
       if res.code ~= 0 then
-        cb(nil, nil, 'no `origin` remote')
-        return
-      end
-      local url = vim.trim(res.stdout or '')
-      local owner, name = url:match('[:/]([%w_.%-]+)/([%w_.%-]-)%.git$')
-      if not owner then
-        owner, name = url:match('[:/]([%w_.%-]+)/([%w_.%-]+)$')
-      end
-      if not owner then
-        cb(nil, nil, 'could not parse owner/repo from `' .. url .. '`')
-        return
-      end
-      cb(owner, name, nil)
-    end,
-  })
-end
-
-local FIND_PR_QUERY = [[
-query($o: String!, $r: String!, $h: String!) {
-  repository(owner: $o, name: $r) {
-    pullRequests(headRefName: $h, states: [OPEN], first: 5) {
-      nodes { number baseRefName headRefOid }
-    }
-  }
-}
-]]
-
---- The open PR whose head is the current branch. `cb(pr, err)`,
---- `pr = { number, baseRefName, headRefOid }`.
-function M.find_pr(root, cb)
-  owner_repo(root, function(owner, name, err)
-    if not owner then
-      cb(nil, err)
-      return
-    end
-    run.git({ 'branch', '--show-current' }, {
-      cwd = root,
-      notify_on_error = false,
-      on_exit = function(res)
-        local branch = vim.trim(res.stdout or '')
-        if res.code ~= 0 or branch == '' then
-          cb(nil, 'not on a branch (detached HEAD)')
-          return
+        local msg = vim.trim(res.stderr or '')
+        if msg:find('no pull requests found', 1, true) then
+          cb(nil, nil)
+        else
+          cb(nil, msg ~= '' and msg or 'gh pr view failed')
         end
-        M.transport(FIND_PR_QUERY, { o = owner, r = name, h = branch }, function(data, gerr)
-          if not data then
-            cb(nil, gerr)
-            return
-          end
-          local nodes = data.repository.pullRequests.nodes
-          if #nodes == 0 then
-            cb(nil, ('no open PR found for branch `%s`'):format(branch))
-            return
-          end
-          cb(nodes[1], nil)
-        end)
-      end,
-    })
-  end)
-end
-
---- `:Diffy pr` refuses unless the tree is clean and local HEAD equals the
---- PR head on GitHub. `cb(ok, reason)`; `reason` names what's wrong (dirty
---- tree, unpushed commits, behind remote, or a generic mismatch when the
---- PR head isn't available locally to compare ancestry).
-function M.pr_readiness(root, head_sha, pr_head_sha, clean, cb)
-  if not clean then
-    cb(false, 'the tree is dirty (tracked changes present, staged or unstaged) - commit or stash them first')
-    return
-  end
-  if head_sha == pr_head_sha then
-    cb(true, nil)
-    return
-  end
-  run.git({ 'merge-base', '--is-ancestor', head_sha, pr_head_sha }, {
-    cwd = root,
-    notify_on_error = false,
-    on_exit = function(res)
-      if res.code == 0 then
-        cb(false, 'local HEAD is behind the PR head on GitHub - pull first')
         return
       end
-      run.git({ 'merge-base', '--is-ancestor', pr_head_sha, head_sha }, {
-        cwd = root,
-        notify_on_error = false,
-        on_exit = function(res2)
-          if res2.code == 0 then
-            cb(false, 'local HEAD has unpushed commits - push first')
-          else
-            cb(
-              false,
-              ('local HEAD (%s) does not match the PR head on GitHub (%s)'):format(
-                head_sha:sub(1, 7),
-                pr_head_sha:sub(1, 7)
-              )
-            )
-          end
-        end,
-      })
+      local dok, pr = pcall(vim.json.decode, res.stdout or '', { luanil = { object = true, array = true } })
+      cb(dok and pr or nil, not dok and 'invalid JSON from `gh pr view`' or nil)
     end,
   })
+  if not ok then
+    vim.schedule(function()
+      cb(nil, tostring(err)) -- no gh
+    end)
+  end
 end
 
 -- ---------------------------------------------------------------------
--- read: threads, reviews, description/conversation and the viewer's pending
--- review in one query, paginated over `reviewThreads` only. The PR-level
--- connections are taken from the first page and not paginated.
+-- read: the PR, its conversation, reviews and threads, every connection
+-- paginated (`M.page_size` per page; tests lower it).
 
-local READ_QUERY = [[
-query($o: String!, $r: String!, $n: Int!, $cursor: String) {
+M.page_size = 100
+
+local PAGE = 'pageInfo { hasNextPage endCursor }'
+local CONVERSATION = 'nodes { author { login avatarUrl(size: 64) } body createdAt }'
+local REVIEW = 'nodes { id author { login } state body submittedAt commit { oid } }'
+local COMMENT = [[nodes {
+  id author { login avatarUrl(size: 64) } body createdAt diffHunk
+  line originalLine startLine originalStartLine
+  commit { oid } originalCommit { oid } pullRequestReview { id }
+}]]
+local THREAD = ('nodes { id isResolved path diffSide comments(first: $k) { %s %s } }'):format(PAGE, COMMENT)
+
+local READ_QUERY = ([[
+query DiffyRead($o: String!, $r: String!, $n: Int!, $k: Int!) {
   viewer { login avatarUrl(size: 64) }
   repository(owner: $o, name: $r) {
     pullRequest(number: $n) {
-      id
-      number
-      title
-      body
-      createdAt
-      baseRefName
-      headRefOid
+      id number title body createdAt state baseRefName headRefOid
       author { login avatarUrl(size: 64) }
-      comments(first: 100) {
-        nodes { author { login avatarUrl(size: 64) } body createdAt }
+      comments(first: $k) { %s %s }
+      reviews(first: $k) { %s %s }
+      pendingReviews: reviews(states: [PENDING], first: 1) {
+        nodes { id comments(first: 100) { nodes { id path line originalLine startLine originalStartLine body commit { oid } originalCommit { oid } } } }
       }
-      reviews(first: 100) {
-        nodes { id author { login } state body submittedAt commit { oid } }
-      }
-      pendingReviews: reviews(states: [PENDING], first: 5) {
-        nodes {
-          id
-          comments(first: 100) {
-            nodes {
-              id path line originalLine startLine originalStartLine body
-              commit { oid } originalCommit { oid }
-            }
-          }
-        }
-      }
-      reviewThreads(first: 50, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          isResolved
-          path
-          diffSide
-          comments(first: 50) {
-            nodes {
-              id
-              author { login avatarUrl(size: 64) }
-              body
-              createdAt
-              diffHunk
-              line
-              originalLine
-              startLine
-              originalStartLine
-              commit { oid }
-              originalCommit { oid }
-              pullRequestReview { id }
-            }
-          }
-        }
-      }
+      reviewThreads(first: $k) { %s %s }
     }
   }
 }
-]]
+]]):format(PAGE, CONVERSATION, PAGE, REVIEW, PAGE, THREAD)
 
-local function paginate_threads(owner, name, number, cb)
-  local acc = {}
-  local meta
-  local function step(cursor)
-    M.transport(READ_QUERY, { o = owner, r = name, n = number, cursor = cursor }, function(data, err)
-      if not data then
-        cb(nil, nil, err)
+local function more_query(name, field, nodes)
+  return ([[
+query %s($o: String!, $r: String!, $n: Int!, $k: Int!, $after: String) {
+  repository(owner: $o, name: $r) { pullRequest(number: $n) { %s(first: $k, after: $after) { %s %s } } }
+}
+]]):format(name, field, PAGE, nodes)
+end
+
+local MORE = {
+  comments = more_query('DiffyConversation', 'comments', CONVERSATION),
+  reviews = more_query('DiffyReviews', 'reviews', REVIEW),
+  reviewThreads = more_query('DiffyThreads', 'reviewThreads', THREAD),
+}
+
+local MORE_THREAD_COMMENTS = ([[
+query DiffyThreadComments($id: ID!, $k: Int!, $after: String) {
+  node(id: $id) { ... on PullRequestReviewThread { comments(first: $k, after: $after) { %s %s } } }
+}
+]]):format(PAGE, COMMENT)
+
+local function next_cursor(conn)
+  return conn and conn.pageInfo and conn.pageInfo.hasNextPage and conn.pageInfo.endCursor or nil
+end
+
+--- Append the pages after `cursor` of a connection to `conn.nodes`.
+--- `get(data)` finds the connection in a response. `cb(ok, err)`.
+local function rest(query, vars, get, conn, cb)
+  local cursor = next_cursor(conn)
+  if not cursor then
+    cb(true)
+    return
+  end
+  M.transport(query, vim.tbl_extend('force', vars, { k = M.page_size, after = cursor }), function(data, err)
+    local page = data and get(data)
+    if not page then
+      cb(false, err or 'unexpected response')
+      return
+    end
+    vim.list_extend(conn.nodes, page.nodes)
+    conn.pageInfo = page.pageInfo
+    rest(query, vars, get, conn, cb)
+  end)
+end
+
+--- Run `steps` (`fun(next)`) one after the other; `cb(ok, err)`.
+local function chain(steps, cb)
+  local i = 0
+  local function go(ok, err)
+    if ok == false then
+      cb(false, err)
+      return
+    end
+    i = i + 1
+    if i > #steps then
+      cb(true)
+      return
+    end
+    steps[i](go)
+  end
+  go(true)
+end
+
+--- Everything the layer reads about PR `number` of `owner/name`.
+--- `cb(read, err)`, `read = { pr = meta, nodes = raw reviewThreads nodes }`.
+function M.fetch(owner, name, number, cb)
+  local vars = { o = owner, r = name, n = number }
+  M.transport(READ_QUERY, vim.tbl_extend('force', vars, { k = M.page_size }), function(data, err)
+    local pr = data and data.repository and data.repository.pullRequest
+    if not pr then
+      cb(nil, err or ('PR #%d not found'):format(number))
+      return
+    end
+    if data.viewer and data.viewer.login then
+      cached_author = data.viewer.login
+      remember_avatar(data.viewer)
+    end
+    local steps = {}
+    for field, query in pairs(MORE) do
+      table.insert(steps, function(next)
+        rest(query, vars, function(d)
+          return d.repository and d.repository.pullRequest and d.repository.pullRequest[field]
+        end, pr[field], next)
+      end)
+    end
+    -- thread comments page once every thread is listed
+    table.insert(steps, function(next)
+      local per_thread = {}
+      for _, t in ipairs(pr.reviewThreads.nodes) do
+        table.insert(per_thread, function(n2)
+          rest(MORE_THREAD_COMMENTS, { id = t.id }, function(d)
+            return d.node and d.node.comments
+          end, t.comments, n2)
+        end)
+      end
+      chain(per_thread, next)
+    end)
+    chain(steps, function(ok, perr)
+      if not ok then
+        cb(nil, perr)
         return
       end
-      local pr = data.repository and data.repository.pullRequest
-      if not pr then
-        cb(nil, nil, ('PR #%d not found'):format(number))
-        return
+      remember_avatar(pr.author)
+      local meta = {
+        id = pr.id,
+        number = pr.number,
+        state = pr.state,
+        title = pr.title,
+        body = pr.body,
+        author = pr.author and pr.author.login,
+        created_at = pr.createdAt,
+        base = pr.baseRefName,
+        head_sha = pr.headRefOid,
+        conversation = {},
+        reviews = {},
+        pending = pr.pendingReviews.nodes[1],
+      }
+      for _, c in ipairs(pr.comments.nodes) do
+        remember_avatar(c.author)
+        table.insert(meta.conversation, { author = c.author and c.author.login, body = c.body, created_at = c.createdAt })
       end
-      if data.viewer and data.viewer.login then
-        cached_author = data.viewer.login
-        remember_avatar(data.viewer)
-      end
-      if not meta then
-        remember_avatar(pr.author)
-        meta = {
-          number = pr.number,
-          title = pr.title,
-          body = pr.body,
-          author = pr.author and pr.author.login,
-          created_at = pr.createdAt,
-          base = pr.baseRefName,
-          head_sha = pr.headRefOid,
-          conversation = {},
-          reviews = {},
-          pending = nil,
-          id = pr.id,
-        }
-        for _, c in ipairs(pr.comments.nodes) do
-          remember_avatar(c.author)
-          table.insert(meta.conversation, { author = c.author and c.author.login, body = c.body, created_at = c.createdAt })
-        end
-        for _, rv in ipairs(pr.reviews.nodes) do
-          table.insert(meta.reviews, {
-            id = rv.id,
-            author = rv.author and rv.author.login,
-            state = rv.state,
-            body = rv.body,
-            submitted_at = rv.submittedAt,
-            commit = rv.commit and rv.commit.oid,
-          })
-        end
-        meta.pending = pr.pendingReviews.nodes[1]
+      for _, rv in ipairs(pr.reviews.nodes) do
+        table.insert(meta.reviews, {
+          id = rv.id,
+          author = rv.author and rv.author.login,
+          state = rv.state,
+          body = rv.body,
+          submitted_at = rv.submittedAt,
+          commit = rv.commit and rv.commit.oid,
+        })
       end
       for _, t in ipairs(pr.reviewThreads.nodes) do
         for _, c in ipairs(t.comments.nodes) do
           remember_avatar(c.author)
         end
       end
-      vim.list_extend(acc, pr.reviewThreads.nodes)
-      if pr.reviewThreads.pageInfo.hasNextPage then
-        step(pr.reviewThreads.pageInfo.endCursor)
-      else
-        cb(acc, meta, nil)
-      end
+      cb({ pr = meta, nodes = pr.reviewThreads.nodes }, nil)
     end)
+  end)
+end
+
+--- `fetch` for the session's attached PR.
+local function fetch_session(session, cb)
+  local l = session.layer
+  if not (l and l.repo) then
+    cb(nil, 'no PR attached')
+    return
   end
-  step(nil)
+  M.fetch(l.repo.owner, l.repo.name, l.repo.number, cb)
 end
 
 --- Which of `shas` exist locally (a force-pushed-away commit may not).
@@ -445,53 +422,321 @@ function M.visible_in(session, thread)
   return out
 end
 
---- (Re)fetch everything read-related for `session` (refreshed with `R`),
---- your drafts merged in, and what placing them needs. `cb()` runs even on
---- failure (a notify already fired), but not once `:Diffy close` tore the
---- session down mid-fetch.
-function M.refresh(session, cb)
-  local root = session.root
-  owner_repo(root, function(owner, name, err)
-    if not owner then
-      vim.notify('diffy: ' .. err, vim.log.levels.ERROR)
+-- ---------------------------------------------------------------------
+-- the layer: attaches the branch's open PR to a `:Diffy`/`:Diffy branch`
+-- session. `session.layer`: { attached, offline, cache, repo = {owner, name,
+-- number}, standing, reach (review commit -> in the branch), reading,
+-- queued, waiting (callbacks), read_at, timer }.
+
+local function options()
+  local c = require('diffy').config.github
+  return c ~= false and (type(c) == 'table' and c or {}) or nil
+end
+
+--- Whether `session` gets a layer at all.
+function M.enabled(session)
+  local kind = session.range and session.range.kind
+  return options() ~= nil and (kind == 'default' or kind == 'branch')
+end
+
+local function layer(session)
+  session.layer = session.layer or { waiting = {} }
+  return session.layer
+end
+
+--- The last read of `session`'s branch, from threads.json, or nil.
+function M.load_cache(gitdir, branch)
+  local data = require('diffy.review.store').load(drafts.path(gitdir, branch))
+  return data and type(data.github) == 'table' and data.github.pr and data.github or nil
+end
+
+local function save_cache(session, cache)
+  require('diffy.review.store').update(drafts.path(session.gitdir, session.branch), function(data)
+    data.github = cache
+  end)
+end
+
+local function repo_of(pr)
+  local owner, name = (pr.url or ''):match('github%.com/([^/]+)/([^/]+)/pull/')
+  return owner and { owner = owner, name = name, number = pr.number } or nil
+end
+
+--- Where the branch stands against the PR head (`2 unpushed`, `behind 1`,
+--- `diverged`, `GitHub has newer commits`, nil when in sync), and for each
+--- review commit whether the branch contains it. `cb()`.
+local function measure(session, cb)
+  local l = session.layer
+  local pr = l.cache.pr
+  local function git(args, on_exit)
+    run.git(args, { cwd = session.root, session = session, notify_on_error = false, on_exit = on_exit })
+  end
+  local commits = {}
+  for _, rv in ipairs(pr.reviews or {}) do
+    if rv.commit and not vim.tbl_contains(commits, rv.commit) then
+      table.insert(commits, rv.commit)
+    end
+  end
+  local reach = {}
+  local i = 0
+  local function next_reach()
+    i = i + 1
+    if i > #commits then
+      l.reach = reach
       cb()
       return
     end
-    paginate_threads(owner, name, session.range.pr_number, function(nodes, meta, rerr)
+    git({ 'merge-base', '--is-ancestor', commits[i], session.branch }, function(res)
+      reach[commits[i]] = res.code == 0
+      next_reach()
+    end)
+  end
+  git({ 'rev-list', '--left-right', '--count', pr.head_sha .. '...' .. session.branch }, function(res)
+    if res.code ~= 0 then
+      -- the PR head isn't a local commit: diffy never fetches
+      l.standing = 'GitHub has newer commits'
+    else
+      local behind, ahead = (res.stdout or ''):match('(%d+)%s+(%d+)')
+      behind, ahead = tonumber(behind) or 0, tonumber(ahead) or 0
+      if behind > 0 and ahead > 0 then
+        l.standing = 'diverged'
+      elseif ahead > 0 then
+        l.standing = ('%d unpushed'):format(ahead)
+      elseif behind > 0 then
+        l.standing = ('behind %d'):format(behind)
+      else
+        l.standing = nil
+      end
+    end
+    next_reach()
+  end)
+end
+
+--- What a rebuild redoes for an attached layer: the PR row's standing and
+--- review reach. `cb()`.
+function M.remeasure(session, cb)
+  if session.layer and session.layer.attached then
+    measure(session, cb)
+  else
+    cb()
+  end
+end
+
+local function finish_read(session)
+  local l = session.layer
+  l.reading = false
+  l.read_at = vim.uv.now()
+  if l.queued then
+    l.queued = false
+    M.read(session)
+    return
+  end
+  local waiting = l.waiting
+  l.waiting = {}
+  for _, cb in ipairs(waiting) do
+    cb()
+  end
+  run.ready({ session = session.id, event = 'pr' })
+end
+
+--- Redraw the log (PR row, markers) and the threads.
+local function redraw(session, cb)
+  track.prepare(session, function()
+    require('diffy.panels.log').apply_layer(session)
+    require('diffy.review.ui').decorate(session)
+    cb()
+  end)
+end
+
+--- Attach (or refresh) the layer from `cache`: the PR row, markers and the
+--- published threads, placed with your drafts. A different PR base than the
+--- one `:Diffy branch` guessed rebuilds once on it. `cb()`.
+local function attach(session, cache, offline, cb)
+  local l = layer(session)
+  local review = require('diffy.review.ui').ensure(session)
+  if not review then
+    cb()
+    return
+  end
+  local root = session.root
+  repo.base_ref(root, cache.pr.base, function(base_ref)
+    repo.merge_base(root, base_ref, session.head_sha, function(mb)
+      local shas = {}
+      for _, n in ipairs(cache.nodes or {}) do
+        local first = n.comments.nodes[1]
+        table.insert(shas, first and first.commit and first.commit.oid)
+        table.insert(shas, first and first.originalCommit and first.originalCommit.oid)
+      end
+      existing_shas(root, shas, function(exists)
+        if session.closed then
+          return
+        end
+        l.attached, l.offline, l.cache = true, offline, cache
+        l.repo = repo_of(cache.pr)
+        local threads = {}
+        local pending_id = cache.pr.pending and cache.pr.pending.id
+        for _, n in ipairs(cache.nodes or {}) do
+          if n.comments.nodes[1] then
+            table.insert(threads, build_thread(n, exists, pending_id))
+          end
+        end
+        drafts.apply(threads, drafts.attach(session).threads)
+        review.backend = M
+        review.threads = threads
+        review.pr = cache.pr
+        review.merge_base = mb
+        measure(session, function()
+          local range = session.range
+          local entries = session.entries or {}
+          if range.kind == 'branch' and not range.base and not l.rebased and mb and entries.base and mb ~= entries.base then
+            l.rebased = true
+            range.pr_base = base_ref
+            require('diffy').build(session, cb)
+            return
+          end
+          redraw(session, cb)
+        end)
+      end)
+    end, session)
+  end, session)
+end
+
+--- Drop the layer: the PR row, markers and published threads go, and the
+--- cache with them when `drop_cache`. Your drafts stay. `cb()`.
+local function detach(session, drop_cache, cb)
+  local l = layer(session)
+  if drop_cache and M.load_cache(session.gitdir, session.branch) then
+    save_cache(session, nil)
+  end
+  l.cache = nil
+  if not l.attached then
+    cb()
+    return
+  end
+  l.attached, l.offline, l.repo = false, false, nil
+  local review = session.review
+  if type(review) == 'table' then
+    review.backend = require('diffy.review.local')
+    review.pr, review.merge_base = nil, nil
+    review.threads = {}
+    drafts.apply(review.threads, drafts.attach(session).threads)
+  end
+  redraw(session, cb)
+end
+
+--- Read the PR again: `gh pr view` on the session's branch, then the whole
+--- PR. One read at a time; a trigger during a read queues one more. A failed
+--- read falls back to the cache (`offline`); a PR merged, closed or gone
+--- detaches. `cb()` (optional) runs after the read and any queued one;
+--- `DiffyReady` `pr` fires then.
+function M.read(session, cb)
+  local l = layer(session)
+  if cb then
+    table.insert(l.waiting, cb)
+  end
+  if l.reading then
+    l.queued = true
+    return
+  end
+  l.reading = true
+  local function done()
+    if not session.closed then
+      finish_read(session)
+    end
+  end
+  local function offline()
+    local cache = l.cache or M.load_cache(session.gitdir, session.branch)
+    if cache then
+      attach(session, cache, true, done)
+    else
+      done()
+    end
+  end
+  M.pr_view(session.root, session.branch, function(info, err)
+    if session.closed then
+      return
+    end
+    if err then
+      offline()
+      return
+    end
+    local where = info and info.state == 'OPEN' and repo_of(info)
+    if not where then
+      detach(session, true, done)
+      return
+    end
+    M.fetch(where.owner, where.name, where.number, function(read, rerr)
       if session.closed then
         return
       end
-      if not nodes then
-        vim.notify('diffy: ' .. tostring(rerr), vim.log.levels.ERROR)
-        cb()
+      if not read then
+        offline()
         return
       end
-      repo.merge_base(root, session.range.base, session.head_sha, function(mb)
-        local shas = {}
-        for _, n in ipairs(nodes) do
-          local first = n.comments.nodes[1]
-          table.insert(shas, first.commit and first.commit.oid)
-          table.insert(shas, first.originalCommit and first.originalCommit.oid)
-        end
-        existing_shas(root, shas, function(exists)
-          if session.closed then
-            return
-          end
-          local threads = {}
-          local pending_id = meta.pending and meta.pending.id
-          for _, n in ipairs(nodes) do
-            table.insert(threads, build_thread(n, exists, pending_id))
-          end
-          local review = require('diffy.review.ui').ensure(session)
-          drafts.apply(threads, drafts.attach(session).threads)
-          review.threads = threads
-          review.pr = meta
-          review.merge_base = mb
-          track.prepare(session, cb, { fresh = true })
-        end)
-      end, session)
+      if read.pr.state ~= 'OPEN' then
+        detach(session, true, done)
+        return
+      end
+      read.pr.url = info.url
+      save_cache(session, read)
+      attach(session, read, false, done)
     end)
-  end, session)
+  end)
+end
+
+--- Writes re-read once they land.
+function M.refresh(session, cb)
+  M.read(session, cb)
+end
+
+--- Start the layer on a freshly rendered session: the first read, then
+--- reads on `FocusGained`, on entering the tab when the last read is older
+--- than the interval, and every interval while the tab is current.
+function M.start(session)
+  local opts = options()
+  if not M.enabled(session) or session.layer then
+    return
+  end
+  layer(session)
+  local interval = (opts.read_interval or 300) * 1000
+  local function current()
+    return not session.closed and vim.api.nvim_get_current_tabpage() == session.tab
+  end
+  vim.api.nvim_create_autocmd('FocusGained', {
+    group = session.augroup,
+    callback = function()
+      if current() then
+        M.read(session)
+      end
+    end,
+  })
+  if interval > 0 then
+    vim.api.nvim_create_autocmd('TabEnter', {
+      group = session.augroup,
+      callback = function()
+        local l = session.layer
+        if current() and not l.reading and (not l.read_at or vim.uv.now() - l.read_at >= interval) then
+          M.read(session)
+        end
+      end,
+    })
+    local timer = vim.uv.new_timer()
+    session.layer.timer = timer
+    timer:start(interval, interval, vim.schedule_wrap(function()
+      if current() then
+        M.read(session)
+      end
+    end))
+  end
+  M.read(session)
+end
+
+--- Teardown: stop the timer.
+function M.stop(session)
+  local timer = session.layer and session.layer.timer
+  if timer and not timer:is_closing() then
+    timer:stop()
+    timer:close()
+  end
 end
 
 -- ---------------------------------------------------------------------
@@ -633,13 +878,9 @@ local function push_execute(session, plan, cb)
       push_replies(review_id)
       return
     end
-    owner_repo(root, function(owner, name, err)
-      if not owner then
-        table.insert(plan.warnings, tostring(err))
-        push_replies(review_id)
-        return
-      end
-      paginate_threads(owner, name, session.range.pr_number, function(nodes, _, rerr)
+    fetch_session(session, function(read, rerr)
+      local nodes = read and read.nodes
+      do
         if not nodes then
           for _, f in ipairs(pending) do
             table.insert(plan.warnings, f.thread.id .. ": couldn't read the pushed threads: " .. tostring(rerr))
@@ -673,7 +914,7 @@ local function push_execute(session, plan, cb)
           end
         end
         push_replies(review_id)
-      end)
+      end
     end)
   end
 
@@ -759,7 +1000,7 @@ local function push_execute(session, plan, cb)
       -- A big review (35 threads) creates the review and every thread, then
       -- fails resolving the returned review with RESOURCE_LIMITS_EXCEEDED:
       -- check what landed before calling it a failure.
-      owner_repo(root, function(owner, name)
+      do
         local function failed()
           vim.notify('diffy: push failed - ' .. tostring(err), vim.log.levels.ERROR)
           -- the next push must see, and replace, whatever half-landed
@@ -767,12 +1008,8 @@ local function push_execute(session, plan, cb)
             cb(false)
           end)
         end
-        if not owner then
-          failed()
-          return
-        end
-        paginate_threads(owner, name, session.range.pr_number, function(_, meta)
-          local pending = meta and meta.pending
+        fetch_session(session, function(read)
+          local pending = read and read.pr.pending
           local landed = pending and #pending.comments.nodes or 0
           if pending and landed == math.min(#threads_input, 100) then
             created(pending.id)
@@ -780,7 +1017,7 @@ local function push_execute(session, plan, cb)
             failed()
           end
         end)
-      end)
+      end
     end)
   end
 
@@ -878,7 +1115,7 @@ end
 function M.push(session, cb)
   local review = session.review
   if not (review and review.pr) then
-    vim.notify('diffy: nothing to push - open :Diffy pr first', vim.log.levels.WARN)
+    vim.notify('diffy: nothing to push - the branch has no open PR', vim.log.levels.WARN)
     cb(false, {})
     return
   end

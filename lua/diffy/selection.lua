@@ -5,6 +5,7 @@
 -- An entry is one of:
 --   { kind = 'worktree', rev = 'WORKTREE' }
 --   { kind = 'commit', sha, parents, subject, merge, rev = sha }
+--   { kind = 'pr' } / { kind = 'marker', review } (the GitHub layer's rows)
 local M = {}
 
 -- The two sections of a lone working tree selection; file rows carry one of
@@ -48,10 +49,11 @@ function M.resolve(entries, top_idx, bottom_idx)
   }
 end
 
--- merge commits are never selectable as a range endpoint
-local function selectable(entry)
-  return not (entry.kind == 'commit' and entry.merge)
+--- Whether `entry` can be a range endpoint: not a merge, not a layer row.
+function M.selectable(entry)
+  return entry.kind == 'worktree' or (entry.kind == 'commit' and not entry.merge)
 end
+local selectable = M.selectable
 
 --- Index of the first/last selectable entry in `entries`, or nil.
 function M.first_selectable(entries)

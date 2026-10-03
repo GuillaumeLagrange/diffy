@@ -1,7 +1,8 @@
--- The GitHub backend's write side through the UI: push (local validation,
+-- The GitHub layer's write side through the UI: push (local validation,
 -- per-commit routing, tracking to HEAD), pull, reply, resolve/unresolve,
--- submit. Repo: a git bundle of the sandbox's `pending` PR (exact shas).
--- `make test-gh`: the real transport against a fresh PR per case.
+-- submit and its destination. Repo: a git bundle of the sandbox's `pending`
+-- PR (exact shas). `make test-gh`: the real transport against a fresh PR
+-- per case.
 local leak = require('tests.helpers.leak')
 local live = require('tests.helpers.github_live')
 local ui = require('tests.helpers.ui')
@@ -38,9 +39,9 @@ local function setup_pending()
       state.repo_dir = %q
       state.merge_base = %q
       state.viewer = 'GuillaumeLagrange'
-      state.find_pr = { ['sandbox/pending'] = { number = 4, baseRefName = %q, headRefOid = %q } }
+      state.branches = { ['sandbox/pending'] = 4 }
       _G.__fake_state = state
-      require('diffy.review.github').transport = fake.new(state).transport
+      fake.install(state)
     ]]):format(PR4_FIXTURE, dir, MERGE_BASE, BASE, HEAD_SHA))
     return
   end
@@ -96,11 +97,11 @@ local function setup_empty()
         pendingReviews = { nodes = {} },
         reviewThreads = { pageInfo = { hasNextPage = false }, nodes = {} },
       } } } },
-      find_pr = { ['sandbox/pending'] = { number = 4, baseRefName = %q, headRefOid = %q } },
+      branches = { ['sandbox/pending'] = 4 },
     }
     _G.__fake_state = state
-    require('diffy.review.github').transport = fake.new(state).transport
-  ]]):format(dir, MERGE_BASE, BASE, HEAD_SHA, BASE, HEAD_SHA))
+    fake.install(state)
+  ]]):format(dir, MERGE_BASE, BASE, HEAD_SHA))
 end
 
 local T = MiniTest.new_set({
@@ -215,14 +216,16 @@ local function reply_at(win, lnum, body)
   save_composed(body)
 end
 
---- The branch's drafts file's text, or nil when there is none.
+--- Your drafts in the branch's threads.json (not the GitHub cache next to
+--- them), as JSON text, or nil when there is no file.
 local function drafts_text()
   local branch = ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
   local path = ('%s/.git/diffy/%s/threads.json'):format(dir, branch)
   if vim.fn.filereadable(path) == 0 then
     return nil
   end
-  return table.concat(vim.fn.readfile(path), '\n')
+  local data = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
+  return vim.json.encode({ threads = data.threads or {} })
 end
 
 local function drafts_file()
@@ -543,7 +546,7 @@ T['reply, resolve/unresolve and submit'] = function()
   child.cmd('Diffy close')
 end
 
-T['review submit takes a message, then asks comment, approve or request changes; approving needs no drafts'] = function()
+T['review submit asks agent or GitHub, then comment, approve or request changes; approving needs no drafts'] = function()
   setup_empty()
   open_pr()
   MiniTest.expect.equality(child.fn.getcompletion('Diffy review submit ', 'cmdline'), live.enabled and { 'comment' } or { 'comment', 'approve', 'request_changes' })
@@ -552,14 +555,18 @@ T['review submit takes a message, then asks comment, approve or request changes;
   child.cmd('Diffy review submit')
   wait_ready_raw()
   child.type_keys('lgtm', '<Esc>')
+  arm_ready_raw('choose')
+  child.type_keys('<C-s>')
+  wait_ready_raw()
+  MiniTest.expect.equality(vim.list_slice(child.api.nvim_buf_get_lines(0, 0, -1, false), 2), { '  a  agent', '  g  GitHub' })
   local expected
   if live.enabled then
-    -- your own PR: comment is the only event, no prompt
-    child.type_keys('<C-s>')
+    -- your own PR: comment is the only event, no second prompt
+    child.type_keys('g')
     expected = { state = 'COMMENTED', body = 'lgtm' }
   else
     arm_ready_raw('choose')
-    child.type_keys('<C-s>')
+    child.type_keys('g')
     wait_ready_raw()
     local prompt = child.api.nvim_buf_get_lines(0, 0, -1, false)
     MiniTest.expect.equality(vim.list_slice(prompt, 2), { '  c  comment', '  a  approve', '  r  request changes' })
@@ -569,6 +576,9 @@ T['review submit takes a message, then asks comment, approve or request changes;
     arm_ready_raw('choose')
     child.type_keys('<C-s>')
     wait_ready_raw()
+    arm_ready_raw('choose')
+    child.type_keys('g')
+    wait_ready_raw()
     child.type_keys('a')
     expected = { state = 'APPROVED', body = 'lgtm' }
   end
@@ -576,6 +586,32 @@ T['review submit takes a message, then asks comment, approve or request changes;
     return vim.deep_equal(remote_reviews().submitted, { expected })
   end, live.enabled and 1000 or 10), true)
 
+  child.cmd('Diffy close')
+end
+
+T['with a PR, submitting to the agent sends only your drafts, marks them sent and leaves GitHub alone'] = function()
+  setup_pending()
+  open_pr()
+  open_file('f.txt')
+  compose_draft(wins().right, 30, 'for the agent')
+  local remote = remote_reviews()
+
+  arm_ready_raw('compose')
+  child.cmd('Diffy review submit')
+  wait_ready_raw()
+  arm_ready_raw('choose')
+  child.type_keys('<C-s>')
+  wait_ready_raw()
+  arm_ready_raw('review')
+  child.type_keys('a')
+  wait_ready_raw()
+
+  local md = table.concat(vim.fn.readfile(dir .. '/.git/diffy/' .. ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' }) .. '/review.md'), '\n')
+  MiniTest.expect.equality(md:find('for the agent', 1, true) ~= nil, true)
+  -- D1 is published, E1 in your pending review: GitHub's, not the agent's
+  MiniTest.expect.equality({ md:find('D1 published', 1, true), md:find('E1 pending', 1, true) }, {})
+  MiniTest.expect.equality(drafts_file().threads[1].comments[1].state, 'sent')
+  MiniTest.expect.equality(remote_reviews(), remote)
   child.cmd('Diffy close')
 end
 

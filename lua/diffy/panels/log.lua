@@ -48,7 +48,7 @@ local function commit_entries(root, args, cb, session)
 end
 
 local function worktree_prefix(spec)
-  if spec.kind == 'range' or spec.kind == 'file' or spec.kind == 'pr' then
+  if spec.kind == 'range' or spec.kind == 'file' then
     return {}
   end
   return { { kind = 'worktree', label = 'Working tree', rev = 'WORKTREE' } }
@@ -145,12 +145,7 @@ function M.build_entries(root, spec, cb, session)
         return
       end
       merge_base_entries(root, base, prefix, cb, session)
-    end, session)
-  elseif spec.kind == 'pr' then
-    -- `spec.base` is already the PR's resolved base (`repo.base_ref` of its
-    -- `baseRefName`), and there is no working tree entry (readiness
-    -- guarantees a clean tree at the PR head).
-    merge_base_entries(root, spec.base, prefix, cb, session)
+    end, session, spec.pr_base)
   elseif spec.kind == 'file' then
     commit_entries(root, file_log_args(spec.path), function(commits, err)
       if not commits then
@@ -183,7 +178,8 @@ function M.default_selection(entries, spec)
     return nil
   end
   if spec.kind == 'default' then
-    return { top = 1, bottom = 1 }
+    local top = selection.first_selectable(entries)
+    return top and { top = top, bottom = top } or nil
   end
   if spec.kind == 'file' then
     local top = selection.first_selectable(entries)
@@ -209,7 +205,15 @@ local MARK = '▌'
 --- One log row fitted to `width` cells: `text` plus highlight spans.
 local function entry_line(entry, selected, width)
   local head = (selected and MARK or ' ') .. ' '
-  if entry.kind ~= 'commit' then
+  if entry.kind == 'pr' then
+    -- the title gives way: the status after it matters more
+    local title = hl.truncate(entry.title, math.max(1, width - 2 - #entry.number - 1 - vim.fn.strdisplaywidth(entry.status)))
+    local text = '  ' .. entry.number .. ' ' .. title .. entry.status
+    return text, { { 2, 2 + #entry.number, 'DiffySha' }, { 3 + #entry.number, #text, 'DiffyLabel' } }
+  elseif entry.kind == 'marker' then
+    local text = '  ' .. hl.truncate(entry.label, width - 2)
+    return text, { { 2, #text, 'DiffyThreadTime' } }
+  elseif entry.kind ~= 'commit' then
     local label = entry.label
     local text = head .. hl.truncate(label, width - 2)
     return text, { { #head, #text, 'DiffyLabel' } }
@@ -230,6 +234,93 @@ local function is_merge(entry)
   return entry.kind == 'commit' and entry.merge
 end
 
+local skipped = function(entry)
+  return not selection.selectable(entry)
+end
+
+local STATE_ICON = { APPROVED = '✓', CHANGES_REQUESTED = '✗', COMMENTED = '○', DISMISSED = '–' }
+M.STATE_ICON = STATE_ICON
+
+--- `entries` (the log as git lists it) with the GitHub layer's rows when
+--- it's attached: the PR row first, a marker above each commit a submitted
+--- review was written on.
+function M.with_layer(session, entries)
+  local l = session.layer
+  if not (l and l.attached) then
+    return entries
+  end
+  local pr = l.cache.pr
+  local out = { base = entries.base, follow_pathspec = entries.follow_pathspec }
+  local status = {}
+  if l.standing then
+    table.insert(status, ' · ' .. l.standing)
+  end
+  if l.offline then
+    table.insert(status, ' · offline')
+  end
+  table.insert(out, { kind = 'pr', number = '#' .. pr.number, title = pr.title or '', status = table.concat(status) })
+  local per_review = {}
+  for _, n in ipairs(l.cache.nodes or {}) do
+    local first = n.comments.nodes[1]
+    local id = first and first.pullRequestReview and first.pullRequestReview.id
+    if id then
+      per_review[id] = (per_review[id] or 0) + 1
+    end
+  end
+  local by_commit = {}
+  for _, rv in ipairs(pr.reviews or {}) do
+    if rv.commit and rv.state ~= 'PENDING' then
+      by_commit[rv.commit] = by_commit[rv.commit] or {}
+      table.insert(by_commit[rv.commit], rv)
+    end
+  end
+  for _, e in ipairs(entries) do
+    for _, rv in ipairs(e.kind == 'commit' and by_commit[e.sha] or {}) do
+      local n = per_review[rv.id] or 0
+      local label = ('── %s %s'):format(rv.author or 'unknown', STATE_ICON[rv.state] or '○')
+      if n > 0 then
+        label = label .. (' %d thread%s'):format(n, n == 1 and '' or 's')
+      end
+      table.insert(out, { kind = 'marker', review = rv, label = label })
+    end
+    table.insert(out, e)
+  end
+  return out
+end
+
+--- Redo the layer's rows after it attached, re-read or detached, keeping
+--- the selection on the same entries.
+function M.apply_layer(session)
+  local old = session.entries
+  if not old then
+    return
+  end
+  local plain = { base = old.base, follow_pathspec = old.follow_pathspec }
+  for _, e in ipairs(old) do
+    if e.kind ~= 'pr' and e.kind ~= 'marker' then
+      table.insert(plain, e)
+    end
+  end
+  local new = M.with_layer(session, plain)
+  local sel = session.sel
+  if sel then
+    local top, bottom = old[sel.top], old[sel.bottom]
+    for i, e in ipairs(new) do
+      if e == top then
+        sel.top = i
+      end
+      if e == bottom then
+        sel.bottom = i
+      end
+    end
+  end
+  session.entries = new
+  if sel then
+    session.pair = selection.resolve(new, sel.top, sel.bottom)
+  end
+  M.render(session)
+end
+
 --- (Re)render the full entry list: merges dimmed, the active
 --- contiguous selection marked. Call after entries/selection change.
 function M.render(session)
@@ -238,7 +329,8 @@ function M.render(session)
   session.log_width = width
   local sel = session.sel
   local function selected(i)
-    return sel ~= nil and i >= sel.top and i <= sel.bottom
+    local kind = sel and session.entries[i].kind
+    return sel ~= nil and i >= sel.top and i <= sel.bottom and kind ~= 'pr' and kind ~= 'marker'
   end
   local lines, all_spans = {}, {}
   for i, e in ipairs(session.entries) do
@@ -265,10 +357,10 @@ end
 
 local function clamp_range(entries, top, bottom)
   top, bottom = math.max(1, top), math.min(#entries, bottom)
-  while top <= bottom and is_merge(entries[top]) do
+  while top <= bottom and skipped(entries[top]) do
     top = top + 1
   end
-  while bottom >= top and is_merge(entries[bottom]) do
+  while bottom >= top and skipped(entries[bottom]) do
     bottom = bottom - 1
   end
   return top, bottom
@@ -284,9 +376,18 @@ local function select_clamped(session, top, bottom)
   session.on_select(session)
 end
 
---- <CR> in normal mode: select the single entry under the cursor.
+--- <CR> in normal mode: select the single entry under the cursor; on a
+--- review marker, everything above it (what changed since that review).
 function M.select_line(session)
   local lnum = vim.api.nvim_win_get_cursor(session.wins.log)[1]
+  local e = session.entries[lnum]
+  if e and e.kind == 'marker' then
+    local top = selection.first_selectable(session.entries)
+    if top then
+      select_clamped(session, top, lnum - 1)
+    end
+    return
+  end
   select_clamped(session, lnum, lnum)
 end
 
@@ -330,7 +431,7 @@ function M.move_selection(session, delta)
   local i = delta > 0 and sel.bottom or sel.top
   for _ = 1, math.abs(delta) do
     i = i + step
-    while i >= 1 and i <= #session.entries and is_merge(session.entries[i]) do
+    while i >= 1 and i <= #session.entries and skipped(session.entries[i]) do
       i = i + step
     end
     if i < 1 or i > #session.entries then

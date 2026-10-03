@@ -22,8 +22,9 @@ end
 
 --- A fresh clone of the sandbox's `base/<name>` and `sandbox/<name>` history
 --- from git bundle `bundle` (exact shas, offline) with `sandbox/<name>`
---- checked out. `origin` is never fetched from: only its URL is parsed, for
---- `owner/repo` (live mode pushes to it).
+--- checked out, and `origin/HEAD` at `base/<name>` (what `:Diffy branch`
+--- diffs against before the layer answers). `origin` is never fetched from:
+--- live mode pushes to it.
 function M.clone_sandbox(bundle, name)
   local d = vim.fn.tempname()
   vim.fn.mkdir(d, 'p')
@@ -42,6 +43,8 @@ function M.clone_sandbox(bundle, name)
     ('refs/remotes/origin/sandbox/%s:refs/heads/sandbox/%s'):format(name, name),
   })
   git({ 'checkout', '-q', 'sandbox/' .. name })
+  git({ 'update-ref', 'refs/remotes/origin/base/' .. name, 'base/' .. name })
+  git({ 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/base/' .. name })
   return d
 end
 
@@ -49,8 +52,8 @@ local counter = 0
 
 --- Push `base_sha`/`head_sha` of repo `dir` to fresh uniquely-named
 --- branches, open a PR, and check out the head branch locally (also creating
---- the base branch locally, as `:Diffy pr` resolves `baseRefName` locally).
---- Returns `{ number, id, base, head }`; always pair with `M.close`.
+--- the base branch locally). Returns `{ number, id, base, head }`; always
+--- pair with `M.close`.
 function M.open_pr(dir, base_sha, head_sha)
   counter = counter + 1
   local tag = ('%d-%d-%d'):format(os.time(), vim.fn.getpid(), counter)
@@ -113,27 +116,39 @@ function M.position(dir, merge_base, commit, path, line)
   error(('line %d not in the diff of %s'):format(line, path))
 end
 
---- PR-view actions on `child`, waiting up to `M.timeout`.
+--- Session actions on `child`, waiting up to `M.timeout`.
 function M.bind(child)
   local ui = require('tests.helpers.ui')
   local b = {}
   function b.wins()
     return ui.wins(child)
   end
+  --- `:Diffy branch`, waiting for the GitHub layer's first read.
   function b.open_pr()
-    ui.arm_ready(child, 'render')
-    child.cmd('Diffy pr')
+    ui.arm_ready(child, 'pr')
+    child.cmd('Diffy branch')
     ui.wait_ready(child, M.timeout)
   end
   function b.open_file(path)
     ui.open_tree_row(child, path, '<CR>', 'review', M.timeout)
   end
-  --- Select log entry `idx` (1-based, newest first) as a single commit.
+  --- Select the `idx`-th commit of the log (1-based, newest first), skipping
+  --- the working tree and the GitHub layer's rows.
   function b.select_commit(idx)
     local w = ui.wins(child)
+    local row, n = nil, 0
+    for i, l in ipairs(child.api.nvim_buf_get_lines(child.api.nvim_win_get_buf(w.log), 0, -1, false)) do
+      if l:match('^%S*%s+%x%x%x%x%x%x%x ') or l:match('^%x%x%x%x%x%x%x ') then
+        n = n + 1
+        if n == idx then
+          row = i
+        end
+      end
+    end
+    assert(row, 'no commit row ' .. idx)
     child.api.nvim_set_current_win(w.log)
     ui.arm_ready(child, 'select')
-    child.fn.win_execute(w.log, ('call cursor(%d, 1)'):format(idx))
+    child.fn.win_execute(w.log, ('call cursor(%d, 1)'):format(row))
     child.type_keys('<CR>')
     ui.wait_ready(child, M.timeout)
   end

@@ -488,6 +488,9 @@ function M.teardown(session, opts)
   if package.loaded['diffy.review.drafts'] then
     require('diffy.review.drafts').detach(session)
   end
+  if package.loaded['diffy.review.github'] then
+    require('diffy.review.github').stop(session)
+  end
   -- images are drawn on the terminal, outside any window
   if package.loaded['diffy.avatar'] then
     require('diffy.avatar').clear(session.id)

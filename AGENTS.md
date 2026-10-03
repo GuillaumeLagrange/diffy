@@ -29,6 +29,8 @@ lua/diffy/
   git/parse.lua         pure parsers for git's -z formats (log, name-status, raw, numstat, status v2, ls-files -u)
   git/repo.lua          root, merge-base, base resolution, status, default range, diff args
   selection.lua         log selection -> (left rev, right rev); the real-file rule
+  panels/stack.lua      the tree and the log sharing one column window/buffer: row ranges, rule, gap, peek
+                        floats over the edges, per-row key dispatch, `]]`/`[[`
   panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), the GitHub layer's
                         PR row and review markers, selection keys
   panels/commitmsg.lua  float beside the column while the log cursor rests on a commit (its message) or the PR row
@@ -74,7 +76,10 @@ Conventions the code relies on:
   (render, height, keys, preview, …) and renders at its window's width, asking `layout.host` how much to
   show. Column windows end the session when closed; floats are registered `transient` and only closed by
   teardown. The tree and log buffers exist even when not shown: the diff navigation and the conflict list
-  draw into them.
+  draw into them. Next to each other in the column, the tree and the log are one buffer and one window
+  (`panels/stack.lua`, `session.bufs.tree == session.bufs.log`): a view reads and writes its rows only through
+  `stack.set_lines`/`cursor`/`set_cursor`/`lnum` (its own 1-based rows, whichever buffer it's in), maps keys
+  through `stack.map`, and clears only its own namespaces.
 - **Async.** All git/gh calls go through `git/run.lua` with `opts.session` (callbacks no-op once the session
   is closed) and, for renders, `opts.gen` (`session.gen` is bumped by every tree render, so a stale render
   from an earlier selection is dropped). Chained calls start the next link from the previous callback, so

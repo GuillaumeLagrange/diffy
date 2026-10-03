@@ -341,16 +341,21 @@ function M.apply_layer(session)
   require('diffy.layout').fit_column(session)
 end
 
+--- Whether entry `i` is drawn as selected (the PR row and review markers
+--- never are).
+local function is_selected(session, i)
+  local sel, e = session.sel, (session.entries or {})[i]
+  return sel ~= nil and e ~= nil and i >= sel.top and i <= sel.bottom and e.kind ~= 'pr' and e.kind ~= 'marker'
+end
+
 --- (Re)render the full entry list: merges dimmed, the active
 --- contiguous selection marked. Call after entries/selection change.
 function M.render(session)
   local buf = session.bufs.log
   local width = log_width(session)
   session.log_width = width
-  local sel = session.sel
   local function selected(i)
-    local kind = sel and session.entries[i].kind
-    return sel ~= nil and i >= sel.top and i <= sel.bottom and kind ~= 'pr' and kind ~= 'marker'
+    return is_selected(session, i)
   end
   local lines, all_spans = {}, {}
   for i, e in ipairs(session.entries) do
@@ -359,21 +364,21 @@ function M.render(session)
     end
     lines[i], all_spans[i] = entry_line(e, selected(i), width)
   end
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
+  local stack = require('diffy.panels.stack')
+  stack.set_lines(session, 'log', lines)
 
   local ns = session.ns.log_render
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  local off = stack.offset(session, 'log')
   for i, e in ipairs(session.entries) do
     if is_merge(e) then
-      vim.api.nvim_buf_set_extmark(buf, ns, i - 1, 0, { line_hl_group = 'DiffyMerge' })
+      vim.api.nvim_buf_set_extmark(buf, ns, off + i - 1, 0, { line_hl_group = 'DiffyMerge' })
     end
     if selected(i) then
-      vim.api.nvim_buf_set_extmark(buf, ns, i - 1, 0, { line_hl_group = 'DiffySelection' })
+      vim.api.nvim_buf_set_extmark(buf, ns, off + i - 1, 0, { line_hl_group = 'DiffySelection' })
     end
     for _, sp in ipairs(all_spans[i]) do
-      vim.api.nvim_buf_set_extmark(buf, ns, i - 1, sp[1], { end_col = sp[2], hl_group = sp[3] })
+      vim.api.nvim_buf_set_extmark(buf, ns, off + i - 1, sp[1], { end_col = sp[2], hl_group = sp[3] })
     end
   end
 end
@@ -416,7 +421,10 @@ end
 --- review marker, everything above it (what changed since that review); on
 --- the PR row, the whole PR.
 function M.select_line(session)
-  local lnum = vim.api.nvim_win_get_cursor(session.wins.log)[1]
+  local lnum = require('diffy.panels.stack').cursor(session, 'log')
+  if not lnum then
+    return
+  end
   local e = session.entries[lnum]
   if e and e.kind == 'pr' then
     if session.range.kind == 'default' then
@@ -436,12 +444,19 @@ function M.select_line(session)
   select_clamped(session, lnum, lnum)
 end
 
---- `<CR>` in visual/visual-line mode: select the marked line range.
+--- `<CR>` in visual/visual-line mode: select the marked line range (the
+--- part of it on the log's rows).
 function M.select_visual(session)
   vim.cmd('normal! \27') -- <Esc>, leave visual mode so the marks settle
+  local stack = require('diffy.panels.stack')
   local a = vim.api.nvim_buf_get_mark(session.bufs.log, '<')[1]
   local b = vim.api.nvim_buf_get_mark(session.bufs.log, '>')[1]
-  select_clamped(session, math.min(a, b), math.max(a, b))
+  local first, last = math.min(a, b), math.max(a, b)
+  local off = stack.offset(session, 'log')
+  local top, bottom = math.max(first - off, 1), math.min(last - off, #(session.entries or {}))
+  if top <= bottom then
+    select_clamped(session, top, bottom)
+  end
 end
 
 --- `a`: select every selectable entry (first..last non-merge endpoint).
@@ -504,7 +519,9 @@ function M.setup(session)
   })
 
   local buf = session.bufs.log
-  local map = require('diffy.session').map
+  local function map(s, modes, lhs, rhs, opts)
+    require('diffy.panels.stack').map(s, 'log', modes, lhs, rhs, opts)
+  end
   map(session, 'n', '<CR>', function()
     M.select_line(session)
   end, { buffer = buf, desc = 'select entry' })
@@ -551,6 +568,20 @@ M.view = {
     -- checkout mode shows its marker in the log's winbar, one row of the height
     local winbar = session.checkout and 1 or 0
     return math.max(1, math.min(#session.entries, math.floor(room * 0.4))) + winbar
+  end,
+  -- in the shared column window (panels/stack.lua): the selection is
+  -- pinned over the edge it went past
+  peek = {
+    noun = 'commit',
+    counts = function(session, rel)
+      local e = (session.entries or {})[rel]
+      return e ~= nil and e.kind == 'commit'
+    end,
+    pinned = is_selected,
+  },
+  --- `]]`: the newest selected entry
+  anchor = function(session)
+    return session.sel and session.sel.top or 1
   end,
 }
 

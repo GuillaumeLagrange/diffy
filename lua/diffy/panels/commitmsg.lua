@@ -24,7 +24,7 @@ local function cursor_row(session)
   if not valid(win) or vim.api.nvim_get_current_win() ~= win then
     return nil
   end
-  return vim.api.nvim_win_get_cursor(win)[1]
+  return require('diffy.panels.stack').cursor(session, 'log')
 end
 
 local function commit_at(session, row)
@@ -369,7 +369,7 @@ function M.setup(session)
       end
     end,
   })
-  session_mod.map(session, 'n', '<Esc>', function()
+  require('diffy.panels.stack').map(session, 'log', 'n', '<Esc>', function()
     local st = state(session)
     local shown = valid(session.wins.commitmsg)
     st.suppressed = cursor_row(session)

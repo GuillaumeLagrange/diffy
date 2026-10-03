@@ -4,8 +4,8 @@ A diff viewer for Neovim built on git and fugitive, with a review layer: comment
 hand the comments to an LLM agent or submit them as a GitHub pull request review.
 
 Each `:Diffy` session lives in its own tab: a column of views on the left (changed files on top, commits
-below; `column` in `setup` picks which) and a side-by-side diff in native diff mode. A view that isn't in
-the column (the review threads, by default) opens in a float over the diff. Closing the tab in any way
+at the bottom, in one window; `column` in `setup` picks which) and a side-by-side diff in native diff mode.
+A view that isn't in the column (the review threads, by default) opens in a float over the diff. Closing the tab in any way
 (`:tabclose`, `:q` in a diffy window, `:Diffy close`, quitting nvim) cleans everything up. `<C-w>o` (`:only`)
 in a diff window ends the session too, but keeps that window: a plain one showing its file, out of diff mode,
 with diffy's winbar and keys gone. `:tab split` of a diff window opens such a plain window, and the file's diffy
@@ -28,7 +28,8 @@ Put this repository on the runtimepath, e.g. `vim.opt.rtp:prepend('/path/to/diff
 require('diffy').setup({
   panel_width = 40,               -- width of the left column
   -- views stacked in the left column, top to bottom: 'tree' (files), 'log' (commits),
-  -- 'threads' (review threads, compact). The others open in a float.
+  -- 'threads' (review threads, compact). The tree and the log share one window when next to
+  -- each other (see The panels). The others open in a float.
   column = { 'tree', 'log' },
   keymaps = {
     toggle_panel = '<leader>e',   -- in every diffy window: hide the panel column, or show it and go to the file tree
@@ -88,6 +89,20 @@ vim.api.nvim_create_autocmd('User', {
 ```
 
 ## The panels
+
+The files and the commits share the column's window: the files from the top, then a `── Commits ──` rule
+and the commits at the bottom, blank rows between them while both fit. Once they don't, the window
+scrolls as a whole, and what's past its edges shows over them: `↑ 12 files, 3 commits` / `↓ 31 commits`,
+or, when none of the selected commits is in view, the rule and the selected rows pinned over the edge they
+went past (`… n more selected` beyond two). Each part keeps its keys: `<CR>` on a file opens it, on a
+commit selects it. A key only one part has works from the other too, so `J`/`K` and `a` select commits
+from the files. With `column = { 'tree', 'threads', 'log' }` (or anything else between them), each gets
+its own window again, and either one left out of `column` opens in a float.
+
+| Key (in the column) | |
+|---|---|
+| `]]` | from the files, to the newest selected commit |
+| `[[` | from the commits, to the file shown in the diff |
 
 **Commits** (bottom). The diff always shows one contiguous selection: left is the parent of the oldest
 selected entry, right is the newest one. `Working tree` means HEAD → worktree, index included; selected

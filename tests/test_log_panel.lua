@@ -1,5 +1,4 @@
--- The log for `:Diffy branch`, merge
--- dimming/navigation-skip, and the log's fixed full-list height.
+-- The log for `:Diffy branch`, merge dimming/navigation-skip.
 local Repo = require('tests.helpers.repo')
 local leak = require('tests.helpers.leak')
 local ui = require('tests.helpers.ui')
@@ -71,8 +70,7 @@ end
 T[']f/[f in the log move through the files instead of gf on the sha under the cursor'] = function()
   open_branch()
   local w = ui.wins(child)
-  child.api.nvim_set_current_win(w.log)
-  child.fn.win_execute(w.log, 'call cursor(3, 1)')
+  ui.cursor_to(child, 'log', 3)
   child.v.errmsg = ''
   -- unmapped, ]f is nvim's gf on the short sha: E447
   child.type_keys(']f', '[f')
@@ -135,46 +133,6 @@ T[']r/[r in the file tree move the commit selection instead of nvim\'s spell mot
   child.type_keys('[r')
   ui.wait_ready(child)
   MiniTest.expect.equality(selected(), { 'Rename' })
-  child.cmd('Diffy close')
-end
-
-T['the log always lists every entry, sized min(#entries, 40% of the column), focused or not'] = function()
-  child.o.lines = 40
-  open_branch()
-  local w = ui.wins(child)
-  local function heights()
-    return child.lua_get(('{ vim.api.nvim_win_get_height(%d), vim.api.nvim_win_get_height(%d) }'):format(w.tree, w.log))
-  end
-  local h = heights()
-  MiniTest.expect.equality(h[2], math.min(#all_entries, math.floor((h[1] + h[2]) * 0.4)))
-  MiniTest.expect.equality(subjects(), all_entries)
-
-  child.api.nvim_set_current_win(w.tree)
-  child.type_keys('<C-w>j')
-  child.type_keys('<C-w>k')
-  MiniTest.expect.equality(heights(), h)
-  MiniTest.expect.equality(subjects(), all_entries)
-
-  child.cmd('Diffy close')
-end
-
-T['a full-width split opened under the tab and closed again, like a toggled terminal, leaves the log its height'] = function()
-  child.o.lines = 40
-  open_branch()
-  local w = ui.wins(child)
-  local function heights()
-    return child.lua_get(('{ vim.api.nvim_win_get_height(%d), vim.api.nvim_win_get_height(%d) }'):format(w.tree, w.log))
-  end
-  local h = heights()
-
-  child.lua([[
-    local buf = vim.api.nvim_create_buf(false, true)
-    local win = vim.api.nvim_open_win(buf, true, { split = 'below', win = -1, height = 15 })
-    vim.api.nvim_win_close(win, true)
-    vim.api.nvim_buf_delete(buf, { force = true })
-  ]])
-  MiniTest.expect.equality(heights(), h)
-
   child.cmd('Diffy close')
 end
 

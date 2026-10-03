@@ -135,9 +135,8 @@ function M.bind(child)
   --- Select the `idx`-th commit of the log (1-based, newest first), skipping
   --- the working tree and the GitHub layer's rows.
   function b.select_commit(idx)
-    local w = ui.wins(child)
     local row, n = nil, 0
-    for i, l in ipairs(child.api.nvim_buf_get_lines(child.api.nvim_win_get_buf(w.log), 0, -1, false)) do
+    for i, l in ipairs(ui.layout(child).log) do
       if l:match('^%S*%s+%x%x%x%x%x%x%x ') or l:match('^%x%x%x%x%x%x%x ') then
         n = n + 1
         if n == idx then
@@ -146,9 +145,8 @@ function M.bind(child)
       end
     end
     assert(row, 'no commit row ' .. idx)
-    child.api.nvim_set_current_win(w.log)
+    ui.cursor_to(child, 'log', row)
     ui.arm_ready(child, 'select')
-    child.fn.win_execute(w.log, ('call cursor(%d, 1)'):format(row))
     child.type_keys('<CR>')
     ui.wait_ready(child, M.timeout)
   end

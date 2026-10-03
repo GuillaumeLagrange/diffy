@@ -48,7 +48,7 @@ T[':Diffy opens a session tab with the layout skeleton'] = function()
     { tree = l.tree ~= vim.NIL, log = l.log ~= vim.NIL, left = l.left ~= vim.NIL, right = l.right ~= vim.NIL },
     { tree = true, log = true, left = true, right = true }
   )
-  MiniTest.expect.equality(#l.bars, 4)
+  MiniTest.expect.equality(#l.bars, 3)
 end
 
 T['closing the tab with :tabclose leaves no diffy state'] = function()

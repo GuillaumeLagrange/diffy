@@ -1,4 +1,5 @@
--- Panel column toggle and single-line, width-fitted tree rows.
+-- Panel column toggle, single-line, width-fitted tree rows, and the files and
+-- commits sharing the column window.
 local Repo = require('tests.helpers.repo')
 local leak = require('tests.helpers.leak')
 local ui = require('tests.helpers.ui')
@@ -271,6 +272,136 @@ T['resting the tree cursor on a cut row shows it whole over the row, gone on an 
     { before }
   )
   MiniTest.expect.equality(floats(before), {})
+  child.cmd('Diffy close')
+end
+
+--- A feature branch off `main` changing `files` files in its first commit,
+--- then one file in each of `extra` more commits.
+local function branch_repo(files, extra)
+  local base, change = {}, {}
+  for i = 1, files do
+    local name = ('f%02d.txt'):format(i)
+    base[name] = Repo.lines(3, name)
+    change[name] = Repo.edit(2, 'changed')
+  end
+  local r = Repo.new():commit('base', base):branch('feat'):commit('c1', change)
+  for i = 2, extra + 1 do
+    r:commit('c' .. i, { ['f01.txt'] = Repo.edit(1, 'c' .. i) })
+  end
+  child.fn.chdir(r.dir)
+  return r
+end
+
+local function open_branch()
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch main')
+  ui.wait_ready(child)
+end
+
+--- Text rows of the floats laid over the column window's edges, by side,
+--- once they settle into `want` (waits up to 1 s, then returns what's there).
+local function peeks(want)
+  return child.lua(
+    [[
+    local win, want = ...
+    local function read()
+      local out = { above = vim.NIL, below = vim.NIL }
+      local height = vim.fn.getwininfo(win)[1].height
+      for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        local c = vim.api.nvim_win_get_config(w)
+        if c.relative == 'win' and c.win == win and not c.focusable then
+          local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(w), 0, -1, false)
+          out[c.row == 0 and 'above' or 'below'] = lines
+          if c.row ~= 0 then
+            assert(c.row + #lines == height, 'the bottom float ends on the last row')
+          end
+        end
+      end
+      return out
+    end
+    vim.wait(1000, function() return vim.deep_equal(read(), want) end, 10)
+    return read()
+  ]],
+    { ui.wins(child).tree, want or vim.NIL }
+  )
+end
+
+--- Screen rows of the column window's first and last text rows, and of the
+--- tree's first row and the log's last.
+local function rows()
+  local w = ui.wins(child)
+  local l = ui.layout(child)
+  return child.lua(
+    [[
+    local win, tree_first, log_last = ...
+    local info = vim.fn.getwininfo(win)[1]
+    return {
+      top = info.winrow,
+      bottom = info.winrow + info.height - 1,
+      tree_first = vim.fn.screenpos(win, tree_first, 1).row,
+      log_last = vim.fn.screenpos(win, log_last, 1).row,
+    }
+  ]],
+    { w.tree, ui.lnum(child, 'tree', 1), ui.lnum(child, 'log', #l.log) }
+  )
+end
+
+T['the files start at the top of the column and the commits end at its bottom while both fit'] = function()
+  repo = branch_repo(3, 1)
+  open_branch()
+  local r = rows()
+  MiniTest.expect.equality({ r.tree_first, r.log_last }, { r.top, r.bottom })
+  MiniTest.expect.equality(peeks({ above = vim.NIL, below = vim.NIL }), { above = vim.NIL, below = vim.NIL })
+
+  -- a selection with fewer files: the commits stay where they are
+  ui.select_log_row(child, 'c2')
+  MiniTest.expect.equality(#ui.layout(child).tree, 1)
+  r = rows()
+  MiniTest.expect.equality({ r.tree_first, r.log_last }, { r.top, r.bottom })
+  child.cmd('Diffy close')
+end
+
+T['past the column\'s edge, the selected commits are pinned over it; with them in view, counts say what is off screen'] = function()
+  repo = branch_repo(30, 4)
+  open_branch()
+  local w = ui.wins(child)
+  -- everything is selected, below the files: pinned with the rule above it
+  local rule_lnum = ui.lnum(child, 'log', 0)
+  local rule = child.api.nvim_buf_get_lines(child.api.nvim_win_get_buf(w.tree), rule_lnum - 1, rule_lnum, false)[1]
+  local want = {
+    above = vim.NIL,
+    below = { rule, '▌ Working tree', '▌ ' .. repo.sha.c5:sub(1, 7) .. ' c5', '  … 4 more selected' },
+  }
+  MiniTest.expect.equality(peeks(want), want)
+
+  -- at the bottom the selection is in view: only the files above are
+  -- counted, the one under the float included
+  child.api.nvim_set_current_win(w.tree)
+  child.type_keys('G')
+  local hidden = child.lua_get(('vim.fn.line("w0", %d)'):format(w.tree))
+  want = { above = { ('↑ %d files'):format(hidden) }, below = vim.NIL }
+  MiniTest.expect.equality(peeks(want), want)
+  child.cmd('Diffy close')
+end
+
+T[']] goes from the files to the selected commit, [[ back to the file shown; J selects the next commit from a file row'] = function()
+  repo = branch_repo(3, 2)
+  open_branch()
+  ui.select_log_row(child, 'c2')
+  local w = ui.wins(child)
+  ui.cursor_to(child, 'tree', 1)
+  child.type_keys(']]')
+  local log_cursor = ui.layout(child).log[child.api.nvim_win_get_cursor(w.log)[1] - ui.lnum(child, 'log', 0)]
+  MiniTest.expect.equality(ui.log_subjects(child, { log_cursor }), { 'c2' })
+
+  child.type_keys('[[')
+  local tree_row = ui.panel(child, 'tree')[child.api.nvim_win_get_cursor(w.tree)[1] - ui.lnum(child, 'tree', 0)]
+  MiniTest.expect.equality(tree_row.hl.DiffyCurrentFile, true)
+
+  ui.arm_ready(child, 'select')
+  child.type_keys('J')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(ui.log_subjects(child, ui.rows_with(child, 'log', 'DiffySelection')), { 'c1' })
   child.cmd('Diffy close')
 end
 

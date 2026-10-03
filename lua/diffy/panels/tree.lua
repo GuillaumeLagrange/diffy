@@ -6,13 +6,15 @@
 -- its section's pair.
 --
 -- `session.tree_all` holds every row; `session.tree_rows` the ones drawn,
--- indexed by buffer line (rows under a collapsed header are left out).
+-- indexed by the tree's own row (`panels/stack.lua`; rows under a collapsed
+-- header are left out).
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
 local selection = require('diffy.selection')
 local hl = require('diffy.highlight')
 local viewed = require('diffy.viewed')
+local stack = require('diffy.panels.stack')
 
 local M = {}
 
@@ -455,9 +457,12 @@ local function row_paths(row)
   return { e.path }
 end
 
---- The row under the tree cursor and its line number.
+--- The row under the tree cursor and its row number (nil off the tree's rows).
 local function cursor_row(session)
-  local lnum = vim.api.nvim_win_get_cursor(session.wins.tree)[1]
+  local lnum = stack.cursor(session, 'tree')
+  if not lnum then
+    return nil
+  end
   return (session.tree_rows or {})[lnum], lnum
 end
 
@@ -666,9 +671,7 @@ function M.open_row(session, row, opts)
 end
 
 local function set_tree_cursor(session, lnum)
-  if vim.api.nvim_win_is_valid(session.wins.tree) then
-    pcall(vim.api.nvim_win_set_cursor, session.wins.tree, { lnum, 0 })
-  end
+  stack.set_cursor(session, 'tree', lnum)
 end
 
 --- Whether `path` is one of the files of the current selection.
@@ -752,8 +755,9 @@ function M.mark_current(session)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for i, row in ipairs(session.tree_rows or {}) do
     if is_current(session, row) and row.name_col then
-      vim.api.nvim_buf_set_extmark(buf, ns, i - 1, 0, { line_hl_group = 'DiffyCurrentFile' })
-      vim.api.nvim_buf_set_extmark(buf, ns, i - 1, row.name_col[1], {
+      local line = stack.lnum(session, 'tree', i) - 1
+      vim.api.nvim_buf_set_extmark(buf, ns, line, 0, { line_hl_group = 'DiffyCurrentFile' })
+      vim.api.nvim_buf_set_extmark(buf, ns, line, row.name_col[1], {
         end_col = row.name_col[2],
         hl_group = 'DiffyCurrentFileName',
       })
@@ -773,11 +777,11 @@ local function hover(session)
   local win = session.wins.tree
   local row, lnum
   if win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_get_current_win() == win then
-    lnum = vim.api.nvim_win_get_cursor(win)[1]
-    row = (session.tree_rows or {})[lnum]
+    lnum = stack.cursor(session, 'tree')
+    row = lnum and (session.tree_rows or {})[lnum]
   end
   local full = row and row.full
-  local pos = full and vim.fn.screenpos(win, lnum, 1)
+  local pos = full and vim.fn.screenpos(win, stack.lnum(session, 'tree', lnum), 1)
   local fwin = session.wins.tree_hover
   if not (pos and pos.row > 0) then
     session_mod.unregister_window(session, 'tree_hover')
@@ -873,15 +877,14 @@ function M.redraw(session)
   if #lines == 0 then
     lines = { '(no changes)' }
   end
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
+  stack.set_lines(session, 'tree', lines)
   local ns = require('diffy.session').namespace(session, 'tree_render')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  local off = stack.offset(session, 'tree')
   for i, spans in ipairs(all_spans) do
     for _, sp in ipairs(spans) do
       if sp[2] > sp[1] then
-        vim.api.nvim_buf_set_extmark(buf, ns, i - 1, sp[1], { end_col = sp[2], hl_group = sp[3] })
+        vim.api.nvim_buf_set_extmark(buf, ns, off + i - 1, sp[1], { end_col = sp[2], hl_group = sp[3] })
       end
     end
   end
@@ -1244,7 +1247,9 @@ function M.open_real_file(session)
 end
 
 function M.setup(session)
-  local map = require('diffy.session').map
+  local function map(s, modes, lhs, rhs, opts)
+    stack.map(s, 'tree', modes, lhs, rhs, opts)
+  end
   local buf = session.bufs.tree
   map(session, 'n', '<CR>', function()
     M.select_at_cursor(session, { focus = true })
@@ -1334,6 +1339,25 @@ M.view = {
     if session.tree_all then
       M.redraw(session)
     end
+  end,
+  -- in the shared column window (panels/stack.lua)
+  peek = {
+    noun = 'file',
+    counts = function(session, rel)
+      local row = (session.tree_rows or {})[rel]
+      return row ~= nil and row.kind == 'file'
+    end,
+  },
+  --- `[[`: the file shown, else the first file
+  anchor = function(session)
+    local first
+    for i, row in ipairs(session.tree_rows or {}) do
+      if is_current(session, row) then
+        return i
+      end
+      first = first or (row.kind == 'file' and i)
+    end
+    return first or 1
   end,
 }
 

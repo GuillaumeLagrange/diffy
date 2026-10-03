@@ -8,12 +8,32 @@ local M = {}
 
 --- Window ids of the session in `child`'s current tab, by role (`tree`,
 --- `log`, `left`, `right`, and during a conflict `ours`, `theirs`, `base`,
---- `result`), or `{}` if none is open. For addressing only.
+--- `result`), or `{}` if none is open. The tree and the log share one
+--- window in the default column. For addressing only.
 function M.wins(child)
   return child.lua_get([[(function()
     local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
     return s and s.wins or {}
   end)()]])
+end
+
+--- Buffer line of `view`'s ('tree' | 'log') row `row` in its window, for
+--- moving the cursor there. For addressing only.
+function M.lnum(child, view, row)
+  return child.lua(
+    [[
+    local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
+    return require('diffy.panels.stack').lnum(s, ...)
+  ]],
+    { view, row }
+  )
+end
+
+--- Put `view`'s window cursor on its row `row`, focusing the window.
+function M.cursor_to(child, view, row)
+  local win = M.wins(child)[view]
+  child.api.nvim_set_current_win(win)
+  child.api.nvim_win_set_cursor(win, { M.lnum(child, view, row), 0 })
 end
 
 --- `{ tree = lines, log = lines, left = side, right = side, diff = bool,
@@ -29,9 +49,11 @@ function M.layout(child)
     if not s then return vim.NIL end
     local function ok(win) return win and vim.api.nvim_win_is_valid(win) end
 
-    local function buf_lines(win)
-      if not ok(win) then return vim.NIL end
-      return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
+    -- a view's own rows: the tree and the log may share a buffer
+    local function view_lines(name)
+      if not ok(s.wins[name]) then return vim.NIL end
+      local first, count = require('diffy.panels.stack').range(s, name)
+      return vim.api.nvim_buf_get_lines(s.bufs[name], first, first + count, false)
     end
 
     local function side(win)
@@ -55,8 +77,8 @@ function M.layout(child)
     for _, w in ipairs(wins) do table.insert(bars, vim.wo[w].winbar) end
 
     return {
-      tree = buf_lines(s.wins.tree),
-      log = buf_lines(s.wins.log),
+      tree = view_lines('tree'),
+      log = view_lines('log'),
       left = side(s.wins.left),
       right = side(s.wins.right),
       diff = ok(s.wins.left) and vim.wo[s.wins.left].diff or false,
@@ -79,12 +101,13 @@ function M.panel(child, panel)
     local win = s and s.wins[%q]
     if not (win and vim.api.nvim_win_is_valid(win)) then return {} end
     local buf = vim.api.nvim_win_get_buf(win)
+    local first, count = require('diffy.panels.stack').range(s, %q)
     local rows = {}
-    for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, first, first + count, false)) do
       rows[i] = { text = l, hl = vim.empty_dict() }
     end
     for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })) do
-      local row = rows[m[2] + 1]
+      local row = rows[m[2] - first + 1]
       if row then
         for _, key in ipairs({ 'line_hl_group', 'number_hl_group' }) do
           local g = m[4][key]
@@ -93,7 +116,7 @@ function M.panel(child, panel)
       end
     end
     return rows
-  ]]):format(panel))
+  ]]):format(panel, panel))
 end
 
 --- Texts of the `panel` rows drawn with line or line-number highlight `group`.
@@ -162,7 +185,6 @@ end
 --- Put the log cursor on `row` (a line number, or the first row containing
 --- string `row`) and press `<CR>`, waiting for the `select` render.
 function M.select_log_row(child, row)
-  local w = M.wins(child)
   if type(row) == 'string' then
     local needle = row
     for i, l in ipairs(M.layout(child).log) do
@@ -173,8 +195,7 @@ function M.select_log_row(child, row)
     end
     assert(type(row) == 'number', needle .. ' not in the log')
   end
-  child.api.nvim_set_current_win(w.log)
-  child.api.nvim_win_set_cursor(w.log, { row, 0 })
+  M.cursor_to(child, 'log', row)
   M.arm_ready(child, 'select')
   child.type_keys('<CR>')
   M.wait_ready(child)
@@ -183,8 +204,6 @@ end
 --- Focus the tree, put the cursor on `path`'s row, press `key` and wait (up
 --- to `timeout` ms) for the `event` DiffyReady it triggers.
 function M.open_tree_row(child, path, key, event, timeout)
-  local w = M.wins(child)
-  child.api.nvim_set_current_win(w.tree)
   local found
   for i, row in ipairs(M.panel(child, 'tree')) do
     if row.text:find(path, 1, true) then
@@ -193,7 +212,7 @@ function M.open_tree_row(child, path, key, event, timeout)
     end
   end
   assert(found, path .. ' not in the tree')
-  child.api.nvim_win_set_cursor(w.tree, { found, 0 })
+  M.cursor_to(child, 'tree', found)
   M.arm_ready(child, event)
   child.type_keys(key)
   M.wait_ready(child, timeout)

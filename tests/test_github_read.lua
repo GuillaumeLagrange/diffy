@@ -331,8 +331,7 @@ end
 
 --- `keys` typed in the log at row `row`, waiting for `event`.
 local function log_keys(row, keys, event)
-  child.api.nvim_set_current_win(wins().log)
-  child.api.nvim_win_set_cursor(wins().log, { row, 0 })
+  ui.cursor_to(child, 'log', row)
   ui.arm_ready(child, event)
   child.type_keys(keys)
   ui.wait_ready(child)
@@ -340,9 +339,10 @@ end
 
 --- The PR row's float, after resting the cursor on it.
 local function pr_float()
+  local lnum = ui.lnum(child, 'log', 1)
   child.api.nvim_set_current_win(wins().log)
   ui.arm_ready_raw(child, 'commitmsg')
-  child.api.nvim_win_set_cursor(wins().log, { 1, 0 })
+  child.api.nvim_win_set_cursor(wins().log, { lnum, 0 })
   ui.wait_ready_raw(child)
   return child.lua_get([[(function()
     local s = require('diffy.session').current()
@@ -501,7 +501,7 @@ T['J, K, a and visual ranges never select the PR row or a review marker'] = func
   child.cmd('Diffy close')
 end
 
-T[':Diffy grows the log for the PR row, and <CR> on it opens the whole PR'] = function()
+T[':Diffy shows the PR row with the working tree in sight, and <CR> on it opens the whole PR'] = function()
   fixture_only()
   -- upstream at HEAD: `:Diffy` lists only the working tree
   git(dir, { 'update-ref', 'refs/remotes/origin/sandbox/placement', 'HEAD' })
@@ -511,8 +511,12 @@ T[':Diffy grows the log for the PR row, and <CR> on it opens the whole PR'] = fu
   ui.wait_ready(child)
   MiniTest.expect.equality(pr_status(), '')
   MiniTest.expect.equality(log_rows()[2], '▌ Working tree')
+  -- both rows in sight
   local log = wins().log
-  MiniTest.expect.equality(child.lua_get(('{ vim.fn.line("w0", %d), vim.fn.line("w$", %d) }'):format(log, log)), { 1, 2 })
+  local function on_screen(row)
+    return child.fn.screenpos(log, ui.lnum(child, 'log', row), 1).row > 0
+  end
+  MiniTest.expect.equality({ on_screen(1), on_screen(2) }, { true, true })
 
   log_keys(1, '<CR>', 'render')
   MiniTest.expect.equality(pr_status(), '')

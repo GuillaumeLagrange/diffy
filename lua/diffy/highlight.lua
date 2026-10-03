@@ -19,6 +19,10 @@ local LINKS = {
   DiffyMerge = 'Comment',
   DiffyLabel = 'Title',
   DiffySelection = 'Visual',
+  -- the line between the files and the commits in the shared column window
+  DiffyPanelRule = 'WinSeparator',
+  -- what's scrolled off the shared column window, over its edges
+  DiffyPeek = 'CursorLine',
   -- not CursorLine: the panel's own cursorline would make it invisible
   DiffyCurrentFile = 'Visual',
   DiffyThreadSummary = 'Comment',

@@ -67,7 +67,7 @@ T[':Diffy conflicts opens the 4-window layout for the first conflicted file'] = 
   ui.wait_ready(child)
 
   local w = ui.wins(child)
-  MiniTest.expect.equality(buf_lines(w.tree), { 'U f.txt' })
+  MiniTest.expect.equality(ui.layout(child).tree, { 'U f.txt' })
   local bars = ui.layout(child).bars
   for _, bar in ipairs({ 'ours :2  f.txt', 'base :1  f.txt', 'theirs :3  f.txt', 'result  f.txt' }) do
     MiniTest.expect.equality(vim.tbl_contains(bars, bar), true)

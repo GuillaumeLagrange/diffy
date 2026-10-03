@@ -291,9 +291,7 @@ T['the working tree selected with commits shows one merged tree, no sections'] =
   child.cmd('Diffy')
   ui.wait_ready(child)
 
-  local w = ui.wins(child)
-  child.api.nvim_set_current_win(w.log)
-  child.api.nvim_win_set_cursor(w.log, { 1, 0 })
+  ui.cursor_to(child, 'log', 1)
   ui.arm_ready(child, 'select')
   child.type_keys('Vj<CR>')
   ui.wait_ready(child)

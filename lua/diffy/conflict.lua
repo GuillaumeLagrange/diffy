@@ -291,7 +291,6 @@ end
 
 -- `:Diffy conflicts`'s own tree (no log entries, only unmerged files).
 local function render_tree(session)
-  local buf = session.bufs.tree
   local lines = {}
   for _, p in ipairs(session.conflict_paths or {}) do
     table.insert(lines, 'U ' .. p)
@@ -299,14 +298,12 @@ local function render_tree(session)
   if #lines == 0 then
     lines = { '(no conflicts)' }
   end
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
+  require('diffy.panels.stack').set_lines(session, 'tree', lines)
 end
 
 local function path_at_cursor(session)
-  local lnum = vim.api.nvim_win_get_cursor(session.wins.tree)[1]
-  return (session.conflict_paths or {})[lnum]
+  local lnum = require('diffy.panels.stack').cursor(session, 'tree')
+  return lnum and (session.conflict_paths or {})[lnum]
 end
 
 --- `]f`/`[f` in the dedicated conflicts tree: move `delta` conflicted
@@ -322,14 +319,14 @@ local function move(session, delta)
   if nxt == cur then
     return
   end
-  if vim.api.nvim_win_is_valid(session.wins.tree) then
-    pcall(vim.api.nvim_win_set_cursor, session.wins.tree, { nxt, 0 })
-  end
+  require('diffy.panels.stack').set_cursor(session, 'tree', nxt)
   M.enter(session, paths[nxt])
 end
 
 local function setup_conflicts_tree(session)
-  local map = session_mod.map
+  local function map(s, modes, lhs, rhs, opts)
+    require('diffy.panels.stack').map(s, 'tree', modes, lhs, rhs, opts)
+  end
   local buf = session.bufs.tree
   local function open_at_cursor(focus)
     local p = path_at_cursor(session)
@@ -426,9 +423,7 @@ function M.start()
     end
     s.root = root
     s.gitdir = vim.fn.FugitiveExtractGitDir(root)
-    vim.bo[s.bufs.log].modifiable = true
-    vim.api.nvim_buf_set_lines(s.bufs.log, 0, -1, false, { '(:Diffy conflicts - no log)' })
-    vim.bo[s.bufs.log].modifiable = false
+    require('diffy.panels.stack').set_lines(s, 'log', { '(:Diffy conflicts - no log)' })
     refresh_list(s)
   end, s)
 end

@@ -1,23 +1,29 @@
 -- Where diffy's views are shown. A view (the file tree, the commit log, the
 -- review threads) is a buffer diffy renders, reached as `session.bufs[name]`
 -- and, while shown, `session.wins[name]`, whichever host shows it: the left
--- column stacks `session.column` (`config.column`), a float shows one view
+-- column stacks `session.column` (`config.column`; the tree and the log next
+-- to each other share one window, `panels/stack.lua`), a float shows one view
 -- in detail over the diff area. A view renders at its window's width and
 -- asks `M.host` which of the two it's in.
 --
 -- A view module exposes `view = {
---   label               the column window's statusline
+--   label               the column window's statusline (and the stack's rule)
 --   title(session)?     float title (default: label)
 --   persistent?         the buffer lives as long as the session: created at
 --                       open, wiping it ends the session
 --   setup(session, buf)?  keys and buffer options, once per buffer
 --   render(session)?    (re)draw into `session.bufs[name]`
---   height(session, room)?  rows wanted in the column; nil takes the rest
+--   height(session, room)?  rows wanted in a column window of its own; nil
+--                       takes the rest
 --   window(session, win)?   window options, each time it's shown
 --   keys?               float footer hints `{ {key, label, drop = n} }`, or
 --                       a function(session) returning them
 --   preview(session, buf, win)?  float only: fill the pane beside the view
 --                       for the row under the cursor
+--   peek?               in the stack: `{ noun, counts(session, row),
+--                       pinned?(session, row) }`, what the edge floats count
+--                       and pin (panels/stack.lua)
+--   anchor(session)?    in the stack: the row `]]`/`[[` land on
 -- }`.
 local session_mod = require('diffy.session')
 local hl = require('diffy.highlight')
@@ -58,6 +64,19 @@ function M.column_views()
   return out
 end
 
+--- The tree and the log when they're next to each other in the column, in
+--- column order: they share one window and buffer (`panels/stack.lua`).
+function M.stacked(session)
+  local col = session.column
+  for i = 1, #col - 1 do
+    local a, b = col[i], col[i + 1]
+    if (a == 'tree' and b == 'log') or (a == 'log' and b == 'tree') then
+      return { a, b }
+    end
+  end
+  return nil
+end
+
 --- `name`'s buffer, created and set up on first use. A view that isn't
 --- persistent gets a new one each time it's shown after its last window
 --- closed.
@@ -65,6 +84,10 @@ function M.buffer(session, name)
   local buf = session.bufs[name]
   if buf and vim.api.nvim_buf_is_valid(buf) then
     return buf
+  end
+  local stacked = M.stacked(session)
+  if stacked and vim.tbl_contains(stacked, name) then
+    return require('diffy.panels.stack').create(session, stacked)
   end
   local spec = M.spec(name)
   buf = session_mod.scratch_buf(session, name)
@@ -115,8 +138,23 @@ end
 -- ---------------------------------------------------------------------
 -- the column
 
+--- The column's windows, top to bottom, each a list of the views it shows:
+--- one view, or the stacked tree and log (`M.stacked`).
+local function slots(session)
+  local stacked = M.stacked(session)
+  local out = {}
+  for _, name in ipairs(session.column) do
+    if stacked and name == stacked[1] then
+      table.insert(out, stacked)
+    elseif not (stacked and name == stacked[2]) then
+      table.insert(out, { name })
+    end
+  end
+  return out
+end
+
 --- Window-local look of a column window: nothing but the rows.
-local function column_window(session, win, name)
+local function column_window(session, win, slot)
   local wo = vim.wo[win]
   wo.number = false
   wo.relativenumber = false
@@ -129,27 +167,40 @@ local function column_window(session, win, name)
   wo.spell = false
   wo.cursorline = true
   wo.winfixwidth = true
-  local spec = M.spec(name)
-  wo.statusline = spec.label
-  if spec.window then
-    spec.window(session, win)
+  local labels = {}
+  for _, name in ipairs(slot) do
+    table.insert(labels, vim.trim(M.spec(name).label))
+  end
+  wo.statusline = ' ' .. table.concat(labels, ' · ')
+  if #slot > 1 then
+    -- the peek floats cover the edge rows
+    wo.scrolloff = require('diffy.panels.stack').PEEK_ROWS
+  end
+  for _, name in ipairs(slot) do
+    local spec = M.spec(name)
+    if spec.window then
+      spec.window(session, win)
+    end
   end
 end
 
---- Split the column off the left edge of the tab, one window per view, top
---- to bottom; returns name -> window.
+--- Split the column off the left edge of the tab, one window per slot, top
+--- to bottom, and register them (the stacked views under one window).
 local function open_column_windows(session)
-  local wins, prev = {}, nil
-  for _, name in ipairs(session.column) do
-    local buf = M.buffer(session, name)
+  local prev
+  for _, slot in ipairs(slots(session)) do
+    local buf = M.buffer(session, slot[1])
     if prev then
       prev = vim.api.nvim_open_win(buf, false, { win = prev, split = 'below' })
     else
       prev = vim.api.nvim_open_win(buf, false, { win = -1, split = 'left', width = panel_width() })
     end
-    wins[name] = prev
+    session_mod.register_window(session, slot[1], prev)
+    for i = 2, #slot do
+      session.wins[slot[i]] = prev
+    end
+    column_window(session, prev, slot)
   end
-  return wins
 end
 
 local function place_floats(session)
@@ -158,29 +209,31 @@ local function place_floats(session)
   end
 end
 
---- Size the column's views: each view's `height`, the others sharing the
---- rest. A split opened or closed across the tab moves rows in or out of
---- whichever column window nvim picks, so the session calls this then too.
+--- Size the column's windows: each lone view's `height`, the others
+--- sharing the rest (the stacked window always takes the rest). A split
+--- opened or closed across the tab moves rows in or out of whichever
+--- column window nvim picks, so the session calls this then too.
 function M.fit_column(session)
   local w = session.wins
   if not valid(w[session.column[1]]) then
     return
   end
   local room = 0
-  for _, name in ipairs(session.column) do
-    if valid(w[name]) then
-      room = room + vim.api.nvim_win_get_height(w[name])
+  for _, slot in ipairs(slots(session)) do
+    if valid(w[slot[1]]) then
+      room = room + vim.api.nvim_win_get_height(w[slot[1]])
     end
   end
   -- sized views keep their height while the next one is sized, so only
   -- the views without one give up rows
-  for _, name in ipairs(session.column) do
-    local spec = M.spec(name)
-    local want = spec.height and spec.height(session, room)
-    if want and valid(w[name]) then
-      vim.wo[w[name]].winfixheight = false
-      vim.api.nvim_win_set_height(w[name], want)
-      vim.wo[w[name]].winfixheight = true
+  for _, slot in ipairs(slots(session)) do
+    local spec = M.spec(slot[1])
+    local win = w[slot[1]]
+    local want = #slot == 1 and spec.height and spec.height(session, room)
+    if want and valid(win) then
+      vim.wo[win].winfixheight = false
+      vim.api.nvim_win_set_height(win, want)
+      vim.wo[win].winfixheight = true
     end
   end
 end
@@ -210,15 +263,15 @@ function M.relayout(session)
   end
   M.fit_column(session)
   place_floats(session)
+  if session.stack then
+    -- a winbar (checkout mode) or a resize changes the rows to fill
+    require('diffy.panels.stack').fit(session)
+  end
 end
 
 --- Open the column for a new session.
 function M.open_column(session)
-  local wins = open_column_windows(session)
-  for _, name in ipairs(session.column) do
-    session_mod.register_window(session, name, wins[name])
-    column_window(session, wins[name], name)
-  end
+  open_column_windows(session)
   M.relayout(session)
 end
 
@@ -231,7 +284,8 @@ local function hide_column(session)
   end
   session._panel_cursor = {}
   local to_close = {}
-  for _, name in ipairs(session.column) do
+  for _, slot in ipairs(slots(session)) do
+    local name = slot[1]
     local win = session.wins[name]
     if valid(win) then
       session._panel_cursor[name] = vim.api.nvim_win_get_cursor(win)
@@ -239,6 +293,9 @@ local function hide_column(session)
       vim.bo[session.bufs[name]].bufhidden = 'hide'
       table.insert(to_close, win)
     end
+  end
+  if session.stack then
+    require('diffy.panels.stack').close_peeks(session)
   end
   session.panel_hidden = true
   for _, win in ipairs(to_close) do
@@ -253,16 +310,14 @@ local function show_column(session)
     return
   end
   session._nav_guard = (session._nav_guard or 0) + 1
-  local wins = open_column_windows(session)
+  open_column_windows(session)
   session._nav_guard = session._nav_guard - 1
-  for _, name in ipairs(session.column) do
-    local win = wins[name]
+  for _, slot in ipairs(slots(session)) do
+    local name = slot[1]
     vim.bo[session.bufs[name]].bufhidden = 'wipe'
-    session_mod.register_window(session, name, win)
-    column_window(session, win, name)
     local cur = session._panel_cursor and session._panel_cursor[name]
     if cur then
-      pcall(vim.api.nvim_win_set_cursor, win, cur)
+      pcall(vim.api.nvim_win_set_cursor, session.wins[name], cur)
     end
   end
   session.panel_hidden = false
@@ -272,6 +327,9 @@ local function show_column(session)
     if spec.render then
       spec.render(session)
     end
+  end
+  if session.stack then
+    require('diffy.panels.stack').fit(session)
   end
 end
 
@@ -533,6 +591,10 @@ function M.show(session, name)
   local win = session.wins[name]
   if valid(win) then
     vim.api.nvim_set_current_win(win)
+    local stack = require('diffy.panels.stack')
+    if stack.shared(session, name) and not stack.cursor(session, name) then
+      stack.jump(session, name)
+    end
   end
 end
 

@@ -43,10 +43,11 @@ local function float_lines()
   ]])
 end
 
+--- The panel line of the log row holding `text`, for `NG`.
 local function row_of(text)
   for i, l in ipairs(ui.layout(child).log) do
     if l:find(text, 1, true) then
-      return i
+      return ui.lnum(child, 'log', i)
     end
   end
   error(text .. ' not in the log')
@@ -62,9 +63,7 @@ local function open()
   ui.arm_ready(child, 'render')
   child.cmd('Diffy')
   ui.wait_ready(child)
-  local w = ui.wins(child)
-  child.api.nvim_set_current_win(w.log)
-  child.api.nvim_win_set_cursor(w.log, { 1, 0 })
+  ui.cursor_to(child, 'log', 1)
 end
 
 T['resting on a commit shows its full message, wrapped; Esc, other rows and leaving the log close it'] = function()

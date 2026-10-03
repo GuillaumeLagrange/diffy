@@ -502,7 +502,7 @@ T['toggling the panel while outside the diff, then <C-t>, restores the pair'] = 
   child.api.nvim_set_current_win(ui.wins(child).tree)
   keys('\\e')
   no_errors()
-  eq(#child.api.nvim_tabpage_list_wins(0), base_wins - 2)
+  eq(#child.api.nvim_tabpage_list_wins(0), base_wins - 1)
   child.api.nvim_set_current_win(ui.wins(child).left)
   keys('\\e')
   no_errors()

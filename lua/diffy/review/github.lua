@@ -516,9 +516,17 @@ function M.remeasure(session, cb)
   end
 end
 
+--- Redraw the log, whose PR row shows the sync's state (`M.sync_status`).
+local function redraw_row(session)
+  if not session.closed and session.entries then
+    require('diffy.panels.log').render(session)
+  end
+end
+
 local function finish_read(session)
   local l = session.layer
   l.reading = false
+  redraw_row(session)
   l.read_at = vim.uv.now()
   if l.queued then
     l.queued = false
@@ -635,6 +643,7 @@ function M.read(session, cb)
     return
   end
   l.reading = true
+  redraw_row(session)
   local function done()
     if not session.closed then
       finish_read(session)
@@ -769,6 +778,13 @@ local MUTATIONS = {
 
 local function warn(msg)
   vim.notify('diffy: ' .. msg, vim.log.levels.WARN)
+end
+
+--- A write the sync couldn't do: noted, and the PR row says `sync failed`
+--- until a sync goes through.
+local function fail(notes, msg)
+  table.insert(notes, msg)
+  notes.failed = notes.failed or msg
 end
 
 local function is_not_found(err)
@@ -1328,7 +1344,7 @@ end
 local function send(ctx, it, target, next, retried)
   ensure_review(ctx, function(review_id, rerr)
     if not review_id then
-      table.insert(ctx.notes, ("couldn't create your pending review: %s"):format(tostring(rerr)))
+      fail(ctx.notes, ("couldn't create your pending review: %s"):format(tostring(rerr)))
       next()
       return
     end
@@ -1360,7 +1376,7 @@ local function send(ctx, it, target, next, retried)
       if tostring(err):lower():find('could not be resolved', 1, true) then
         set_blocked(ctx, it.c.id, 'outside the diff')
       else
-        table.insert(ctx.notes, ("couldn't mirror a draft: %s"):format(tostring(err)))
+        fail(ctx.notes, ("couldn't mirror a draft: %s"):format(tostring(err)))
       end
       next()
     end
@@ -1641,7 +1657,7 @@ local function apply_staged(session, list, notes, cb)
           end
         end)
         if not data then
-          table.insert(notes, ("couldn't %s a thread, staged for the next sync: %s"):format(item.kind, tostring(err)))
+          fail(notes, ("couldn't %s a thread, staged for the next sync: %s"):format(item.kind, tostring(err)))
         end
         next()
       end)
@@ -1665,7 +1681,7 @@ local function apply_staged(session, list, notes, cb)
           edit_record(item, function(_, rec)
             rec.retry = true
           end)
-          table.insert(notes, ("couldn't check a comment, staged for the next sync: %s"):format(tostring(err)))
+          fail(notes, ("couldn't check a comment, staged for the next sync: %s"):format(tostring(err)))
         else
           edit_record(item, function(t, rec, ri)
             if rec.staged_body then
@@ -1762,6 +1778,7 @@ local function run_sync(session, done)
       for _, n in ipairs(ctx.notes) do
         warn(n)
       end
+      session.layer.sync_error = ctx.notes.failed
       if not session.closed then
         require('diffy.panels.log').apply_layer(session)
         if ctx.adopted or ctx.reread then
@@ -1811,8 +1828,15 @@ function M.mirror(session, cb)
     return
   end
   st.running = true
+  -- this sync takes whatever the pending delay was waiting for
+  if l.sync_timer then
+    l.sync_timer:stop()
+  end
+  l.sync_pending = false
+  redraw_row(session)
   run_sync(session, function()
     st.running = false
+    redraw_row(session)
     local again = st.again
     st.again = nil
     if again and not again.closed then
@@ -1832,11 +1856,32 @@ function M.changed(session)
   end
   l.sync_timer = l.sync_timer or vim.uv.new_timer()
   l.sync_timer:stop()
+  l.sync_pending = true
+  redraw_row(session)
   l.sync_timer:start(M.sync_delay, 0, vim.schedule_wrap(function()
+    l.sync_pending = false
     if not session.closed then
       M.mirror(session)
     end
   end))
+end
+
+--- The sync's state for the PR row: `syncing` (a read or a mirror running, or
+--- one about to), `offline` (the last read failed), `sync failed` (the last
+--- sync couldn't write something), nil when idle and in sync.
+function M.sync_status(session)
+  local l = session.layer
+  if not (l and l.attached) then
+    return nil
+  end
+  if l.reading or l.sync_pending or sync_state(session).running then
+    return 'syncing'
+  elseif l.offline then
+    return 'offline'
+  elseif l.sync_error then
+    return 'sync failed'
+  end
+  return nil
 end
 
 -- ---------------------------------------------------------------------

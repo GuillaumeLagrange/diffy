@@ -207,8 +207,9 @@ local function entry_line(entry, selected, width)
   local head = (selected and MARK or ' ') .. ' '
   if entry.kind == 'pr' then
     -- the title gives way: the status after it matters more
-    local title = hl.truncate(entry.title, math.max(1, width - 2 - #entry.number - 1 - vim.fn.strdisplaywidth(entry.status)))
-    local text = '  ' .. entry.number .. ' ' .. title .. entry.status
+    local status = entry.status .. (entry.sync and (' · ' .. entry.sync) or '')
+    local title = hl.truncate(entry.title, math.max(1, width - 2 - #entry.number - 1 - vim.fn.strdisplaywidth(status)))
+    local text = '  ' .. entry.number .. ' ' .. title .. status
     return text, { { 2, 2 + #entry.number, 'DiffySha' }, { 3 + #entry.number, #text, 'DiffyLabel' } }
   elseif entry.kind == 'marker' then
     local text = '  ' .. hl.truncate(entry.label, width - 2)
@@ -261,9 +262,6 @@ function M.with_layer(session, entries)
   end
   if l.standing then
     table.insert(status, ' · ' .. l.standing)
-  end
-  if l.offline then
-    table.insert(status, ' · offline')
   end
   table.insert(out, { kind = 'pr', number = '#' .. pr.number, title = pr.title or '', status = table.concat(status) })
   local per_review = {}
@@ -326,6 +324,8 @@ function M.apply_layer(session)
     session.pair = selection.resolve(new, sel.top, sel.bottom)
   end
   M.render(session)
+  -- the layer's rows change the log's height
+  require('diffy.layout').fit_column(session)
 end
 
 --- (Re)render the full entry list: merges dimmed, the active
@@ -341,6 +341,9 @@ function M.render(session)
   end
   local lines, all_spans = {}, {}
   for i, e in ipairs(session.entries) do
+    if e.kind == 'pr' then
+      e.sync = require('diffy.review.github').sync_status(session)
+    end
     lines[i], all_spans[i] = entry_line(e, selected(i), width)
   end
   vim.bo[buf].modifiable = true
@@ -383,11 +386,33 @@ local function select_clamped(session, top, bottom)
   session.on_select(session)
 end
 
+--- In `:Diffy`, turn the session into `:Diffy branch` on the PR's base,
+--- everything selected; checkout mode is left first.
+local function open_branch(session)
+  require('diffy.checkout').leave(session, function(ok)
+    if not ok then
+      return
+    end
+    session.range = { kind = 'branch', pr_base = session.layer.cache.pr.base }
+    session.entries, session.sel = nil, nil
+    require('diffy').build(session)
+  end)
+end
+
 --- <CR> in normal mode: select the single entry under the cursor; on a
---- review marker, everything above it (what changed since that review).
+--- review marker, everything above it (what changed since that review); on
+--- the PR row, the whole PR.
 function M.select_line(session)
   local lnum = vim.api.nvim_win_get_cursor(session.wins.log)[1]
   local e = session.entries[lnum]
+  if e and e.kind == 'pr' then
+    if session.range.kind == 'default' then
+      open_branch(session)
+    else
+      M.select_all(session)
+    end
+    return
+  end
   if e and e.kind == 'marker' then
     local top = selection.first_selectable(session.entries)
     if top then

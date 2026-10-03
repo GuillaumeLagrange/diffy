@@ -104,8 +104,11 @@ With an open PR (see GitHub review), the log's first row is the PR: `#42 Retry f
 After the number and title, the sync conflicts waiting for you (`1 conflict`, see GitHub review), then
 where your branch stands against the PR head on GitHub: nothing when in sync,
 `N unpushed`, `behind N`, `diverged`, or `GitHub has newer commits` when the PR head isn't a local commit
-(diffy never fetches); then `offline` when the last read failed. Resting the cursor on it shows the PR's
-description, each reviewer's state (`alice ✗ changes requested`, `bob ✓ approved`), every review with its
+(diffy never fetches); then the sync's state, only when there's one: `syncing` (a read or a mirror running,
+or a draft about to be mirrored), `offline` (the last read failed) or `sync failed` (the last sync couldn't
+write something; it retries with the next one). Resting the cursor on it shows when GitHub was last read,
+why the last sync failed if it did, the PR's description, each reviewer's state (`alice ✗ changes
+requested`, `bob ✓ approved`), every review with its
 commit (`not in this log` or `no longer in the branch` for a commit the log doesn't list) and the
 conversation. Each submitted review on a commit the log lists also shows as a dim row right above that
 commit: `── alice ✗ 4 threads`. `J`/`K`, `a` and ranges skip both kinds of rows; `<CR>` on a review row

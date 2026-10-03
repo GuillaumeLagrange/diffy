@@ -63,6 +63,17 @@ local function wrap(text, width, out)
   end
 end
 
+--- `uv.now()` stamp `t` as `just now` / `3 min ago` / `2 h ago`.
+local function ago(t)
+  local s = math.floor((vim.uv.now() - t) / 1000)
+  if s < 60 then
+    return 'just now'
+  elseif s < 3600 then
+    return ('%d min ago'):format(math.floor(s / 60))
+  end
+  return ('%d h ago'):format(math.floor(s / 3600))
+end
+
 local STATE_TEXT = { APPROVED = 'approved', CHANGES_REQUESTED = 'changes requested', COMMENTED = 'commented', DISMISSED = 'dismissed' }
 
 --- The PR row's float: description, each reviewer's latest state, every
@@ -78,6 +89,16 @@ local function pr_content(session, width)
     table.insert(lines, '')
     table.insert(lines, title)
     table.insert(spans, { #lines - 1, 0, #title, 'DiffyLabel' })
+  end
+  local state = l.offline and 'Offline: from the last read' or (l.read_at and ('Read %s'):format(ago(l.read_at)) or nil)
+  if state then
+    table.insert(lines, state)
+    table.insert(spans, { #lines - 1, 0, #state, 'DiffyThreadTime' })
+  end
+  if l.sync_error then
+    local msg = 'Sync failed: ' .. l.sync_error
+    table.insert(lines, msg)
+    table.insert(spans, { #lines - 1, 0, #msg, 'DiagnosticWarn' })
   end
   table.insert(lines, '')
   local body = vim.trim((pr.body or ''):gsub('\r', ''))

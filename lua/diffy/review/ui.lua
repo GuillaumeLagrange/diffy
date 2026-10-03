@@ -73,9 +73,13 @@ function M.ensure(session)
   return session.review
 end
 
---- Redraw once what placing the threads needs is fetched.
+--- Redraw once what placing the threads needs is fetched; the PR row too,
+--- which counts sync conflicts.
 function M.redraw(session)
   require('diffy.review.track').prepare(session, function()
+    if session.layer and session.layer.attached then
+      require('diffy.panels.log').apply_layer(session)
+    end
     M.decorate(session)
   end)
 end
@@ -103,6 +107,33 @@ local function row_map(win)
   end)
 end
 
+--- The short states a summary carries: a sync conflict, a draft GitHub
+--- can't take, staged changes.
+function M.summary_badges(thread)
+  local out, seen = {}, {}
+  local function add(text, hl)
+    if not seen[text] then
+      seen[text] = true
+      table.insert(out, { text, hl })
+    end
+  end
+  for _, c in ipairs(thread.comments) do
+    if c.conflict or c.staged_conflict then
+      add('conflict', 'DiffyThreadConflict')
+    elseif c.state == 'draft' and c.blocked and not c.gh then
+      add('local only', 'DiffyThreadDraft')
+    elseif c.staged_delete then
+      add('deletion staged', 'DiffyThreadStaged')
+    elseif c.staged_body then
+      add('edit staged', 'DiffyThreadStaged')
+    end
+  end
+  for _, b in ipairs(model.thread_badges(thread)) do
+    add(b[1], b[2])
+  end
+  return out
+end
+
 --- One summary line: `● author +N: first line of the comment`, the dot in
 --- the thread's lane colour, cut to `width` so threads on the same line can
 --- be told apart. A resolved one reads `✓ author +N: …`, dimmed. `mode`
@@ -128,8 +159,13 @@ local function summary_chunks(thread, width, mode, url)
     table.insert(chunks, { '   ', 'Normal' })
   end
   table.insert(chunks, { head, hl or text_hl })
+  local marks = ''
+  for _, b in ipairs(M.summary_badges(thread)) do
+    table.insert(chunks, { ' ' .. b[1], b[2] })
+    marks = marks .. ' ' .. b[1]
+  end
   local line = first and vim.split(first.body or '', '\n', { plain = true })[1] or ''
-  local room = width - vim.fn.strdisplaywidth(icon .. ' ' .. head) - 2 - (slot and 3 or 0)
+  local room = width - vim.fn.strdisplaywidth(icon .. ' ' .. head .. marks) - 2 - (slot and 3 or 0)
   if line ~= '' and room >= 8 then
     table.insert(chunks, { ': ' .. highlight.truncate(line, room), hl or (thread.resolved and text_hl or 'Comment') })
   end
@@ -844,12 +880,6 @@ local function ago(t)
   return os.date('%Y', e) == os.date('%Y') and day or ('%s, %s'):format(day, os.date('%Y', e))
 end
 
-local BADGES = {
-  draft = { 'draft', 'DiffyThreadDraft' },
-  pending = { 'pending', 'DiffyThreadPending' },
-  sent = { 'sent', 'DiffyThreadSent' },
-}
-
 local function card_ns(session)
   return session_mod.namespace(session, 'review_card')
 end
@@ -902,10 +932,7 @@ local function fill_cards(session, buf, comments, opts)
   local marks = {}
   render.reset(buf)
   for i, c in ipairs(comments) do
-    local badges = {}
-    if BADGES[c.state] then
-      table.insert(badges, BADGES[c.state])
-    end
+    local badges = model.comment_badges(c)
     if i == 1 then
       vim.list_extend(badges, opts.badges or {})
     end
@@ -1366,10 +1393,10 @@ function M.reply(session, thread)
   })
 end
 
---- Edit `comment` (must be `state == 'draft'`, checked by the caller) of
---- `thread`, replacing its body on save. From the thread float, the edit
---- box opens under it with the comment in view, and closing it goes back
---- into the thread, on that comment.
+--- Edit `comment` of `thread` (a draft, or your published comment: then
+--- the edit is staged until a GitHub submit), replacing its body on save.
+--- From the thread float, the edit box opens under it with the comment in
+--- view, and closing it goes back into the thread, on that comment.
 function M.edit_comment(session, thread, comment)
   local review = session.review
   local backend = review.backend
@@ -1380,17 +1407,24 @@ function M.edit_comment(session, thread, comment)
       above_line = h.row + 1
     end
   end
+  local real = comment._of or comment
+  local staged = real.state == 'published'
   local win, first, last = thread_anchor(session, thread)
   M.open_compose(session, win, first, last, function(body)
-    comment.body = table.concat(body, '\n')
+    body = table.concat(body, '\n')
+    if staged then
+      backend.stage_edit(session, thread, real, body)
+      return
+    end
+    comment.body = body
     backend.save(session, thread, comment)
   end, {
-    prefill = vim.split(comment.body, '\n', { plain = true }),
-    title = 'Edit draft',
+    prefill = vim.split(staged and (real.staged_body or real.body) or comment.body, '\n', { plain = true }),
+    title = staged and 'Edit (sent when you submit to GitHub)' or 'Edit draft',
     above = above,
     above_line = above_line,
     on_close = above and function()
-      M.show_thread(session, thread, { focus = true, comment = comment })
+      M.show_thread(session, thread, { focus = true, comment = real })
     end,
   })
 end
@@ -1491,6 +1525,35 @@ local function side_threads(session, win)
   return out
 end
 
+--- Whether `e`/`dd` apply to `c` (a card's comment): drafts, and your
+--- published comments, whose changes are staged.
+function M.editable(session, c)
+  local real = c._of or c
+  if real.state == 'draft' then
+    return true
+  end
+  local backend = session.review.backend
+  return real.state == 'published' and type(backend.stage_edit) == 'function' and real.author == backend.author(session.root)
+end
+
+--- The cards of `thread`: a published comment with a staged edit shows the
+--- edit; in conflict with a github.com edit, the live comment then your
+--- edit (`_edit`). A shown copy keeps its comment in `_of`.
+local function shown_comments(thread)
+  local out = {}
+  for _, c in ipairs(thread.comments) do
+    if c.state == 'published' and c.staged_body and not c.staged_conflict then
+      table.insert(out, setmetatable({ body = c.staged_body, _of = c }, { __index = c }))
+    else
+      table.insert(out, c)
+      if c.state == 'published' and c.staged_conflict then
+        table.insert(out, { _edit = true, _of = c, author = c.author, body = c.staged_body, created_at = c.created_at })
+      end
+    end
+  end
+  return out
+end
+
 --- Fill `buf` with `thread` as comment cards (as in the thread float), for
 --- any window showing it. `opts.avatars` reserves room for the avatars;
 --- `opts.preamble` goes above the cards. Returns the headers.
@@ -1504,7 +1567,8 @@ function M.render_thread(session, buf, thread, opts)
   if thread.resolved then
     table.insert(badges, { '✓ resolved', 'DiffyThreadResolved' })
   end
-  return fill_cards(session, buf, thread.comments, {
+  vim.list_extend(badges, model.thread_badges(thread))
+  return fill_cards(session, buf, shown_comments(thread), {
     people = backend.capabilities.people,
     badges = badges,
     avatar_url = opts.avatars and backend.avatar_url or nil,
@@ -1512,16 +1576,17 @@ function M.render_thread(session, buf, thread, opts)
   })
 end
 
---- Resolve (or unresolve) `thread`: a published thread on GitHub right
---- away, your own in its saved drafts. Redraws once done.
+--- `x`: resolve (or unresolve) `thread`. A published one gets the change
+--- staged until a GitHub submit (`x` again cancels); your own, in its saved
+--- drafts. Redraws once done.
 function M.set_resolved(session, thread, resolved)
   local review = session.review
   local backend = review.backend
   local published = vim.iter(thread.comments):any(function(c)
-    return c.state == 'published' or c.state == 'pending'
+    return c.state == 'published'
   end)
-  if published and type(backend.resolve_thread) == 'function' then
-    backend.resolve_thread(session, thread, resolved, function() end)
+  if published and type(backend.toggle_resolve) == 'function' then
+    backend.toggle_resolve(session, thread)
     return
   end
   thread.resolved = resolved
@@ -1565,14 +1630,15 @@ function M.show_thread(session, thread, opts)
       table.insert(keys, { 'r', 'reply' })
     end
     for _, c in ipairs(thread.comments) do
-      if c.state == 'draft' then
+      if M.editable(session, c) then
         table.insert(keys, { 'e', 'edit', drop = 3 })
         table.insert(keys, { 'dd', 'delete', drop = 2 })
         break
       end
     end
     if backend.capabilities.resolve then
-      table.insert(keys, { 'x', thread.resolved and 'unresolve' or 'resolve', drop = 4 })
+      local label = thread.resolve_staged and 'cancel ' .. thread.resolve_staged or (thread.resolved and 'unresolve' or 'resolve')
+      table.insert(keys, { 'x', label, drop = 4 })
     end
     if #order > 1 then
       table.insert(keys, { ']t [t', ('%d/%d'):format(idx, #order), drop = 1 })
@@ -1676,28 +1742,34 @@ function M.show_thread(session, thread, opts)
   map(session, 'n', 'r', function()
     M.reply(session, thread)
   end, { buffer = buf, desc = 'reply' })
-  local function draft_at_cursor(verb)
+  local function editable_at_cursor(verb)
     local comment = comment_at(heads, vim.api.nvim_win_get_cursor(fwin)[1] - 1)
-    if not comment or comment.state ~= 'draft' then
-      vim.notify(('diffy: only a draft comment can be %s'):format(verb), vim.log.levels.WARN)
+    if not comment or not M.editable(session, comment) then
+      vim.notify(('diffy: only a draft or your own comment can be %s'):format(verb), vim.log.levels.WARN)
       return nil
     end
     return comment
   end
   map(session, 'n', 'e', function()
-    local comment = draft_at_cursor('edited')
+    local comment = editable_at_cursor('edited')
     if comment then
       M.edit_comment(session, thread, comment)
     end
-  end, { buffer = buf, desc = 'edit draft' })
+  end, { buffer = buf, desc = 'edit' })
   map(session, 'n', 'dd', function()
-    local comment = draft_at_cursor('deleted')
+    local comment = editable_at_cursor('deleted')
     if not comment then
       return
     end
-    M.close_thread(session)
-    require('diffy.review.drafts').remove(session, { comment.id })
-  end, { buffer = buf, desc = 'delete draft' })
+    if comment._edit then
+      backend.drop_edit(session, thread, comment._of)
+    elseif (comment._of or comment).state == 'published' then
+      backend.toggle_delete(session, thread, comment._of or comment)
+    else
+      M.close_thread(session)
+      require('diffy.review.drafts').remove(session, { comment.id })
+    end
+  end, { buffer = buf, desc = 'delete' })
   if backend.capabilities.resolve then
     map(session, 'n', 'x', function()
       M.set_resolved(session, thread, not thread.resolved)

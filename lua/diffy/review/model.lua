@@ -366,28 +366,99 @@ function M.anchor_valid(hunks, side, start_line, end_line)
 end
 
 --- GitHub's `position` for `addPullRequestReviewComment`: the 1-based index
---- of the diff line for `new_line` below the file's first `@@` header
+--- of the diff line for `line` below the file's first `@@` header
 --- (`diff_lines` is one file's section of a unified diff; later `@@`
---- headers count as lines too). `nil` if `new_line` isn't on the diff's
---- new side.
-function M.diff_position(diff_lines, new_line)
-  local pos, nl = nil, nil
-  for _, line in ipairs(diff_lines) do
-    local new_start = line:match('^@@ %-%d+,?%d* %+(%d+)')
+--- headers count as lines too). `side` 'old' looks for `line` on the old
+--- side, a `-` line first (a LEFT comment), else the unchanged line; the
+--- default is the new side. `nil` if the diff doesn't show `line`.
+function M.diff_position(diff_lines, line, side)
+  local old = side == 'old'
+  local pos, ol, nl = nil, nil, nil
+  local context
+  for _, l in ipairs(diff_lines) do
+    local old_start, new_start = l:match('^@@ %-(%d+),?%d* %+(%d+)')
     if new_start then
       pos = pos and (pos + 1) or 0
-      nl = tonumber(new_start) - 1
+      ol, nl = tonumber(old_start) - 1, tonumber(new_start) - 1
     elseif pos then
       pos = pos + 1
-      if line:sub(1, 1) ~= '-' then
+      local kind = l:sub(1, 1)
+      if kind ~= '+' then
+        ol = ol + 1
+      end
+      if kind ~= '-' then
         nl = nl + 1
-        if nl == new_line then
+      end
+      if old then
+        if ol == line and kind == '-' then
           return pos
+        elseif ol == line and kind == ' ' then
+          context = context or pos
         end
+      elseif kind ~= '-' and nl == line then
+        return pos
       end
     end
   end
-  return nil
+  return context
+end
+
+--- Badges `{ text, hl }` for comment `c` in a card or a threads row: where
+--- it stands on GitHub and against the agent, and its conflicts.
+function M.comment_badges(c)
+  if c._edit then
+    return { { 'your edit', 'DiffyThreadStaged' } }
+  end
+  if c.state == 'published' then
+    if c.staged_delete then
+      return { { 'deletion staged', 'DiffyThreadStaged' } }
+    elseif c.staged_conflict then
+      return { { 'edited on github.com', 'DiffyThreadConflict' } }
+    elseif c.staged_body then
+      return { { 'edit staged', 'DiffyThreadStaged' } }
+    end
+    return {}
+  end
+  if c.origin then
+    return { { c.origin, 'DiffyThreadConflict' } }
+  end
+  local out = {}
+  if c.conflict then
+    table.insert(out, { 'conflict', 'DiffyThreadConflict' })
+  end
+  if c.state == 'draft' then
+    if c.gh then
+      table.insert(out, { 'pending', 'DiffyThreadPending' })
+    elseif c.blocked then
+      table.insert(out, { 'local only: ' .. c.blocked, 'DiffyThreadDraft' })
+    else
+      table.insert(out, { 'draft', 'DiffyThreadDraft' })
+    end
+  elseif c.state == 'pending' then
+    table.insert(out, { 'pending', 'DiffyThreadPending' })
+  elseif c.state == 'sent' then
+    table.insert(out, { 'sent', 'DiffyThreadSent' })
+  end
+  return out
+end
+
+--- Badges for the thread itself: a staged resolve.
+function M.thread_badges(t)
+  if t.resolve_staged then
+    return { { t.resolved and 'unresolve staged' or 'resolve staged', 'DiffyThreadStaged' } }
+  end
+  return {}
+end
+
+--- Sync conflicts waiting for you in `t`.
+function M.conflicts(t)
+  local n = 0
+  for _, c in ipairs(t.comments) do
+    if c.conflict or c.staged_conflict then
+      n = n + 1
+    end
+  end
+  return n
 end
 
 return M

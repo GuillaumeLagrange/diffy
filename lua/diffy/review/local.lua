@@ -91,7 +91,14 @@ function M.sync(session)
 end
 
 M.save = drafts.put
-M.clear = drafts.clear
+
+--- `:Diffy review clear`: every comment of the branch. `cb(done)`.
+function M.clear(session, cb)
+  drafts.clear(session)
+  if cb then
+    cb(true)
+  end
+end
 
 --- Where `thread` shows in the open file, tracked from where it was written.
 function M.place(session, thread)
@@ -221,7 +228,7 @@ local function unsent_comments(session, threads)
       now = track.now(session, thread)
     end
     for _, comment in ipairs(thread.comments) do
-      if comment.state ~= 'sent' and comment.state ~= 'published' and comment.state ~= 'pending' then
+      if comment.state ~= 'sent' and comment.state ~= 'published' and comment.state ~= 'pending' and not comment.origin then
         table.insert(pending, { thread = thread, comment = comment, now = now })
       end
     end

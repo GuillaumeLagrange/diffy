@@ -1,8 +1,8 @@
 -- GitHub review backend: the PR of the checked-out branch. Reads threads,
--- reviews, description and the viewer's pending review, and pushes/pulls/
--- submits your drafts, which live in the branch's one store
--- (`review/drafts.lua`). Placement is `review/track.lua`'s, as for every
--- thread.
+-- reviews, description and the viewer's pending review; mirrors your drafts
+-- (in the branch's one store, `review/drafts.lua`) into that pending review
+-- in the background, and submits. Placement is `review/track.lua`'s, as for
+-- every thread.
 local model = require('diffy.review.model')
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
@@ -41,7 +41,6 @@ local function remember_avatar(actor)
 end
 
 M.save = drafts.put
-M.clear = drafts.clear
 
 --- The agent's ticks in `review.md`, as without a PR.
 function M.sync(session)
@@ -117,7 +116,7 @@ local PAGE = 'pageInfo { hasNextPage endCursor }'
 local CONVERSATION = 'nodes { author { login avatarUrl(size: 64) } body createdAt }'
 local REVIEW = 'nodes { id author { login } state body submittedAt commit { oid } }'
 local COMMENT = [[nodes {
-  id author { login avatarUrl(size: 64) } body createdAt diffHunk
+  id author { login avatarUrl(size: 64) } body createdAt updatedAt lastEditedAt diffHunk
   line originalLine startLine originalStartLine
   commit { oid } originalCommit { oid } pullRequestReview { id }
 }]]
@@ -132,9 +131,7 @@ query DiffyRead($o: String!, $r: String!, $n: Int!, $k: Int!) {
       author { login avatarUrl(size: 64) }
       comments(first: $k) { %s %s }
       reviews(first: $k) { %s %s }
-      pendingReviews: reviews(states: [PENDING], first: 1) {
-        nodes { id comments(first: 100) { nodes { id path line originalLine startLine originalStartLine body commit { oid } originalCommit { oid } } } }
-      }
+      pendingReviews: reviews(states: [PENDING], first: 1) { nodes { id } }
       reviewThreads(first: $k) { %s %s }
     }
   }
@@ -281,16 +278,6 @@ function M.fetch(owner, name, number, cb)
   end)
 end
 
---- `fetch` for the session's attached PR.
-local function fetch_session(session, cb)
-  local l = session.layer
-  if not (l and l.repo) then
-    cb(nil, 'no PR attached')
-    return
-  end
-  M.fetch(l.repo.owner, l.repo.name, l.repo.number, cb)
-end
-
 --- Which of `shas` exist locally (a force-pushed-away commit may not).
 --- `cb(exists)`, `exists[sha] == true` for present objects.
 local function existing_shas(root, shas, cb)
@@ -349,18 +336,26 @@ local function to_comment(c, state)
     author = c.author and c.author.login or 'unknown',
     body = c.body,
     created_at = c.createdAt,
+    last_edited_at = c.lastEditedAt,
     state = state,
   }
 end
 
---- Build one `Thread` from a raw `reviewThreads` node. Comments belonging to
---- `pending_review_id` get `state = 'pending'`: GitHub already lists the
---- viewer's unsubmitted comments in `reviewThreads`, next to submitted ones.
-local function build_thread(node, exists, pending_review_id)
+--- Build one `Thread` from a raw `reviewThreads` node, or nil when every
+--- comment is in `mine` (GitHub ids of your mirrored drafts, which the store
+--- shows instead). Other comments of `pending_review_id` (not adopted yet)
+--- get `state = 'pending'`: GitHub lists the viewer's unsubmitted comments
+--- in `reviewThreads`, next to submitted ones.
+local function build_thread(node, exists, pending_review_id, mine)
   local comments = {}
   for _, c in ipairs(node.comments.nodes) do
-    local pending = pending_review_id and c.pullRequestReview and c.pullRequestReview.id == pending_review_id
-    table.insert(comments, to_comment(c, pending and 'pending' or 'published'))
+    if not mine[c.id] then
+      local pending = pending_review_id and c.pullRequestReview and c.pullRequestReview.id == pending_review_id
+      table.insert(comments, to_comment(c, pending and 'pending' or 'published'))
+    end
+  end
+  if #comments == 0 then
+    return nil
   end
   local first = node.comments.nodes[1]
   local source_commit, start_line, end_line = source_anchor(first, exists)
@@ -387,9 +382,6 @@ local function build_thread(node, exists, pending_review_id)
     },
     outdated = false,
     _has_source = source_commit ~= nil,
-    -- raw per-comment fields (originalCommit/originalLine/pullRequestReview),
-    -- used by `M.pull` to rebuild original-anchored drafts.
-    _raw_comments = node.comments.nodes,
   }
 end
 
@@ -512,10 +504,13 @@ local function measure(session, cb)
 end
 
 --- What a rebuild redoes for an attached layer: the PR row's standing and
---- review reach. `cb()`.
+--- review reach, then a sync (a commit can make a draft mirrorable). `cb()`.
 function M.remeasure(session, cb)
   if session.layer and session.layer.attached then
-    measure(session, cb)
+    measure(session, function()
+      cb()
+      M.mirror(session)
+    end)
   else
     cb()
   end
@@ -574,9 +569,11 @@ local function attach(session, cache, offline, cb)
         l.repo = repo_of(cache.pr)
         local threads = {}
         local pending_id = cache.pr.pending and cache.pr.pending.id
+        local mine = M.mirrored_ids(session)
         for _, n in ipairs(cache.nodes or {}) do
-          if n.comments.nodes[1] then
-            table.insert(threads, build_thread(n, exists, pending_id))
+          local t = n.comments.nodes[1] and build_thread(n, exists, pending_id, mine)
+          if t then
+            table.insert(threads, t)
           end
         end
         drafts.apply(threads, drafts.attach(session).threads)
@@ -678,14 +675,13 @@ function M.read(session, cb)
       end
       read.pr.url = info.url
       save_cache(session, read)
-      attach(session, read, false, done)
+      M.reconcile(session, read)
+      attach(session, read, false, function()
+        done()
+        M.mirror(session)
+      end)
     end)
   end)
-end
-
---- Writes re-read once they land.
-function M.refresh(session, cb)
-  M.read(session, cb)
 end
 
 --- Start the layer on a freshly rendered session: the first read, then
@@ -730,43 +726,384 @@ function M.start(session)
   M.read(session)
 end
 
---- Teardown: stop the timer.
+--- Teardown: stop the timers.
 function M.stop(session)
-  local timer = session.layer and session.layer.timer
-  if timer and not timer:is_closing() then
-    timer:stop()
-    timer:close()
+  local l = session.layer or {}
+  for _, timer in pairs({ read = l.timer, sync = l.sync_timer }) do
+    if not timer:is_closing() then
+      timer:stop()
+      timer:close()
+    end
   end
 end
 
 -- ---------------------------------------------------------------------
--- writing: push/pull/submit, reply, resolve/unresolve.
+-- background sync: your drafts mirrored into your pending review, one
+-- comment at a time. It only writes to that review, which only you see:
+-- replies, resolves and changes to published comments wait for `M.submit`.
+
+--- ms between the last local change and the sync it schedules (tests lower it)
+M.sync_delay = 2000
+
+local SYNCED = 'id body updatedAt lastEditedAt'
+
+local Q = {
+  comment = ('query DiffyComment($id: ID!) { node(id: $id) { ... on PullRequestReviewComment { %s } } }'):format(SYNCED),
+  pending = [[query DiffyPendingReview($o: String!, $r: String!, $n: Int!) { repository(owner: $o, name: $r) { pullRequest(number: $n) { reviews(states: [PENDING], first: 1) { nodes { id } } } } }]],
+  recent = [[query DiffyRecentThreads($o: String!, $r: String!, $n: Int!) { repository(owner: $o, name: $r) { pullRequest(number: $n) { reviewThreads(last: 20) { nodes { id comments(first: 1) { nodes { id } } } } } } }]],
+}
 
 local MUTATIONS = {
+  create_review = [[mutation($pr: ID!, $c: GitObjectID!) { addPullRequestReview(input: {pullRequestId: $pr, commitOID: $c}) { pullRequestReview { id } } }]],
   delete_review = [[mutation($id: ID!) { deletePullRequestReview(input: {pullRequestReviewId: $id}) { clientMutationId } }]],
-  create_review = [[mutation($pr: ID!, $c: GitObjectID!, $t: [DraftPullRequestReviewThread]) { addPullRequestReview(input: {pullRequestId: $pr, commitOID: $c, threads: $t}) { pullRequestReview { id } } }]],
-  add_comment = [[mutation($r: ID!, $c: GitObjectID!, $p: String!, $pos: Int!, $b: String!) { addPullRequestReviewComment(input: {pullRequestReviewId: $r, commitOID: $c, path: $p, position: $pos, body: $b}) { comment { id } } }]],
-  add_thread = [[mutation($r: ID!, $p: String!, $l: Int!, $s: DiffSide!, $sl: Int, $ss: DiffSide, $b: String!) { addPullRequestReviewThread(input: {pullRequestReviewId: $r, path: $p, line: $l, side: $s, startLine: $sl, startSide: $ss, body: $b}) { thread { id } } }]],
-  add_reply = [[mutation($r: ID!, $t: ID!, $b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewId: $r, pullRequestReviewThreadId: $t, body: $b}) { comment { id } } }]],
+  add_comment = ([[mutation($r: ID!, $c: GitObjectID!, $p: String!, $pos: Int!, $b: String!) { addPullRequestReviewComment(input: {pullRequestReviewId: $r, commitOID: $c, path: $p, position: $pos, body: $b}) { comment { %s } } }]]):format(SYNCED),
+  add_thread = ([[mutation($r: ID!, $p: String!, $l: Int!, $s: DiffSide!, $sl: Int, $ss: DiffSide, $b: String!) { addPullRequestReviewThread(input: {pullRequestReviewId: $r, path: $p, line: $l, side: $s, startLine: $sl, startSide: $ss, body: $b}) { thread { id comments(first: 1) { nodes { %s } } } } }]]):format(SYNCED),
+  add_reply = ([[mutation($r: ID!, $t: ID!, $b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewId: $r, pullRequestReviewThreadId: $t, body: $b}) { comment { %s } } }]]):format(SYNCED),
+  update = ([[mutation($id: ID!, $b: String!) { updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $id, body: $b}) { pullRequestReviewComment { %s } } }]]):format(SYNCED),
+  delete = [[mutation($id: ID!) { deletePullRequestReviewComment(input: {id: $id}) { pullRequestReview { id comments { totalCount } } } }]],
   submit = [[mutation($r: ID!, $e: PullRequestReviewEvent!, $b: String) { submitPullRequestReview(input: {pullRequestReviewId: $r, event: $e, body: $b}) { pullRequestReview { id } } }]],
   review = [[mutation($pr: ID!, $c: GitObjectID!, $e: PullRequestReviewEvent!, $b: String) { addPullRequestReview(input: {pullRequestId: $pr, commitOID: $c, event: $e, body: $b}) { pullRequestReview { id } } }]],
   resolve = [[mutation($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }]],
   unresolve = [[mutation($t: ID!) { unresolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }]],
 }
 
---- Resolve/unresolve `thread` directly on GitHub; not part of the draft.
---- `cb(ok)`.
-function M.resolve_thread(session, thread, resolved, cb)
-  M.transport(resolved and MUTATIONS.resolve or MUTATIONS.unresolve, { t = thread.id }, function(data, err)
-    if not data then
-      vim.notify('diffy: ' .. tostring(err), vim.log.levels.WARN)
-      cb(false)
+local function warn(msg)
+  vim.notify('diffy: ' .. msg, vim.log.levels.WARN)
+end
+
+local function is_not_found(err)
+  return err ~= nil and tostring(err):find('Could not resolve to a node', 1, true) ~= nil
+end
+
+local function is_one_pending(err)
+  return err ~= nil and tostring(err):find('one pending review per pull request', 1, true) ~= nil
+end
+
+--- Whether a `deletePullRequestReviewComment` answer says the review is now
+--- empty: GitHub then deletes it, though the payload still says PENDING.
+local function emptied(data)
+  local r = data and data.deletePullRequestReviewComment and data.deletePullRequestReviewComment.pullRequestReview
+  return r ~= nil and r.comments ~= nil and r.comments.totalCount == 0
+end
+
+--- `fn(item, next)` on each of `list` in turn, then `done()`.
+local function each(list, fn, done)
+  local i = 0
+  local function step()
+    i = i + 1
+    if i > #list then
+      done()
       return
     end
-    thread.resolved = resolved
-    require('diffy.review.ui').decorate(session)
-    cb(true)
+    fn(list[i], step)
+  end
+  step()
+end
+
+local function first_line(body)
+  return vim.split(body or '', '\n', { plain = true })[1]
+end
+
+--- The stored thread, comment and its index holding comment `id`.
+local function find_comment(threads, id)
+  for _, t in ipairs(threads) do
+    for j, c in ipairs(t.comments) do
+      if c.id == id then
+        return t, c, j
+      end
+    end
+  end
+  return nil
+end
+
+local function remove_comment(t, id)
+  for j = #t.comments, 1, -1 do
+    if t.comments[j].id == id then
+      table.remove(t.comments, j)
+    end
+  end
+end
+
+--- A sync's own write: it doesn't schedule another.
+local function write(session, fn)
+  return drafts.update(session, fn, { sync = true })
+end
+
+local function repo_vars(session)
+  local r = session.layer.repo
+  return { o = r.owner, r = r.name, n = r.number }
+end
+
+--- GitHub ids of your mirrored drafts, and of those you deleted that GitHub
+--- still has: the store shows them, not the read.
+function M.mirrored_ids(session)
+  local data = drafts.load(session)
+  local out = {}
+  for _, t in ipairs(data.threads) do
+    for _, c in ipairs(t.comments) do
+      if c.gh and c.state ~= 'published' then
+        out[c.gh.id] = true
+      end
+    end
+  end
+  for _, d in ipairs(data.mirror.deleted) do
+    out[d.id] = true
+  end
+  return out
+end
+
+--- The github.com version of `c` (stored at index `j` of `t`), next to it.
+local function add_web_copy(t, j, c, node)
+  c.conflict = true
+  table.insert(t.comments, j + 1, {
+    id = model.new_id('c'),
+    author = c.author,
+    body = node.body,
+    created_at = node.updatedAt or c.created_at,
+    state = 'draft',
+    origin = 'github.com',
+    conflict_of = c.id,
+    gh = { id = node.id, body = node.body, updated_at = node.updatedAt },
+  })
+end
+
+--- Where a pending comment GitHub wrote on `node`'s first comment was.
+local function anchor_of(node)
+  local first = node.comments.nodes[1]
+  local side = (first.line or first.originalLine) and (node.diffSide == 'LEFT' and 'old' or 'new') or nil
+  return {
+    path = node.path,
+    side = side,
+    start_line = first.originalStartLine or first.originalLine,
+    end_line = first.originalLine,
+    commit = first.originalCommit and first.originalCommit.oid,
+    base_relative = side == 'old' or nil,
+  }
+end
+
+local function same_place(a, b)
+  return a.originalLine == b.originalLine
+    and a.originalStartLine == b.originalStartLine
+    and (a.originalCommit and a.originalCommit.oid) == (b.originalCommit and b.originalCommit.oid)
+end
+
+--- Bring the store in line with a fresh read: your pending review's
+--- comments against your mirrored drafts (edits from github.com, deletions,
+--- conflicts, comments diffy didn't write, which are adopted), and your
+--- staged changes against the published comments they change.
+function M.reconcile(session, read)
+  local pid = read.pr.pending and read.pr.pending.id
+  local pend, published, nodes, node_of = {}, {}, {}, {}
+  for _, n in ipairs(read.nodes or {}) do
+    nodes[n.id] = n
+    for _, c in ipairs(n.comments.nodes) do
+      node_of[c.id] = n
+      if pid and c.pullRequestReview and c.pullRequestReview.id == pid then
+        pend[c.id] = c
+      else
+        published[c.id] = c
+      end
+    end
+  end
+  local me = cached_author
+  local notes, adopted, foreign = {}, 0, false
+  write(session, function(data)
+    local before = vim.deepcopy(data)
+    local m = data.mirror
+    foreign = pid ~= nil and m.review ~= pid
+    m.review = pid
+    -- a deleted thread takes your drafts on it along
+    for _, t in ipairs(data.threads) do
+      if t.github and not nodes[t.id] then
+        for j = #t.comments, 1, -1 do
+          local c = t.comments[j]
+          if c.state == 'draft' then
+            table.insert(notes, ('the thread of your draft reply was deleted, dropped: %s'):format(c.body))
+            table.remove(t.comments, j)
+          elseif c.state == 'published' then
+            if c.staged_body then
+              table.insert(notes, ('the thread of your staged edit was deleted, dropped: %s'):format(c.staged_body))
+            end
+            table.remove(t.comments, j)
+          end
+        end
+        t.resolve_staged, t.retry = nil, nil
+      end
+    end
+    local tracked, seen = {}, {}
+    for _, t in ipairs(data.threads) do
+      for j = #t.comments, 1, -1 do
+        local c = t.comments[j]
+        if c.gh and c.state ~= 'published' and not c.origin then
+          local p = pend[c.gh.id]
+          seen[c.gh.id] = true
+          local web
+          for _, o in ipairs(t.comments) do
+            if o.conflict_of == c.id then
+              web = o
+            end
+          end
+          if published[c.gh.id] then
+            -- submitted from elsewhere: GitHub's now
+            remove_comment(t, c.id)
+            if web then
+              remove_comment(t, web.id)
+            end
+          elseif not p then
+            -- gone from github.com: yours goes too, unless you edited it since
+            if web then
+              remove_comment(t, web.id)
+            end
+            if c.state == 'draft' and c.body == c.gh.body and not c.conflict then
+              remove_comment(t, c.id)
+            else
+              c.gh, c.conflict = nil, nil
+            end
+          elseif web then
+            web.body, web.gh = p.body, { id = p.id, body = p.body, updated_at = p.updatedAt }
+          elseif p.updatedAt ~= c.gh.updated_at then
+            if p.body == c.body or c.body == c.gh.body then
+              c.body, c.gh = p.body, { id = p.id, body = p.body, updated_at = p.updatedAt }
+            else
+              add_web_copy(t, j, c, p)
+              table.insert(notes, ('sync conflict, both versions kept: %s'):format(first_line(c.body)))
+            end
+          end
+          if c.gh and pend[c.gh.id] then
+            tracked[c.gh.id] = true
+            local n = node_of[c.gh.id]
+            if n.comments.nodes[1].id == c.gh.id and not t.github then
+              t.gh_thread = n.id
+            end
+          end
+        end
+      end
+    end
+    for i = #m.deleted, 1, -1 do
+      local d = m.deleted[i]
+      local p = pend[d.id]
+      if not p then
+        table.remove(m.deleted, i)
+      elseif p.updatedAt ~= d.updated_at then
+        -- an edit beats a delete: adopted again below
+        table.remove(m.deleted, i)
+        table.insert(notes, ('a comment you deleted was edited on github.com, kept: %s'):format(first_line(p.body)))
+      else
+        seen[d.id] = true
+      end
+    end
+    local function duplicate(c, n)
+      for id in pairs(tracked) do
+        local o, on = pend[id], node_of[id]
+        if id ~= c.id and o.body == c.body and on.path == n.path then
+          local roots = on.comments.nodes[1].id == id and n.comments.nodes[1].id == c.id
+          if on == n or (roots and on.diffSide == n.diffSide and same_place(o, c)) then
+            return true
+          end
+        end
+      end
+      return false
+    end
+    for _, n in ipairs(read.nodes or {}) do
+      for _, c in ipairs(n.comments.nodes) do
+        if pend[c.id] and not seen[c.id] then
+          seen[c.id] = true
+          if duplicate(c, n) then
+            -- two nvims mirrored the same draft: one copy goes
+            table.insert(m.deleted, { id = c.id, updated_at = c.updatedAt })
+          else
+            local on_published = false
+            for _, o in ipairs(n.comments.nodes) do
+              if published[o.id] then
+                on_published = true
+              end
+            end
+            local t
+            if on_published then
+              t = drafts.find(data.threads, n.id)
+              if not t then
+                t = { id = n.id, backend = 'github', github = true, anchor = anchor_of(n), resolved = n.isResolved, comments = {} }
+                table.insert(data.threads, t)
+              end
+            else
+              for _, s in ipairs(data.threads) do
+                if s.gh_thread == n.id then
+                  t = s
+                end
+              end
+              if not t then
+                t = { id = model.new_id('t'), backend = 'github', gh_thread = n.id, anchor = anchor_of(n), resolved = n.isResolved, comments = {} }
+                table.insert(data.threads, t)
+              end
+            end
+            table.insert(t.comments, {
+              id = model.new_id('c'),
+              author = c.author and c.author.login or me,
+              body = c.body,
+              created_at = c.createdAt,
+              state = 'draft',
+              gh = { id = c.id, body = c.body, updated_at = c.updatedAt },
+            })
+            tracked[c.id] = true
+            adopted = adopted + 1
+          end
+        end
+      end
+    end
+    for ti = #data.threads, 1, -1 do
+      local t = data.threads[ti]
+      local n = nodes[t.id]
+      if n then
+        for j = #t.comments, 1, -1 do
+          local r = t.comments[j]
+          if r.state == 'published' then
+            local live = published[r.id]
+            if not live then
+              if r.staged_body then
+                t.comments[j] = { id = model.new_id('c'), author = me, body = r.staged_body, created_at = os.time(), state = 'draft' }
+                table.insert(notes, ('a comment you were editing was deleted on github.com; your edit is a draft reply now: %s'):format(first_line(r.staged_body)))
+              else
+                table.remove(t.comments, j)
+              end
+            elseif live.lastEditedAt ~= r.edited_at then
+              if r.staged_delete then
+                table.remove(t.comments, j)
+                table.insert(notes, ('deletion cancelled, the comment was edited on github.com: %s'):format(first_line(live.body)))
+              elseif not r.staged_conflict then
+                r.staged_conflict = true
+                table.insert(notes, ('your staged edit conflicts with an edit on github.com: %s'):format(first_line(live.body)))
+              end
+            end
+          end
+        end
+      end
+      if #t.comments == 0 and not t.resolve_staged then
+        table.remove(data.threads, ti)
+      end
+    end
+    if vim.deep_equal(before, data) then
+      return false
+    end
   end)
+  if adopted > 0 and foreign then
+    vim.notify(('diffy: adopted your pending review from GitHub (%d comment%s)'):format(adopted, adopted == 1 and '' or 's'))
+  end
+  for _, n in ipairs(notes) do
+    warn(n)
+  end
+end
+
+--- Per branch store: one sync at a time across the nvim's sessions on it.
+local syncs = {} -- threads.json path -> { running, again, held, waiting }
+
+local function sync_state(session)
+  local p = drafts.path(session.gitdir, session.branch)
+  syncs[p] = syncs[p] or { waiting = {} }
+  return syncs[p]
+end
+
+local git_cb = function(session, args, cb)
+  run.git(args, { cwd = session.root, session = session, notify_on_error = false, on_exit = cb })
 end
 
 local function raw_diff(root, extra_args, x, y, cb)
@@ -806,522 +1143,752 @@ local function slice_file_section(raw_text, path)
   return nil
 end
 
---- `M.refresh`, then re-decorate. `cb()` as for `M.refresh`.
-local function refresh_and_decorate(session, cb)
-  M.refresh(session, function()
-    if not session.closed then
-      require('diffy.review.ui').decorate(session)
-    end
-    cb()
+--- `-U0` files of `merge-base...c`, once per sync.
+local function mb_files(ctx, c, cb)
+  if ctx.diffs[c] then
+    cb(ctx.diffs[c])
+    return
+  end
+  raw_diff(ctx.session.root, { '-U0' }, ctx.mb, c, function(raw)
+    ctx.diffs[c] = model.parse_diff_files(raw)
+    cb(ctx.diffs[c])
   end)
 end
 
---- Runs the mutations for a validated push: delete any existing pending
---- review, create the primary batch, drafts on other commits, draft
---- replies, then drop every pushed draft comment from the store (the next
---- `M.refresh` re-fetches them from GitHub). `cb(ok)`.
-local function push_execute(session, plan, cb)
-  local review = session.review
-  local root = session.root
-
-  local function finish(ok)
-    local pushed = {}
-    for _, group in ipairs({ plan.primary_threads, plan.other_drafts, plan.replies, plan.followups or {} }) do
-      for _, d in ipairs(group) do
-        if d._pushed then
-          table.insert(pushed, d.comment.id)
+--- `path` at the PR head (GitHub wants a renamed file's new name).
+local function head_path(ctx, path, cb)
+  if ctx.renames then
+    cb(ctx.renames[path] or path)
+    return
+  end
+  git_cb(ctx.session, { 'diff', '-z', '-M', '--name-status', ctx.mb, ctx.head }, function(res)
+    ctx.renames = {}
+    if res.code == 0 then
+      for _, rec in ipairs(parse.name_status(res.stdout or '')) do
+        if rec.status == 'R' then
+          ctx.renames[rec.old_path] = rec.path
         end
       end
     end
-    drafts.remove(session, pushed, { quiet = true })
-    refresh_and_decorate(session, function()
-      cb(ok)
-    end)
-  end
+    cb(ctx.renames[path] or path)
+  end)
+end
 
-  --- Transport callback: marks `d` pushed or records a warning, then `next_fn()`.
-  local function record_push(d, next_fn)
-    return function(data, err)
-      if data then
-        d._pushed = true
-      else
-        table.insert(plan.warnings, d.thread.id .. ': ' .. tostring(err))
-      end
-      next_fn()
-    end
+--- How GitHub can take the first draft of thread `t`: `cb(target)` with
+--- `{ kind = 'thread', path, side, start, line }` (at the PR head) or
+--- `{ kind = 'legacy', commit, path, pos }` (one line of an older commit),
+--- else `cb(nil, why)`: 'worktree' (no commit), 'unpushed' (a commit GitHub
+--- doesn't have), 'outside the diff' (beyond the changes and 3 lines of
+--- context of merge-base...commit).
+local function place_root(ctx, t, cb)
+  local a = t.anchor
+  if not a.commit or a.commit == 'worktree' or a.commit == 'index' then
+    cb(nil, 'worktree')
+    return
   end
-
-  local function push_replies(review_id)
-    local i = 0
-    local function next_reply()
-      i = i + 1
-      if i > #plan.replies then
-        finish(true)
-        return
-      end
-      local d = plan.replies[i]
-      M.transport(MUTATIONS.add_reply, { r = review_id, t = d.reply_to or d.thread.id, b = d.comment.body }, record_push(d, next_reply))
-    end
-    next_reply()
+  if not a.side then
+    cb(nil, 'file comment')
+    return
   end
-
-  -- Find the threads this push just created (matched by path, first body and
-  -- line within the new pending review) so their follow-up drafts become replies.
-  local function push_followups(review_id)
-    local pending = {}
-    for _, f in ipairs(plan.followups or {}) do
-      if f.root._pushed then
-        table.insert(pending, f)
-      end
-    end
-    if #pending == 0 then
-      push_replies(review_id)
+  local old = a.side == 'old'
+  local gh_side = old and 'LEFT' or 'RIGHT'
+  local c = a.commit
+  if old and not a.base_relative then
+    -- the full view's left side is the merge-base itself
+    c = c == ctx.mb and ctx.head or (c:match('^(.+)%^$') or c)
+  end
+  local root = ctx.session.root
+  git_cb(ctx.session, { 'merge-base', '--is-ancestor', c, ctx.head }, function(res)
+    if res.code == 1 then
+      cb(nil, 'unpushed')
       return
     end
-    fetch_session(session, function(read, rerr)
-      local nodes = read and read.nodes
-      do
-        if not nodes then
-          for _, f in ipairs(pending) do
-            table.insert(plan.warnings, f.thread.id .. ": couldn't read the pushed threads: " .. tostring(rerr))
-          end
-          push_replies(review_id)
+    -- `s`/`e`: lines of `c`'s new side, or of the merge-base for the old side
+    local function with_lines(path, s, e)
+      mb_files(ctx, c, function(files)
+        local _, hunks = model.diff_file_hunks(files, path, not old and 'new' or nil)
+        if not model.anchor_valid(hunks, a.side, s, e) then
+          cb(nil, 'outside the diff')
           return
         end
-        -- Identical bodies on one file are common ("nit"): the line tells them
-        -- apart, and a node taken by one root can't be another's.
-        local taken = {}
-        for _, f in ipairs(pending) do
-          if not f.root._reply_to then
-            local path = plan.head_path(f.thread.anchor.path)
-            local line = f.root._gh_line or f.root._end_line
-            for _, n in ipairs(nodes) do
-              local first = n.comments.nodes[1]
-              if not taken[n.id] and n.path == path and first and first.body == f.root.comment.body
-                and first.originalLine == line
-                and first.pullRequestReview and first.pullRequestReview.id == review_id then
-                taken[n.id] = true
-                f.root._reply_to = n.id
-                break
+        head_path(ctx, a.path, function(hp)
+          if c == ctx.head then
+            cb({ kind = 'thread', path = hp, side = gh_side, start = s, line = e })
+            return
+          end
+          if s == e then
+            raw_diff(root, { '-U3' }, ctx.mb, c, function(raw)
+              local section = slice_file_section(raw, a.path)
+              local pos = section and model.diff_position(section, e, a.side)
+              if pos then
+                cb({ kind = 'legacy', commit = c, path = a.path, pos = pos })
+              else
+                cb(nil, 'outside the diff')
               end
-            end
-          end
-          f.reply_to = f.root._reply_to
-          if f.reply_to then
-            table.insert(plan.replies, f)
-          else
-            table.insert(plan.warnings, f.thread.id .. ": couldn't find the pushed thread to reply to")
-          end
-        end
-        push_replies(review_id)
-      end
-    end)
-  end
-
-  local function push_other(review_id)
-    local i = 0
-    local function next_other()
-      i = i + 1
-      if i > #plan.other_drafts then
-        push_followups(review_id)
-        return
-      end
-      local d = plan.other_drafts[i]
-      local anchor = d.thread.anchor
-      if d._line == d._end_line then
-        raw_diff(root, { '-U3' }, review.merge_base, d._commit, function(raw)
-          local section = slice_file_section(raw, anchor.path)
-          local pos = section and model.diff_position(section, d._line)
-          if not pos then
-            table.insert(plan.warnings, d.thread.id .. ": couldn't compute a diff position")
-            next_other()
+            end)
             return
           end
-          M.transport(MUTATIONS.add_comment, {
-            r = review_id,
-            c = d._commit,
-            p = plan.head_path(anchor.path),
-            pos = pos,
-            b = d.comment.body,
-          }, record_push(d, next_other))
-        end)
-      else
-        raw_diff(root, { '-U0' }, d._commit, session.head_sha, function(traw)
-          local _, thunks = model.diff_file_hunks(model.parse_diff_files(traw), anchor.path)
-          local hs, he = model.map_range(thunks, d._line, d._end_line)
-          if not hs then
-            table.insert(plan.warnings, d.thread.id .. ": multi-line comment on another commit couldn't be tracked to HEAD")
-            next_other()
+          -- a legacy position is one line: a range on an older commit goes at head
+          local function at_head(hs, he)
+            mb_files(ctx, ctx.head, function(hfiles)
+              local _, hh = model.diff_file_hunks(hfiles, old and path or hp, not old and 'new' or nil)
+              if hs and model.anchor_valid(hh, a.side, hs, he) then
+                cb({ kind = 'thread', path = hp, side = gh_side, start = hs, line = he })
+              else
+                cb(nil, 'outside the diff')
+              end
+            end)
+          end
+          if old then
+            at_head(s, e)
             return
           end
-          d._gh_line = he
-          M.transport(MUTATIONS.add_thread, {
-            r = review_id,
-            p = plan.head_path(anchor.path),
-            l = he,
-            s = 'RIGHT',
-            sl = hs ~= he and hs or nil,
-            ss = hs ~= he and 'RIGHT' or nil,
-            b = d.comment.body,
-          }, record_push(d, next_other))
-        end)
-      end
-    end
-    next_other()
-  end
-
-  local function create_primary()
-    local threads_input = {}
-    for _, d in ipairs(plan.primary_threads) do
-      local anchor = d.thread.anchor
-      local input = {
-        path = plan.head_path(anchor.path),
-        body = d.comment.body,
-        side = anchor.side == 'old' and 'LEFT' or 'RIGHT',
-        line = d._end_line,
-      }
-      if d._line ~= d._end_line then
-        input.startLine = d._line
-        input.startSide = input.side
-      end
-      table.insert(threads_input, input)
-    end
-    local function created(review_id)
-      for _, d in ipairs(plan.primary_threads) do
-        d._pushed = true
-      end
-      push_other(review_id)
-    end
-    M.transport(MUTATIONS.create_review, { pr = plan.pr_id, c = plan.primary_commit, t = threads_input }, function(data, err)
-      if data then
-        created(data.addPullRequestReview.pullRequestReview.id)
-        return
-      end
-      -- A big review (35 threads) creates the review and every thread, then
-      -- fails resolving the returned review with RESOURCE_LIMITS_EXCEEDED:
-      -- check what landed before calling it a failure.
-      do
-        local function failed()
-          vim.notify('diffy: push failed - ' .. tostring(err), vim.log.levels.ERROR)
-          -- the next push must see, and replace, whatever half-landed
-          M.refresh(session, function()
-            cb(false)
+          raw_diff(root, { '-U0' }, c, ctx.head, function(traw)
+            local _, th = model.diff_file_hunks(model.parse_diff_files(traw), a.path)
+            at_head(model.map_range(th, s, e))
           end)
-        end
-        fetch_session(session, function(read)
-          local pending = read and read.pr.pending
-          local landed = pending and #pending.comments.nodes or 0
-          if pending and landed == math.min(#threads_input, 100) then
-            created(pending.id)
-          else
-            failed()
-          end
         end)
-      end
-    end)
-  end
-
-  if #plan.primary_threads + #plan.other_drafts + #plan.replies == 0 then
-    finish(true)
-    return
-  end
-  if plan.pending_review_id then
-    M.transport(MUTATIONS.delete_review, { id = plan.pending_review_id }, function(_, err)
-      if err then
-        vim.notify('diffy: push failed - ' .. tostring(err), vim.log.levels.ERROR)
-        cb(false)
-        return
-      end
-      create_primary()
-    end)
-  else
-    create_primary()
-  end
-end
-
--- Deleting the pending review removes its own comments but not published
--- ones. So a thread with no published comment (a new `t<N>` draft, or one
--- imported by `:Diffy review pull`) is gone after that delete and must be
--- recreated; a thread with a published root keeps its id and just gets
--- `addPullRequestReviewThreadReply`. Later drafts on a recreated thread
--- are replies to it (`followups`); its id is only known afterwards.
-local function classify_drafts(threads)
-  local roots, replies, followups = {}, {}, {}
-  for _, t in ipairs(threads) do
-    local has_published = false
-    for _, c in ipairs(t.comments) do
-      if c.state == 'published' then
-        has_published = true
-      end
+      end)
     end
-    local root_draft
-    for i, c in ipairs(t.comments) do
-      if c.state == 'draft' then
-        if i == 1 and not has_published then
-          root_draft = { thread = t, comment = c }
-          table.insert(roots, root_draft)
-        elseif has_published then
-          table.insert(replies, { thread = t, comment = c })
-        elseif root_draft then
-          table.insert(followups, { thread = t, comment = c, root = root_draft })
+    if old and not a.base_relative then
+      raw_diff(root, { '-U0' }, a.commit, ctx.mb, function(traw)
+        local mb_name, th = model.diff_file_hunks(model.parse_diff_files(traw), a.path)
+        local s, e = model.map_range(th, a.start_line, a.end_line)
+        if not s then
+          cb(nil, 'outside the diff')
+        else
+          with_lines(mb_name, s, e)
         end
-      end
+      end)
+    else
+      with_lines(a.path, a.start_line, a.end_line)
     end
-  end
-  return roots, replies, followups
+  end)
 end
 
---- Split validated root drafts: invalid ones go to `warnings`; old-side
---- ones and new-side ones on the commit holding the most drafts
---- (`primary`, default `head_sha`) form the initial review batch, the rest
---- are `other_drafts`.
-local function partition_roots(roots, head_sha, warnings)
-  local new_side, old_side = {}, {}
-  for _, d in ipairs(roots) do
-    if d._invalid then
-      table.insert(warnings, ('%s: %s'):format(d.thread.id, d._invalid))
-    elseif d.thread.anchor.side == 'old' then
-      table.insert(old_side, d)
-    else
-      new_side[d._commit] = new_side[d._commit] or {}
-      table.insert(new_side[d._commit], d)
+local function set_blocked(ctx, cid, why)
+  write(ctx.session, function(data)
+    local _, c = find_comment(data.threads, cid)
+    if not c or c.blocked == why then
+      return false
     end
-  end
-  local primary, best = head_sha, -1
-  for c, list in pairs(new_side) do
-    if #list > best then
-      primary, best = c, #list
-    end
-  end
-  local primary_threads = {}
-  vim.list_extend(primary_threads, old_side)
-  local other_drafts = {}
-  for c, list in pairs(new_side) do
-    if c == primary then
-      vim.list_extend(primary_threads, list)
-    else
-      vim.list_extend(other_drafts, list)
-    end
-  end
-  return primary, primary_threads, other_drafts
+    c.blocked = why
+  end)
 end
 
---- `:Diffy review push`: recreate the viewer's pending review from local
---- drafts (`state == 'draft'` comments are the source of truth).
---- GitHub rejects the whole review if one thread is invalid, so every draft
---- is validated against the `merge-base...C` diff (and old-side anchors
---- tracked from `C^` to merge-base) before any API call. A draft failing
---- either check stays local with a warning. `cb(ok, warnings)`.
-function M.push(session, cb)
-  local review = session.review
-  if not (review and review.pr) then
-    vim.notify('diffy: nothing to push - the branch has no open PR', vim.log.levels.WARN)
-    cb(false, {})
+local function forget_review(session, id)
+  write(session, function(data)
+    if data.mirror.review ~= id then
+      return false
+    end
+    data.mirror.review = nil
+  end)
+end
+
+--- The pending review to mirror into: the known one, else a new one, else
+--- (another nvim or github.com made one meanwhile) the one GitHub has.
+--- `cb(id)` or `cb(nil, err)`.
+local function ensure_review(ctx, cb)
+  local id = drafts.load(ctx.session).mirror.review
+  if id then
+    cb(id)
     return
   end
-  local root = session.root
-  local merge_base = review.merge_base
-  local head_sha = session.head_sha
-
-  local roots, replies, followups = classify_drafts(review.threads)
-  if #roots == 0 and #replies == 0 then
-    vim.notify('diffy: no drafts to push')
-    cb(true, {})
-    return
+  local function keep(rid)
+    write(ctx.session, function(data)
+      data.mirror.review = rid
+    end)
+    cb(rid)
   end
-
-  local warnings = {}
-  local diff_cache = {}
-  local function commit_diff(c, cb2)
-    if diff_cache[c] then
-      cb2(diff_cache[c])
+  M.transport(MUTATIONS.create_review, { pr = ctx.pr.id, c = ctx.head }, function(data, err)
+    local made = data and data.addPullRequestReview and data.addPullRequestReview.pullRequestReview
+    if made then
+      ctx.created = made.id
+      keep(made.id)
       return
     end
-    -- `-U0`: `model.anchor_valid` adds the ±3 context window itself and
-    -- expects hunks bounded to exactly the changed lines.
-    raw_diff(root, { '-U0' }, merge_base, c, function(raw)
-      local entry = { files = model.parse_diff_files(raw), raw = raw }
-      diff_cache[c] = entry
-      cb2(entry)
-    end)
-  end
-
-  run.git({ 'diff', '-z', '-M', '--name-status', merge_base, head_sha }, {
-    cwd = root,
-    session = session,
-    notify_on_error = false,
-    on_exit = function(res)
-      local rename_map = {}
-      if res.code == 0 then
-        for _, rec in ipairs(parse.name_status(res.stdout or '')) do
-          if rec.status == 'R' then
-            rename_map[rec.old_path] = rec.path
-          end
-        end
-      end
-      local function head_path(path)
-        return rename_map[path] or path
-      end
-
-      local function after_validate()
-        local primary, primary_threads, other_drafts = partition_roots(roots, head_sha, warnings)
-        push_execute(session, {
-          pr_id = review.pr.id,
-          pending_review_id = review.pr.pending and review.pr.pending.id,
-          primary_commit = primary,
-          primary_threads = primary_threads,
-          other_drafts = other_drafts,
-          replies = replies,
-          followups = followups,
-          head_path = head_path,
-          warnings = warnings,
-        }, function(ok)
-          cb(ok, warnings)
-        end)
-      end
-
-      if #roots == 0 then
-        after_validate()
+    if not is_one_pending(err) then
+      cb(nil, err)
+      return
+    end
+    M.transport(Q.pending, repo_vars(ctx.session), function(d, perr)
+      local pr = d and d.repository and d.repository.pullRequest
+      local node = pr and pr.reviews.nodes[1]
+      if not node then
+        cb(nil, perr or err)
         return
       end
-      local remaining = #roots
-      for _, d in ipairs(roots) do
-        local anchor = d.thread.anchor
-        local c = anchor.commit
-        if anchor.side == 'old' then
-          -- the full-PR view's left side is the merge-base itself
-          c = anchor.commit == merge_base and head_sha or (anchor.commit:match('^(.+)%^$') or anchor.commit)
-        end
-        d._commit = c
-        commit_diff(c, function(entry)
-          local function done()
-            remaining = remaining - 1
-            if remaining == 0 then
-              after_validate()
-            end
-          end
-          if anchor.side == 'old' then
-            raw_diff(root, { '-U0' }, anchor.commit, merge_base, function(traw)
-              local mb_name, thunks = model.diff_file_hunks(model.parse_diff_files(traw), anchor.path)
-              local mb_s, mb_e = model.map_range(thunks, anchor.start_line, anchor.end_line)
-              if not mb_s then
-                d._invalid = "old-side comment couldn't be tracked to the merge-base"
-              else
-                local _, vhunks = model.diff_file_hunks(entry.files, mb_name)
-                if model.anchor_valid(vhunks, 'old', mb_s, mb_e) then
-                  d._line, d._end_line = mb_s, mb_e
-                else
-                  d._invalid = 'line could not be resolved'
-                end
-              end
-              done()
-            end)
-          else
-            local _, vhunks = model.diff_file_hunks(entry.files, anchor.path, 'new')
-            if model.anchor_valid(vhunks, 'new', anchor.start_line, anchor.end_line) then
-              d._line, d._end_line = anchor.start_line, anchor.end_line
-            else
-              d._invalid = 'line could not be resolved'
-            end
-            done()
-          end
-        end)
-      end
-    end,
-  })
+      ctx.adopted = true
+      keep(node.id)
+    end)
+  end)
 end
 
---- `:Diffy review pull`: import the viewer's pending review into local
---- drafts, anchored at `originalCommit`/`originalLine` rather than the
---- live-tracked `commit`/`line`, so a later push recreates them faithfully.
---- Asks before replacing existing local drafts. `cb(ok)`.
-function M.pull(session, cb)
-  local review = session.review
-  local pending = review and review.pr and review.pr.pending
-  if not pending then
-    vim.notify('diffy: no pending review to pull', vim.log.levels.WARN)
-    cb(false)
-    return
-  end
-
-  local imported, by_thread = {}, {}
-  for _, t in ipairs(review.threads) do
-    for _, c in ipairs(t._raw_comments or {}) do
-      if c.pullRequestReview and c.pullRequestReview.id == pending.id then
-        local entry = by_thread[t.id]
-        if not entry then
-          entry = {
-            id = t.id,
-            backend = 'github',
-            anchor = {
-              path = t.anchor.path,
-              side = t.anchor.side,
-              start_line = c.originalStartLine or c.originalLine,
-              end_line = c.originalLine,
-              commit = c.originalCommit and c.originalCommit.oid,
-              excerpt = nil,
-              base_relative = t.anchor.side == 'old' or nil,
-            },
-            comments = {},
-            resolved = t.resolved,
-          }
-          by_thread[t.id] = entry
-          table.insert(imported, entry)
+--- Mirror one draft (`it = { t, c, reply_to? }`) to `target`, then `next()`.
+local function send(ctx, it, target, next, retried)
+  ensure_review(ctx, function(review_id, rerr)
+    if not review_id then
+      table.insert(ctx.notes, ("couldn't create your pending review: %s"):format(tostring(rerr)))
+      next()
+      return
+    end
+    local body = it.c.body
+    local function landed(x, gh_thread)
+      ctx.landed = true
+      local gh = { id = x.id, body = body, updated_at = x.updatedAt }
+      write(ctx.session, function(data)
+        local t, c = find_comment(data.threads, it.c.id)
+        if not c then
+          -- deleted while on its way
+          table.insert(data.mirror.deleted, { id = gh.id, updated_at = gh.updated_at })
+          return
         end
-        table.insert(entry.comments, to_comment(c, 'draft'))
+        c.gh, c.blocked = gh, nil
+        if gh_thread and not t.github then
+          t.gh_thread = gh_thread
+        end
+      end)
+      next()
+    end
+    local function failed(err)
+      if is_not_found(err) and tostring(err):find(review_id, 1, true) and not retried then
+        -- deleted with its last comment, or on github.com
+        forget_review(ctx.session, review_id)
+        send(ctx, it, target, next, true)
+        return
+      end
+      if tostring(err):lower():find('could not be resolved', 1, true) then
+        set_blocked(ctx, it.c.id, 'outside the diff')
+      else
+        table.insert(ctx.notes, ("couldn't mirror a draft: %s"):format(tostring(err)))
+      end
+      next()
+    end
+    if target.kind == 'reply' then
+      M.transport(MUTATIONS.add_reply, { r = review_id, t = it.reply_to, b = body }, function(data, err)
+        local x = data and data.addPullRequestReviewThreadReply and data.addPullRequestReviewThreadReply.comment
+        if x then
+          landed(x)
+        else
+          failed(err)
+        end
+      end)
+    elseif target.kind == 'thread' then
+      local range = target.start ~= target.line
+      M.transport(MUTATIONS.add_thread, {
+        r = review_id,
+        p = target.path,
+        l = target.line,
+        s = target.side,
+        sl = range and target.start or nil,
+        ss = range and target.side or nil,
+        b = body,
+      }, function(data, err)
+        local th = data and data.addPullRequestReviewThread and data.addPullRequestReviewThread.thread
+        local x = th and th.comments.nodes[1]
+        if x then
+          landed(x, th.id)
+        else
+          failed(err)
+        end
+      end)
+    else
+      M.transport(MUTATIONS.add_comment, { r = review_id, c = target.commit, p = target.path, pos = target.pos, b = body }, function(data, err)
+        local x = data and data.addPullRequestReviewComment and data.addPullRequestReviewComment.comment
+        if not x then
+          failed(err)
+          return
+        end
+        -- the legacy mutation doesn't say which thread it made
+        M.transport(Q.recent, repo_vars(ctx.session), function(rd)
+          local pr = rd and rd.repository and rd.repository.pullRequest
+          local tid
+          for _, n in ipairs(pr and pr.reviewThreads.nodes or {}) do
+            if n.comments.nodes[1] and n.comments.nodes[1].id == x.id then
+              tid = n.id
+            end
+          end
+          landed(x, tid)
+        end)
+      end)
+    end
+  end)
+end
+
+--- Mirrored drafts you deleted: out of the pending review, unless edited on
+--- github.com since (an edit beats a delete; the next read adopts it).
+local function sync_deleted(ctx, nx)
+  each(drafts.load(ctx.session).mirror.deleted, function(d, next)
+    local function forget(empty)
+      write(ctx.session, function(data)
+        for i = #data.mirror.deleted, 1, -1 do
+          if data.mirror.deleted[i].id == d.id then
+            table.remove(data.mirror.deleted, i)
+          end
+        end
+        if empty then
+          data.mirror.review = nil
+        end
+      end)
+    end
+    M.transport(Q.comment, { id = d.id }, function(data, err)
+      local node = data and data.node
+      if not node then
+        if is_not_found(err) then
+          forget(false)
+        end
+        next()
+        return
+      end
+      if node.updatedAt ~= d.updated_at then
+        forget(false)
+        ctx.reread = true
+        next()
+        return
+      end
+      M.transport(MUTATIONS.delete, { id = d.id }, function(res, derr)
+        if res or is_not_found(derr) then
+          forget(emptied(res))
+        end
+        next()
+      end)
+    end)
+  end, function()
+    nx(true)
+  end)
+end
+
+--- Drafts sent to the agent leave the pending review: each comment has one
+--- destination.
+local function sync_sent(ctx, nx)
+  local list = {}
+  for _, t in ipairs(drafts.load(ctx.session).threads) do
+    for _, c in ipairs(t.comments) do
+      if c.gh and c.state ~= 'draft' and c.state ~= 'published' then
+        table.insert(list, c)
       end
     end
   end
-  if #imported == 0 then
-    vim.notify('diffy: the pending review has nothing importable', vim.log.levels.WARN)
-    cb(false)
+  each(list, function(c, next)
+    M.transport(MUTATIONS.delete, { id = c.gh.id }, function(data, err)
+      if data or is_not_found(err) then
+        write(ctx.session, function(d)
+          local _, sc = find_comment(d.threads, c.id)
+          if sc then
+            sc.gh = nil
+          end
+          if emptied(data) then
+            d.mirror.review = nil
+          end
+        end)
+      end
+      next()
+    end)
+  end, function()
+    nx(true)
+  end)
+end
+
+--- Drafts edited since they were mirrored: re-read first; changed on
+--- github.com too is a conflict (both kept), deleted there means yours is
+--- mirrored again.
+local function sync_edits(ctx, nx)
+  local list = {}
+  for _, t in ipairs(drafts.load(ctx.session).threads) do
+    for _, c in ipairs(t.comments) do
+      if c.state == 'draft' and c.gh and not c.conflict and not c.origin and c.body ~= c.gh.body then
+        table.insert(list, c)
+      end
+    end
+  end
+  each(list, function(it, next)
+    local function store_gh(gh)
+      write(ctx.session, function(d)
+        local _, c = find_comment(d.threads, it.id)
+        if not c then
+          return false
+        end
+        c.gh = gh
+      end)
+    end
+    M.transport(Q.comment, { id = it.gh.id }, function(data, err)
+      local node = data and data.node
+      if not node then
+        if is_not_found(err) then
+          store_gh(nil)
+        end
+        next()
+        return
+      end
+      if node.updatedAt ~= it.gh.updated_at and node.body ~= it.gh.body then
+        write(ctx.session, function(d)
+          local t, c, j = find_comment(d.threads, it.id)
+          if not c then
+            return false
+          end
+          if node.body == c.body then
+            c.gh = { id = node.id, body = node.body, updated_at = node.updatedAt }
+          else
+            add_web_copy(t, j, c, node)
+            table.insert(ctx.notes, ('sync conflict, both versions kept: %s'):format(first_line(c.body)))
+          end
+        end)
+        next()
+        return
+      end
+      M.transport(MUTATIONS.update, { id = it.gh.id, b = it.body }, function(res, uerr)
+        local x = res and res.updatePullRequestReviewComment and res.updatePullRequestReviewComment.pullRequestReviewComment
+        if x then
+          store_gh({ id = x.id, body = it.body, updated_at = x.updatedAt })
+        elseif is_not_found(uerr) then
+          store_gh(nil)
+        end
+        next()
+      end)
+    end)
+  end, function()
+    nx(true)
+  end)
+end
+
+--- Drafts not mirrored yet: new threads where GitHub can take them, replies
+--- once their thread is on GitHub.
+local function sync_new(ctx, nx)
+  local work = {}
+  for _, t in ipairs(drafts.load(ctx.session).threads) do
+    for i, c in ipairs(t.comments) do
+      if c.state == 'draft' and not c.gh and not c.origin then
+        if t.github then
+          table.insert(work, { t = t, c = c, reply_to = t.id })
+        else
+          -- `gh_thread` only holds while the thread's first comment is mirrored
+          table.insert(work, { t = t, c = c, root = i == 1 })
+        end
+      end
+    end
+  end
+  each(work, function(it, next)
+    if it.reply_to then
+      send(ctx, it, { kind = 'reply' }, next)
+      return
+    end
+    if not it.root then
+      -- a reply on a draft thread follows its first comment
+      local t = drafts.find(drafts.load(ctx.session).threads, it.t.id)
+      if t and t.gh_thread and t.comments[1].gh then
+        it.reply_to = t.gh_thread
+        send(ctx, it, { kind = 'reply' }, next)
+      else
+        set_blocked(ctx, it.c.id, t and t.comments[1] and t.comments[1].blocked)
+        next()
+      end
+      return
+    end
+    place_root(ctx, it.t, function(target, why)
+      if not target then
+        set_blocked(ctx, it.c.id, why)
+        next()
+        return
+      end
+      send(ctx, it, target, next)
+    end)
+  end, function()
+    nx(true)
+  end)
+end
+
+--- Apply staged changes to published comments and threads, re-reading each
+--- comment first: changed on github.com since is a conflict (an edit beats a
+--- delete), deleted there turns a staged edit into a draft reply. A change
+--- that fails stays staged, marked for the next sync to retry.
+--- `list`: `{ kind = 'edit'|'delete'|'resolve'|'unresolve', thread_id, comment_id }`.
+local function apply_staged(session, list, notes, cb)
+  local function edit_record(item, fn)
+    write(session, function(d)
+      local t = drafts.find(d.threads, item.thread_id)
+      if not t then
+        return false
+      end
+      local r, ri
+      if item.comment_id then
+        for j, c in ipairs(t.comments) do
+          if c.id == item.comment_id then
+            r, ri = c, j
+          end
+        end
+        if not r then
+          return false
+        end
+      end
+      fn(t, r, ri)
+      if r and t.comments[ri] == r and r.state == 'published' and not (r.staged_body or r.staged_delete) then
+        table.remove(t.comments, ri)
+      end
+      if #t.comments == 0 and not t.resolve_staged then
+        local _, i = drafts.find(d.threads, t.id)
+        table.remove(d.threads, i)
+      end
+    end)
+  end
+  each(list, function(item, next)
+    if item.kind == 'resolve' or item.kind == 'unresolve' then
+      M.transport(MUTATIONS[item.kind], { t = item.thread_id }, function(data, err)
+        edit_record(item, function(t)
+          if data then
+            t.resolve_staged, t.retry = nil, nil
+          else
+            t.retry = true
+          end
+        end)
+        if not data then
+          table.insert(notes, ("couldn't %s a thread, staged for the next sync: %s"):format(item.kind, tostring(err)))
+        end
+        next()
+      end)
+      return
+    end
+    M.transport(Q.comment, { id = item.comment_id }, function(data, err)
+      local node = data and data.node
+      local record = drafts.find(drafts.load(session).threads, item.thread_id)
+      local r
+      for _, c in ipairs(record and record.comments or {}) do
+        if c.id == item.comment_id then
+          r = c
+        end
+      end
+      if not r then
+        next()
+        return
+      end
+      if not node then
+        if not is_not_found(err) then
+          edit_record(item, function(_, rec)
+            rec.retry = true
+          end)
+          table.insert(notes, ("couldn't check a comment, staged for the next sync: %s"):format(tostring(err)))
+        else
+          edit_record(item, function(t, rec, ri)
+            if rec.staged_body then
+              t.comments[ri] = { id = model.new_id('c'), author = cached_author, body = rec.staged_body, created_at = os.time(), state = 'draft' }
+              table.insert(notes, ('a comment you were editing was deleted on github.com; your edit is a draft reply now: %s'):format(first_line(rec.staged_body)))
+            else
+              rec.staged_delete = nil
+            end
+          end)
+        end
+        next()
+        return
+      end
+      if node.lastEditedAt ~= r.edited_at then
+        edit_record(item, function(_, rec)
+          if rec.staged_delete then
+            rec.staged_delete = nil
+            table.insert(notes, ('deletion cancelled, the comment was edited on github.com: %s'):format(first_line(node.body)))
+          else
+            rec.staged_conflict = true
+            table.insert(notes, ('your staged edit conflicts with an edit on github.com: %s'):format(first_line(node.body)))
+          end
+        end)
+        next()
+        return
+      end
+      local mutation, vars = MUTATIONS.update, { id = item.comment_id, b = r.staged_body }
+      if r.staged_delete then
+        mutation, vars = MUTATIONS.delete, { id = item.comment_id }
+      end
+      M.transport(mutation, vars, function(res, merr)
+        edit_record(item, function(_, rec)
+          if res then
+            rec.staged_body, rec.staged_delete, rec.retry = nil, nil, nil
+          else
+            rec.retry = true
+          end
+        end)
+        if not res then
+          table.insert(notes, ("couldn't apply a staged change, staged for the next sync: %s"):format(tostring(merr)))
+        end
+        next()
+      end)
+    end)
+  end, cb)
+end
+
+--- Staged changes a failed submit left behind.
+local function sync_retry(ctx, nx)
+  local changes, resolves = {}, {}
+  for _, t in ipairs(drafts.load(ctx.session).threads) do
+    for _, c in ipairs(t.comments) do
+      if c.state == 'published' and c.retry then
+        table.insert(changes, { kind = c.staged_delete and 'delete' or 'edit', thread_id = t.id, comment_id = c.id })
+      end
+    end
+    if t.retry and t.resolve_staged then
+      table.insert(resolves, { kind = t.resolve_staged, thread_id = t.id })
+    end
+  end
+  apply_staged(ctx.session, vim.list_extend(changes, resolves), ctx.notes, function()
+    nx(true)
+  end)
+end
+
+local function run_sync(session, done)
+  local l = session.layer
+  local ctx = {
+    session = session,
+    pr = l.cache.pr,
+    mb = session.review.merge_base,
+    head = l.cache.pr.head_sha,
+    diffs = {},
+    notes = {},
+  }
+  chain({
+    function(nx)
+      sync_deleted(ctx, nx)
+    end,
+    function(nx)
+      sync_sent(ctx, nx)
+    end,
+    function(nx)
+      sync_edits(ctx, nx)
+    end,
+    function(nx)
+      sync_new(ctx, nx)
+    end,
+    function(nx)
+      sync_retry(ctx, nx)
+    end,
+  }, function()
+    local function finish()
+      for _, n in ipairs(ctx.notes) do
+        warn(n)
+      end
+      if not session.closed then
+        require('diffy.panels.log').apply_layer(session)
+        if ctx.adopted or ctx.reread then
+          -- the review another nvim or github.com made: its comments join yours
+          M.read(session)
+        end
+      end
+      done()
+    end
+    if ctx.created and not ctx.landed then
+      -- created for a draft GitHub then refused: don't leave it empty
+      M.transport(MUTATIONS.delete_review, { id = ctx.created }, function()
+        forget_review(session, ctx.created)
+        finish()
+      end)
+      return
+    end
+    finish()
+  end)
+end
+
+--- Mirror your drafts into your pending review now (one sync at a time per
+--- branch; a request during one queues another). No-op without an attached,
+--- online layer. `cb()` (optional) runs after it; `DiffyReady` `sync` fires.
+function M.mirror(session, cb)
+  local st = sync_state(session)
+  if cb then
+    table.insert(st.waiting, cb)
+  end
+  if st.running or st.held then
+    st.again = session
     return
   end
-
-  local function apply()
-    drafts.change(session, function(threads)
-      for _, it in ipairs(imported) do
-        local stored
-        for _, s in ipairs(threads) do
-          if s.id == it.id then
-            stored = s
-          end
-        end
-        if not stored then
-          table.insert(threads, it)
-        else
-          stored.anchor = it.anchor
-          for _, c in ipairs(it.comments) do
-            local at = #stored.comments + 1
-            for i, sc in ipairs(stored.comments) do
-              if sc.id == c.id then
-                at = i
-              end
-            end
-            stored.comments[at] = c
-          end
-        end
-      end
-    end)
-    vim.notify(('diffy: pulled %d thread(s) into local drafts'):format(#imported))
-    cb(true)
+  local l = session.layer
+  local function flush()
+    local waiting = st.waiting
+    st.waiting = {}
+    for _, w in ipairs(waiting) do
+      w()
+    end
+    if not session.closed then
+      run.ready({ session = session.id, event = 'sync' })
+    end
   end
-
-  if #drafts.attach(session).threads > 0 then
-    prompt.confirm(session, {
-      'Local drafts already exist for this PR and may differ from the',
-      'pending review on GitHub. Replace them?',
-    }, function(accepted)
-      if accepted then
-        apply()
-      else
-        cb(false)
-      end
-    end)
-  else
-    apply()
+  if session.closed or not (l and l.attached) or l.offline or type(session.review) ~= 'table' or not session.review.merge_base then
+    flush()
+    return
   end
+  st.running = true
+  run_sync(session, function()
+    st.running = false
+    local again = st.again
+    st.again = nil
+    if again and not again.closed then
+      M.mirror(again)
+      return
+    end
+    flush()
+  end)
 end
+
+--- A local change to your comments: mirror it `M.sync_delay` after the
+--- last one. Offline, the next successful read does.
+function M.changed(session)
+  local l = session.layer
+  if session.closed or not (l and l.attached) then
+    return
+  end
+  l.sync_timer = l.sync_timer or vim.uv.new_timer()
+  l.sync_timer:stop()
+  l.sync_timer:start(M.sync_delay, 0, vim.schedule_wrap(function()
+    if not session.closed then
+      M.mirror(session)
+    end
+  end))
+end
+
+-- ---------------------------------------------------------------------
+-- staged changes: kept in the store until a GitHub submit.
+
+--- `x` on a published thread: stage resolving (or unresolving) it; again
+--- cancels.
+function M.toggle_resolve(session, thread)
+  drafts.stage(session, thread, nil, function(t)
+    if t.resolve_staged then
+      t.resolve_staged, t.retry = nil, nil
+    else
+      t.resolve_staged = thread.resolved and 'unresolve' or 'resolve'
+    end
+  end)
+end
+
+--- `e` on your published `comment`: stage `body` as its edit (its own body
+--- cancels it).
+function M.stage_edit(session, thread, comment, body)
+  drafts.stage(session, thread, comment, function(r)
+    r.staged_delete, r.staged_conflict, r.retry = nil, nil, nil
+    if body == comment.body then
+      r.staged_body = nil
+    else
+      r.staged_body = body
+      r.edited_at = comment.last_edited_at
+    end
+  end)
+end
+
+--- Drop the staged edit of `comment`.
+function M.drop_edit(session, thread, comment)
+  drafts.stage(session, thread, comment, function(r)
+    r.staged_body, r.staged_conflict, r.retry = nil, nil, nil
+  end)
+end
+
+--- `dd` on your published `comment`: stage its deletion; again cancels.
+function M.toggle_delete(session, thread, comment)
+  drafts.stage(session, thread, comment, function(r)
+    if r.staged_delete then
+      r.staged_delete, r.retry = nil, nil
+    else
+      r.staged_delete, r.staged_body, r.staged_conflict, r.retry = true, nil, nil, nil
+      r.edited_at = comment.last_edited_at
+    end
+  end)
+end
+
+-- ---------------------------------------------------------------------
+-- submitting
 
 --- Review events `:Diffy review submit` offers: GitHub refuses approving or
 --- requesting changes on your own PR.
@@ -1333,44 +1900,201 @@ function M.verdicts(session)
   return { 'COMMENT', 'APPROVE', 'REQUEST_CHANGES' }
 end
 
---- `:Diffy review submit`: push the drafts, then submit the pending review
---- with `event`/`body`; with no drafts and no pending review, a review
---- with just `event`/`body` (approving without comments). The refresh at
---- the end reloads submitted comments as `published`. `cb(ok, warnings)`.
-function M.submit(session, event, body, cb)
-  local review = session.review
-  local function done(warnings)
-    return function(data, err)
-      if not data then
-        vim.notify('diffy: submit failed - ' .. tostring(err), vim.log.levels.ERROR)
-        cb(false, warnings)
-        return
+--- What a GitHub submit would send: `items` (`{ kind, thread, comment?,
+--- text }`, kinds 'new thread', 'reply', 'edit', 'delete', 'resolve',
+--- 'unresolve'), `stay` (drafts GitHub can't take, with why) and
+--- `conflicts` (their count).
+local function submit_plan(session)
+  local plan = { items = {}, stay = {}, conflicts = 0 }
+  for _, t in ipairs(session.review.threads) do
+    local where = t.anchor.end_line and ('%s:%d'):format(t.anchor.path, t.anchor.end_line) or t.anchor.path
+    local function add(kind, c, body)
+      table.insert(plan.items, { kind = kind, thread = t, comment = c, text = ('%-10s %s  %s'):format(kind, where, first_line(body)) })
+    end
+    for i, c in ipairs(t.comments) do
+      plan.conflicts = plan.conflicts + ((c.conflict or c.staged_conflict) and 1 or 0)
+      if c.state == 'draft' and not c.origin and not c.conflict then
+        if c.gh then
+          add((i == 1 and not t.github) and 'new thread' or 'reply', c, c.body)
+        else
+          table.insert(plan.stay, ('%s  %s (%s)'):format(where, first_line(c.body), c.blocked or 'not mirrored yet'))
+        end
+      elseif c.state == 'published' and c.staged_delete then
+        add('delete', c, c.body)
+      elseif c.state == 'published' and c.staged_body and not c.staged_conflict then
+        add('edit', c, c.staged_body)
       end
-      refresh_and_decorate(session, function()
-        cb(true, warnings)
+    end
+    if t.resolve_staged then
+      add(t.resolve_staged, nil, t.comments[1] and t.comments[1].body)
+    end
+  end
+  return plan
+end
+
+--- The submit itself: excluded drafts out of the pending review, the
+--- review, the staged edits and deletions, then the staged resolves.
+--- `cb(ok, warnings)`.
+local function execute(session, plan, excluded, event, body, cb)
+  local notes = {}
+  local dropped = {}
+  for i, it in ipairs(plan.items) do
+    if excluded[i] and it.kind == 'new thread' then
+      dropped[it.thread] = true -- its replies stay out with it
+    end
+  end
+  local out_drafts, kept_drafts, changes, resolves = {}, {}, {}, {}
+  for i, it in ipairs(plan.items) do
+    local going = not excluded[i] and not dropped[it.thread]
+    local staged = { kind = it.kind, thread_id = it.thread.id, comment_id = it.comment and it.comment.id }
+    if it.kind == 'new thread' or it.kind == 'reply' then
+      table.insert(going and out_drafts or kept_drafts, it.comment)
+    elseif going and (it.kind == 'edit' or it.kind == 'delete') then
+      table.insert(changes, staged)
+    elseif going then
+      table.insert(resolves, staged)
+    end
+  end
+  local review_id = drafts.load(session).mirror.review
+  each(kept_drafts, function(c, next)
+    M.transport(MUTATIONS.delete, { id = c.gh.id }, function(data, err)
+      if data or is_not_found(err) then
+        write(session, function(d)
+          local _, sc = find_comment(d.threads, c.id)
+          if sc then
+            sc.gh = nil
+          end
+          if emptied(data) then
+            d.mirror.review = nil
+          end
+        end)
+      else
+        table.insert(notes, ("couldn't leave a draft out: %s"):format(tostring(err)))
+      end
+      next()
+    end)
+  end, function()
+    review_id = drafts.load(session).mirror.review
+    local function staged_changes()
+      apply_staged(session, changes, notes, function()
+        apply_staged(session, resolves, notes, function()
+          cb(true, notes)
+        end)
       end)
     end
-  end
-  local function submit_pending(warnings)
-    local pending = review.pr and review.pr.pending
-    if pending then
-      M.transport(MUTATIONS.submit, { r = pending.id, e = event, b = body }, done(warnings))
-    else
-      M.transport(MUTATIONS.review, { pr = review.pr.id, c = session.head_sha, e = event, b = body }, done(warnings))
+    local function submitted(data, err)
+      if not data then
+        warn('submit failed - ' .. tostring(err))
+        cb(false, notes)
+        return
+      end
+      -- published now: the read brings them back as GitHub's
+      local ids = vim.tbl_map(function(c)
+        return c.id
+      end, out_drafts)
+      drafts.remove(session, ids, { forget = true, sync = true })
+      write(session, function(d)
+        d.mirror.review = nil
+      end)
+      staged_changes()
     end
-  end
+    if review_id and #out_drafts > 0 then
+      M.transport(MUTATIONS.submit, { r = review_id, e = event, b = body }, submitted)
+    elseif vim.trim(body or '') ~= '' or event ~= 'COMMENT' or #changes + #resolves == 0 then
+      -- no comment going: the message alone (approving without comments)
+      local pr = session.review.pr
+      M.transport(MUTATIONS.review, { pr = pr.id, c = pr.head_sha, e = event, b = body }, submitted)
+    else
+      staged_changes()
+    end
+  end)
+end
 
-  local roots, replies = classify_drafts(review and review.threads or {})
-  if review and review.pr and #roots == 0 and #replies == 0 then
-    submit_pending({})
-    return
-  end
-  M.push(session, function(ok, warnings)
-    if not ok then
-      cb(false, warnings)
+--- `:Diffy review submit` to GitHub: mirror what's left, then confirm in a
+--- float listing everything going out (each excludable with `x`), what
+--- stays behind and unpushed commits; then `execute`. Sync conflicts must be
+--- settled first. `cb(ok, warnings)`.
+function M.submit(session, event, body, cb)
+  local st = sync_state(session)
+  M.mirror(session, function()
+    if session.closed then
       return
     end
-    submit_pending(warnings)
+    local plan = submit_plan(session)
+    if plan.conflicts > 0 then
+      warn(('settle the %d sync conflict%s first: `dd` the version you drop'):format(plan.conflicts, plan.conflicts == 1 and '' or 's'))
+      cb(false, {})
+      return
+    end
+    local function go(excluded)
+      st.held = true
+      execute(session, plan, excluded, event, body, function(ok, notes)
+        st.held = false
+        -- the read brings the published comments, then syncs (excluded drafts
+        -- go into a fresh pending review)
+        M.read(session, function()
+          cb(ok, notes)
+        end)
+      end)
+    end
+    if #plan.items == 0 then
+      go({})
+      return
+    end
+    local rows = {}
+    for i, it in ipairs(plan.items) do
+      table.insert(rows, { text = it.text, value = i })
+    end
+    for _, s in ipairs(plan.stay) do
+      table.insert(rows, { text = 'stays behind: ' .. s })
+    end
+    local standing = session.layer and session.layer.standing
+    if standing and (standing:find('unpushed', 1, true) or standing == 'diverged') then
+      table.insert(rows, { text = 'branch: ' .. standing })
+    end
+    prompt.checklist(session, 'Going to GitHub', rows, function(excluded)
+      if not excluded then
+        cb(false, {})
+        return
+      end
+      go(excluded)
+    end)
+    run.ready({ session = session.id, event = 'confirm' })
+  end)
+end
+
+--- `:Diffy review clear`: asks, then drops your drafts and staged changes and
+--- deletes your pending review on GitHub, adopted comments included.
+--- `cb(done)`.
+function M.clear(session, cb)
+  prompt.confirm(session, {
+    'Drop your drafts and staged changes, and delete',
+    'your pending review on GitHub (adopted comments too)?',
+  }, function(ok)
+    if not ok then
+      cb(false)
+      return
+    end
+    local st = sync_state(session)
+    st.held = true
+    local l = session.layer or {}
+    local id = drafts.load(session).mirror.review or (l.cache and l.cache.pr.pending and l.cache.pr.pending.id)
+    local function wipe()
+      drafts.clear(session)
+      st.held = false
+      M.read(session)
+      cb(true)
+    end
+    if not (id and l.attached and not l.offline) then
+      wipe()
+      return
+    end
+    M.transport(MUTATIONS.delete_review, { id = id }, function(_, err)
+      if err and not is_not_found(err) then
+        warn("couldn't delete your pending review: " .. tostring(err))
+      end
+      wipe()
+    end)
   end)
 end
 

@@ -75,4 +75,85 @@ function M.choose(session, title, choices, cb)
   ask(session, lines, keys, cb)
 end
 
+--- A list to confirm under `title`: `rows` = `{ { text, value? } }`, those
+--- with a value checked (`[x]`) and excludable with `x` on their line.
+--- `<CR>`/`y` confirms, `cb(excluded)` with the excluded values as a set;
+--- `<Esc>`/`q` cancel, `cb(nil)`.
+function M.checklist(session, title, rows, cb)
+  local excluded = {}
+  local function lines()
+    local out = { title }
+    for _, r in ipairs(rows) do
+      if r.value ~= nil then
+        table.insert(out, ('  [%s] %s'):format(excluded[r.value] and ' ' or 'x', r.text))
+      else
+        table.insert(out, '      ' .. r.text)
+      end
+    end
+    table.insert(out, '')
+    table.insert(out, '  x leave out / put back   <CR> go   q cancel')
+    return out
+  end
+  local text = lines()
+  local width = 20
+  for _, l in ipairs(text) do
+    width = math.max(width, vim.fn.strdisplaywidth(l) + 2)
+  end
+  width = math.min(width, vim.o.columns - 4)
+
+  local buf = session_mod.scratch_buf(session, 'prompt')
+  session_mod.register_buffer(session, 'prompt', buf)
+  local function render()
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines())
+    vim.bo[buf].modifiable = false
+  end
+  render()
+  local win = vim.api.nvim_open_win(
+    buf,
+    false,
+    require('diffy.layout').centered(width, #text, { style = 'minimal', border = 'rounded', zindex = 250 })
+  )
+  session_mod.unbind(win)
+  vim.wo[win].cursorline = true
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { math.min(2, #text), 0 })
+
+  local done = false
+  local function finish(value)
+    if done then
+      return
+    end
+    done = true
+    session_mod.unmap_buffer(session, buf)
+    if vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+    if vim.api.nvim_buf_is_valid(buf) then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+    cb(value)
+  end
+  local function map(lhs, fn)
+    session_mod.map(session, 'n', lhs, fn, { buffer = buf, desc = 'checklist: ' .. lhs })
+  end
+  map('x', function()
+    local r = rows[vim.api.nvim_win_get_cursor(win)[1] - 1]
+    if r and r.value ~= nil then
+      excluded[r.value] = not excluded[r.value] or nil
+      render()
+    end
+  end)
+  for _, lhs in ipairs({ '<CR>', 'y' }) do
+    map(lhs, function()
+      finish(excluded)
+    end)
+  end
+  for _, lhs in ipairs({ '<Esc>', 'q' }) do
+    map(lhs, function()
+      finish(nil)
+    end)
+  end
+end
+
 return M

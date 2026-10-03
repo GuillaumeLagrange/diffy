@@ -13,6 +13,8 @@
 --   state.branches     branch -> PR number, what `gh pr view <branch>` finds
 --   state.offline      every request fails, as without network
 --   state.hold         `gh pr view` doesn't answer until `M.release(state)`
+--   state.fail         mutation name -> error message: that mutation fails
+--                      (e.g. `{ resolveReviewThread = 'boom' }`)
 --   state.repo_dir     the fixture repo, for real `git diff` validation
 --                      (GitHub's "changed line or ±3 context of
 --                      merge-base...commit" rule)
@@ -23,12 +25,37 @@
 -- `state.reads[number]` (`M.db`), so later reads reflect the mutations
 -- (`db.state = 'MERGED'` merges it); `state.reads` itself is never modified.
 -- Connections are paginated at the `$k` the request asks for.
+--
+-- Write-side behaviour, as measured on the sandbox:
+-- - `addPullRequestReviewComment(pullRequestReviewId, commitOID, position)`
+--   joins the pending review; a position on a `-` line makes a LEFT thread
+--   (merge-base line), otherwise RIGHT; `originalCommit` is the commit,
+--   `commit` moves to head at once when trackable, `line == originalLine`.
+-- - `addPullRequestReviewThread(pullRequestReviewId)` joins it at head.
+-- - A second `addPullRequestReview` while one is pending fails with
+--   UNPROCESSABLE and creates nothing.
+-- - Comments, pending or published, are edited and deleted in place; a thread
+--   left empty goes; the last pending comment's deletion deletes its review
+--   (later uses of the id are NOT_FOUND). A review created empty stays until
+--   `deletePullRequestReview`.
+-- - `updatedAt` moves on every edit and on submit; `lastEditedAt` and
+--   `includesCreatedEdit` only on a published comment's edit. The clock ticks
+--   one second per timestamp, so two edits never share one.
+-- - `M.push` remaps pending and published comments alike.
 local model = require('diffy.review.model')
 
 local M = {}
 
 -- what a submitted review's `state` reads for each event
 local REVIEW_STATES = { COMMENT = 'COMMENTED', APPROVE = 'APPROVED', REQUEST_CHANGES = 'CHANGES_REQUESTED' }
+
+local EPOCH = 1767225600 -- 2026-01-01T00:00:00Z
+
+--- The fake clock: a fresh ISO timestamp, one second after the last.
+function M.now(state)
+  state.clock = (state.clock or 0) + 1
+  return os.date('!%Y-%m-%dT%H:%M:%SZ', EPOCH + state.clock)
+end
 
 local function db_for(state, number)
   state._db = state._db or {}
@@ -50,14 +77,15 @@ local function db_for(state, number)
     pending = {}, -- viewer login -> {id, commitOID}
     next_id = 1,
   }
-  if pr and pr.pendingReviews and pr.pendingReviews.nodes[1] then
-    local pid = pr.pendingReviews.nodes[1].id
+  local pid = pr and pr.pendingReviews and pr.pendingReviews.nodes[1] and pr.pendingReviews.nodes[1].id
+  if pid then
     db.pending[state.viewer] = { id = pid, commitOID = db.head }
-    for _, t in ipairs(db.threads) do
-      for _, c in ipairs(t.comments.nodes) do
-        if c.pullRequestReview and c.pullRequestReview.id == pid then
-          t._pending_review_id = pid
-        end
+  end
+  -- recordings have no `state`: the pending review's comments are PENDING
+  for _, t in ipairs(db.threads) do
+    for _, c in ipairs(t.comments.nodes) do
+      if not c.state then
+        c.state = (pid and c.pullRequestReview and c.pullRequestReview.id == pid) and 'PENDING' or 'SUBMITTED'
       end
     end
   end
@@ -76,7 +104,7 @@ local function page(nodes, k, after)
     table.insert(out, nodes[i])
   end
   local last = from + #out
-  return { pageInfo = { hasNextPage = last < #nodes, endCursor = tostring(last) }, nodes = out }
+  return { totalCount = #nodes, pageInfo = { hasNextPage = last < #nodes, endCursor = tostring(last) }, nodes = out }
 end
 
 --- A thread node with its comments cut to the first page.
@@ -104,6 +132,11 @@ local function fresh_id(db, prefix)
   return ('FAKE_%s_%d'):format(prefix, db.next_id)
 end
 
+local function git(state, args)
+  local res = vim.system(vim.list_extend({ 'git' }, args), { cwd = state.repo_dir, text = true }):wait()
+  return res.code == 0 and (res.stdout or '') or nil
+end
+
 --- Real `git diff -U0 -M merge_base commitOID` hunks for `path` (`-U0`:
 --- `model.anchor_valid` adds the ±3 context itself), or nil when
 --- `state.repo_dir`/`state.merge_base` aren't configured.
@@ -111,14 +144,11 @@ local function validation_hunks(state, commit_oid, path)
   if not (state.repo_dir and state.merge_base) then
     return nil
   end
-  local res = vim
-    .system({ 'git', 'diff', '-U0', '-M', state.merge_base, commit_oid }, { cwd = state.repo_dir, text = true })
-    :wait()
-  if res.code ~= 0 then
+  local out = git(state, { 'diff', '-U0', '-M', state.merge_base, commit_oid })
+  if not out then
     return nil, 'Path could not be resolved'
   end
-  local files = model.parse_diff_files(res.stdout or '')
-  for _, f in ipairs(files) do
+  for _, f in ipairs(model.parse_diff_files(out)) do
     if f.old_path == path or f.new_path == path then
       return f.hunks
     end
@@ -146,92 +176,232 @@ local function validate(state, commit_oid, path, side, start_line, end_line)
   return false, 'Line could not be resolved'
 end
 
---- Inverse of `model.diff_position`: the new-side line `position` (1-based,
---- below the file's first `@@`) refers to.
+--- What a legacy `position` (1-based, below the file's first `@@`) points
+--- at: `'LEFT', old_line` on a `-` line, else `'RIGHT', new_line`.
 local function line_at_position(diff_lines, position)
-  local pos, nl = nil, nil
+  local pos, ol, nl = nil, nil, nil
   for _, line in ipairs(diff_lines) do
-    local new_start = line:match('^@@ %-%d+,?%d* %+(%d+)')
+    local old_start, new_start = line:match('^@@ %-(%d+),?%d* %+(%d+)')
     if new_start then
       pos = pos and (pos + 1) or 0
-      nl = tonumber(new_start) - 1
+      ol, nl = tonumber(old_start) - 1, tonumber(new_start) - 1
     elseif pos then
       pos = pos + 1
-      if line:sub(1, 1) ~= '-' then
+      local kind = line:sub(1, 1)
+      if kind ~= '+' then
+        ol = ol + 1
+      end
+      if kind ~= '-' then
         nl = nl + 1
       end
       if pos == position then
-        return nl
+        if kind == '-' then
+          return 'LEFT', ol
+        end
+        return 'RIGHT', nl
       end
     end
   end
   return nil
 end
 
---- The new-side line a legacy `position` on `path` meant, in
+--- The side and line a legacy `position` on `path` meant, in
 --- `git diff -U3 -M base commit`, or nil.
-local function position_line(repo_dir, base, commit, path, position)
-  local res = vim.system({ 'git', 'diff', '-U3', '-M', base, commit }, { cwd = repo_dir, text = true }):wait()
-  if res.code ~= 0 then
+local function position_line(state, base, commit, path, position)
+  local out = git(state, { 'diff', '-U3', '-M', base, commit })
+  if not out then
     return nil
   end
-  local lines = vim.split(res.stdout or '', '\n', { plain = true })
-  local start_i
-  for i, l in ipairs(lines) do
-    if l:match('^diff %-%-git') then
-      if start_i then
+  local lines = vim.split(out, '\n', { plain = true })
+  local section
+  for _, l in ipairs(lines) do
+    local a, b = l:match('^diff %-%-git a/(.-) b/(.*)$')
+    if a then
+      if section then
         break
       end
-      local a, b = l:match('^diff %-%-git a/(.-) b/(.*)$')
       if a == path or b == path then
-        start_i = i
+        section = {}
       end
     end
-  end
-  if not start_i then
-    return nil
-  end
-  local section = {}
-  for i = start_i, #lines do
-    if i > start_i and lines[i]:match('^diff %-%-git') then
-      break
+    if section then
+      table.insert(section, l)
     end
-    table.insert(section, lines[i])
+  end
+  if not section then
+    return nil
   end
   return line_at_position(section, position)
 end
 
---- GitHub moves a legacy-position comment to head at once when its line is
---- trackable. Returns `head_sha, head_line`, else nil.
-local function eager_remap(state, db, commit_oid, path, position)
-  if not (state.repo_dir and db.head) or commit_oid == db.head then
+--- Hunks of `path` in `git diff -U0 -M from to`.
+local function track_hunks(state, from, to, path)
+  local out = git(state, { 'diff', '-U0', '-M', from, to })
+  if not out then
     return nil
   end
-  local orig_line = position_line(state.repo_dir, state.merge_base or commit_oid, commit_oid, path, position)
-  if not orig_line then
-    return nil
-  end
-  local track = vim.system({ 'git', 'diff', '-U0', '-M', commit_oid, db.head }, { cwd = state.repo_dir, text = true }):wait()
-  if track.code ~= 0 then
-    return nil
-  end
-  local files = model.parse_diff_files(track.stdout or '')
-  local hunks = {}
-  for _, f in ipairs(files) do
+  for _, f in ipairs(model.parse_diff_files(out)) do
     if f.old_path == path or f.new_path == path then
-      hunks = f.hunks
-      break
+      return f.hunks
     end
   end
-  local mapped = model.map_line(hunks, orig_line)
-  if not mapped then
-    return nil
-  end
-  return db.head, mapped
+  return {}
 end
 
 local function thread_node(id, path, side, first_comment)
-  return { id = id, isResolved = false, path = path, diffSide = side, comments = { nodes = { first_comment } } }
+  return { id = id, isResolved = false, isOutdated = false, path = path, diffSide = side, comments = { nodes = { first_comment } } }
+end
+
+--- A comment node as GitHub returns it.
+local function comment_node(state, id, review_id, fields)
+  local at = M.now(state)
+  return vim.tbl_extend('force', {
+    id = id,
+    author = { login = state.viewer },
+    createdAt = at,
+    updatedAt = at,
+    lastEditedAt = nil,
+    includesCreatedEdit = false,
+    state = 'PENDING',
+    diffHunk = '',
+    outdated = false,
+    pullRequestReview = { id = review_id },
+  }, fields)
+end
+
+--- The db, thread, index and node of comment `id`, or nil.
+local function find_comment(state, id)
+  for _, db in pairs(state._db or {}) do
+    for ti, t in ipairs(db.threads) do
+      for ci, c in ipairs(t.comments.nodes) do
+        if c.id == id then
+          return db, t, ci, c, ti
+        end
+      end
+    end
+  end
+  return nil
+end
+
+--- The db and viewer whose pending review is `id`, or nil.
+local function pending_review(state, id)
+  for _, db in pairs(state._db or {}) do
+    for viewer, p in pairs(db.pending) do
+      if p.id == id then
+        return db, viewer
+      end
+    end
+  end
+  return nil
+end
+
+local function pending_count(db, review_id)
+  local n = 0
+  for _, t in ipairs(db.threads) do
+    for _, c in ipairs(t.comments.nodes) do
+      if c.pullRequestReview and c.pullRequestReview.id == review_id and c.state == 'PENDING' then
+        n = n + 1
+      end
+    end
+  end
+  return n
+end
+
+local function edit(state, c, body)
+  c.body = body
+  c.updatedAt = M.now(state)
+  if c.state ~= 'PENDING' then
+    c.lastEditedAt = c.updatedAt
+    c.includesCreatedEdit = true
+  end
+end
+
+--- Delete comment `id` as GitHub does: its thread goes once empty, and a
+--- pending review goes with its last comment. Returns the review's
+--- `{id, state, totalCount}`, or nil when there's no such comment.
+local function delete(state, id)
+  local db, t, ci, c, ti = find_comment(state, id)
+  if not db then
+    return nil
+  end
+  table.remove(t.comments.nodes, ci)
+  if #t.comments.nodes == 0 then
+    table.remove(db.threads, ti)
+  end
+  local review_id = c.pullRequestReview and c.pullRequestReview.id
+  if c.state == 'PENDING' then
+    local left = pending_count(db, review_id)
+    if left == 0 then
+      for viewer, p in pairs(db.pending) do
+        if p.id == review_id then
+          db.pending[viewer] = nil
+        end
+      end
+    end
+    return { id = review_id, state = 'PENDING', comments = { totalCount = left } }
+  end
+  return { id = review_id, state = 'COMMENTED', comments = { totalCount = 0 } }
+end
+
+--- A web edit of comment `id` (pending or published), as github.com makes it.
+function M.edit_comment(state, id, body)
+  local _, _, _, c = find_comment(state, id)
+  assert(c, 'no comment ' .. id)
+  edit(state, c, body)
+end
+
+--- A web deletion of comment `id`.
+function M.delete_comment(state, id)
+  assert(delete(state, id), 'no comment ' .. id)
+end
+
+--- Every comment node whose body starts with `prefix`, across PRs.
+function M.comments(state, prefix)
+  local out = {}
+  for _, db in pairs(state._db or {}) do
+    for _, t in ipairs(db.threads) do
+      for _, c in ipairs(t.comments.nodes) do
+        if c.body:sub(1, #prefix) == prefix then
+          table.insert(out, c)
+        end
+      end
+    end
+  end
+  return out
+end
+
+--- A push (force-push too) of `head` to PR `number`: every comment, pending
+--- or published, not on `head` is remapped. Trackable ones get `commit =
+--- head` and their line moved; the others keep their commit and go
+--- outdated, with `line = null` when published and unchanged when pending.
+function M.push(state, number, head)
+  local db = db_for(state, number)
+  for _, t in ipairs(db.threads) do
+    for _, c in ipairs(t.comments.nodes) do
+      local from = c.commit and c.commit.oid
+      if from and from ~= head and c.line then
+        local moved
+        if t.diffSide == 'LEFT' then
+          moved = validate(state, head, t.path, 'old', c.startLine or c.line, c.line) and c.line or nil
+        else
+          local hunks = track_hunks(state, from, head, t.path)
+          moved = hunks and model.map_line(hunks, c.line)
+          if moved and c.startLine then
+            c.startLine = model.map_line(hunks, c.startLine) or c.startLine
+          end
+        end
+        if moved then
+          c.commit, c.line = { oid = head }, moved
+        else
+          c.outdated, t.isOutdated = true, true
+          if c.state ~= 'PENDING' then
+            c.line = nil
+          end
+        end
+      end
+    end
+  end
+  db.head = head
 end
 
 --- Build `{ transport = fun(query, variables, cb), pr_view = fun(root,
@@ -251,6 +421,13 @@ function M.new(state)
     vim.schedule(function()
       cb(nil, message)
     end)
+  end
+  -- GraphQL errors, as `review/github.lua`'s transport reports them
+  local function gql_error(cb, kind, message)
+    fail(cb, vim.json.encode({ { type = kind, message = message } }))
+  end
+  local function not_found(cb, id)
+    gql_error(cb, 'NOT_FOUND', ("Could not resolve to a node with the global id of '%s'."):format(tostring(id)))
   end
 
   -- `gh pr view <branch> --json number,url,state,baseRefName,headRefOid`
@@ -280,27 +457,39 @@ function M.new(state)
     pr_view(branch, cb)
   end
 
+  local function db_by_pr(pr_id)
+    for n, d in pairs(state._db or {}) do
+      if d.id == pr_id then
+        return d, n
+      end
+    end
+    for n in pairs(state.reads or {}) do
+      return db_for(state, n), n
+    end
+  end
+
   self.transport = function(query, variables, cb)
     if state.offline then
       fail(cb, 'error connecting to api.github.com')
       return
     end
+    -- the mutations in the order they came, for tests of ordering
+    local op = query:match('^%s*mutation[^{]*{%s*(%w+)%(')
+    if op then
+      state.calls = state.calls or {}
+      table.insert(state.calls, op)
+    end
+    for name, message in pairs(state.fail or {}) do
+      if op == name then
+        fail(cb, message)
+        return
+      end
+    end
     local k = variables.k
 
     if query:find('query DiffyRead(', 1, true) then
       local db = db_for(state, variables.n)
-      local pending_nodes = {}
-      for _, p in pairs(db.pending) do
-        for _, t in ipairs(db.threads) do
-          if t._pending_review_id == p.id then
-            for _, c in ipairs(t.comments.nodes) do
-              if c.pullRequestReview and c.pullRequestReview.id == p.id then
-                table.insert(pending_nodes, c)
-              end
-            end
-          end
-        end
-      end
+      local mine = db.pending[state.viewer]
       respond(cb, {
         viewer = { login = state.viewer },
         repository = {
@@ -315,7 +504,7 @@ function M.new(state)
             author = { login = 'diffy-fixture-author' },
             comments = page(db.conversation, k),
             reviews = page(db.reviews, k),
-            pendingReviews = { nodes = db.pending[state.viewer] and { { id = db.pending[state.viewer].id, comments = { nodes = pending_nodes } } } or {} },
+            pendingReviews = { nodes = mine and { { id = mine.id } } or {} },
             reviewThreads = threads_page(db, k),
           },
         },
@@ -346,173 +535,181 @@ function M.new(state)
           end
         end
       end
-      fail(cb, 'no such thread')
+      not_found(cb, variables.id)
+      return
+    end
+
+    if query:find('query DiffyComment(', 1, true) then
+      local _, _, _, c = find_comment(state, variables.id)
+      if not c then
+        not_found(cb, variables.id)
+        return
+      end
+      respond(cb, { node = c })
+      return
+    end
+
+    if query:find('query DiffyPendingReview(', 1, true) then
+      local db = db_for(state, variables.n)
+      local mine = db.pending[state.viewer]
+      respond(cb, { repository = { pullRequest = { reviews = { nodes = mine and { { id = mine.id } } or {} } } } })
+      return
+    end
+
+    if query:find('query DiffyRecentThreads(', 1, true) then
+      local db = db_for(state, variables.n)
+      local nodes = {}
+      for i = math.max(1, #db.threads - 19), #db.threads do
+        table.insert(nodes, thread_page(db.threads[i], 1))
+      end
+      respond(cb, { repository = { pullRequest = { reviewThreads = { nodes = nodes } } } })
+      return
+    end
+
+    if query:find('updatePullRequestReviewComment(', 1, true) then
+      local _, _, _, c = find_comment(state, variables.id)
+      if not c then
+        not_found(cb, variables.id)
+        return
+      end
+      edit(state, c, variables.b)
+      respond(cb, { updatePullRequestReviewComment = { pullRequestReviewComment = c } })
+      return
+    end
+
+    if query:find('deletePullRequestReviewComment(', 1, true) then
+      local review = delete(state, variables.id)
+      if not review then
+        not_found(cb, variables.id)
+        return
+      end
+      respond(cb, { deletePullRequestReviewComment = { pullRequestReview = review } })
       return
     end
 
     if query:find('deletePullRequestReview(', 1, true) then
-      for _, db in pairs(state._db or {}) do
-        for viewer, p in pairs(db.pending) do
-          if p.id == variables.id then
-            db.pending[viewer] = nil
-            -- GitHub deletes only this review's own comments: a thread with
-            -- a surviving published comment keeps its id and other comments
-            for i = #db.threads, 1, -1 do
-              local t = db.threads[i]
-              local kept = {}
-              for _, c in ipairs(t.comments.nodes) do
-                if not (c.pullRequestReview and c.pullRequestReview.id == p.id) then
-                  table.insert(kept, c)
-                end
-              end
-              t.comments.nodes = kept
-              if t._pending_review_id == p.id then
-                t._pending_review_id = nil
-              end
-              if #kept == 0 then
-                table.remove(db.threads, i)
-              end
-            end
-            respond(cb, { deletePullRequestReview = { clientMutationId = nil } })
-            return
+      local db, viewer = pending_review(state, variables.id)
+      if not db then
+        not_found(cb, variables.id)
+        return
+      end
+      db.pending[viewer] = nil
+      -- only this review's own comments go: a thread keeps its published ones
+      for i = #db.threads, 1, -1 do
+        local t = db.threads[i]
+        local kept = {}
+        for _, c in ipairs(t.comments.nodes) do
+          if not (c.pullRequestReview and c.pullRequestReview.id == variables.id and c.state == 'PENDING') then
+            table.insert(kept, c)
           end
         end
+        t.comments.nodes = kept
+        if #kept == 0 then
+          table.remove(db.threads, i)
+        end
       end
-      fail(cb, 'no such pending review')
+      respond(cb, { deletePullRequestReview = { clientMutationId = vim.NIL } })
       return
     end
 
     if query:find('addPullRequestReviewThreadReply(', 1, true) then
-      for _, db in pairs(state._db or {}) do
-        for _, t in ipairs(db.threads) do
-          if t.id == variables.t then
-            local id = fresh_id(db, 'COMMENT')
-            table.insert(t.comments.nodes, {
-              id = id,
-              author = { login = state.viewer },
-              body = variables.b,
-              createdAt = os.date('!%Y-%m-%dT%H:%M:%SZ'),
-              diffHunk = '',
-              line = t.comments.nodes[1].line,
-              originalLine = t.comments.nodes[1].originalLine,
-              startLine = nil,
-              originalStartLine = nil,
-              commit = t.comments.nodes[1].commit,
-              originalCommit = t.comments.nodes[1].originalCommit,
-              pullRequestReview = { id = variables.r },
-            })
-            respond(cb, { addPullRequestReviewThreadReply = { comment = { id = id } } })
-            return
-          end
+      local db = pending_review(state, variables.r)
+      if not db then
+        not_found(cb, variables.r)
+        return
+      end
+      for _, t in ipairs(db.threads) do
+        if t.id == variables.t then
+          local first = t.comments.nodes[1]
+          local c = comment_node(state, fresh_id(db, 'COMMENT'), variables.r, {
+            body = variables.b,
+            path = t.path,
+            line = first.line,
+            originalLine = first.originalLine,
+            commit = first.commit,
+            originalCommit = first.originalCommit,
+          })
+          table.insert(t.comments.nodes, c)
+          respond(cb, { addPullRequestReviewThreadReply = { comment = c } })
+          return
         end
       end
-      fail(cb, 'no such thread')
+      not_found(cb, variables.t)
       return
     end
 
     if query:find('addPullRequestReviewComment(', 1, true) then
-      local db
-      for _, d in pairs(state._db or {}) do
-        for _, p in pairs(d.pending) do
-          if p.id == variables.r then
-            db = d
-          end
+      local db = pending_review(state, variables.r)
+      if not db then
+        not_found(cb, variables.r)
+        return
+      end
+      local side, line = 'RIGHT', nil
+      if state.repo_dir and state.merge_base then
+        side, line = position_line(state, state.merge_base, variables.c, variables.p, variables.pos)
+        if not side then
+          gql_error(cb, 'UNPROCESSABLE', 'Line could not be resolved')
+          return
         end
       end
-      if not db then
-        fail(cb, 'no such pending review')
-        return
+      local commit = variables.c
+      if state.repo_dir and db.head and commit ~= db.head then
+        local hunks = side == 'RIGHT' and track_hunks(state, commit, db.head, variables.p)
+        if side == 'LEFT' or (hunks and line and model.map_line(hunks, line)) then
+          commit = db.head
+        end
       end
-      local orig_line
-      if state.repo_dir and state.merge_base then
-        orig_line = position_line(state.repo_dir, state.merge_base, variables.c, variables.p, variables.pos)
-      end
-      local ok, err = validate(state, variables.c, variables.p, 'new', orig_line, orig_line)
-      if not ok then
-        fail(cb, err)
-        return
-      end
-      local id = fresh_id(db, 'COMMENT')
-      local commit, line = variables.c, orig_line
-      local remapped_commit, remapped_line = eager_remap(state, db, variables.c, variables.p, variables.pos)
-      if remapped_commit then
-        commit, line = remapped_commit, remapped_line
-      end
-      local first = {
-        id = id,
-        author = { login = state.viewer },
+      local c = comment_node(state, fresh_id(db, 'COMMENT'), variables.r, {
         body = variables.b,
-        createdAt = os.date('!%Y-%m-%dT%H:%M:%SZ'),
-        diffHunk = '',
+        path = variables.p,
         line = line,
-        originalLine = orig_line,
-        startLine = nil,
-        originalStartLine = nil,
+        originalLine = line,
         commit = { oid = commit },
         originalCommit = { oid = variables.c },
-        pullRequestReview = { id = variables.r },
-      }
-      local tnode = thread_node(fresh_id(db, 'THREAD'), variables.p, 'RIGHT', first)
-      tnode._pending_review_id = variables.r
+      })
+      local tnode = thread_node(fresh_id(db, 'THREAD'), variables.p, side, c)
       table.insert(db.threads, tnode)
-      respond(cb, { addPullRequestReviewComment = { comment = { id = id } } })
+      respond(cb, { addPullRequestReviewComment = { comment = c } })
       return
     end
 
     if query:find('addPullRequestReviewThread(', 1, true) then
-      local db
-      for _, d in pairs(state._db or {}) do
-        for _, p in pairs(d.pending) do
-          if p.id == variables.r then
-            db = d
-          end
-        end
-      end
+      local db = pending_review(state, variables.r)
       if not db then
-        fail(cb, 'no such pending review')
+        not_found(cb, variables.r)
         return
       end
-      local id = fresh_id(db, 'COMMENT')
-      local first = {
-        id = id,
-        author = { login = state.viewer },
+      local ok, err = validate(state, db.head, variables.p, variables.s == 'LEFT' and 'old' or 'new', variables.sl or variables.l, variables.l)
+      if not ok then
+        gql_error(cb, 'UNPROCESSABLE', err)
+        return
+      end
+      local c = comment_node(state, fresh_id(db, 'COMMENT'), variables.r, {
         body = variables.b,
-        createdAt = os.date('!%Y-%m-%dT%H:%M:%SZ'),
-        diffHunk = '',
+        path = variables.p,
         line = variables.l,
         originalLine = variables.l,
         startLine = variables.sl,
         originalStartLine = variables.sl,
         commit = { oid = db.head },
         originalCommit = { oid = db.head },
-        pullRequestReview = { id = variables.r },
-      }
+      })
       local tid = fresh_id(db, 'THREAD')
-      local tnode = thread_node(tid, variables.p, variables.s, first)
-      tnode._pending_review_id = variables.r
-      table.insert(db.threads, tnode)
-      respond(cb, { addPullRequestReviewThread = { thread = { id = tid } } })
+      table.insert(db.threads, thread_node(tid, variables.p, variables.s, c))
+      respond(cb, { addPullRequestReviewThread = { thread = { id = tid, comments = { nodes = { c } } } } })
       return
     end
 
     if query:find('addPullRequestReview(', 1, true) then
-      local number
-      for n, d in pairs(state._db or {}) do
-        if d.id == variables.pr then
-          number = n
-        end
+      local db = db_by_pr(variables.pr)
+      if db.pending[state.viewer] then
+        gql_error(cb, 'UNPROCESSABLE', 'User can only have one pending review per pull request')
+        return
       end
-      if not number then
-        for n in pairs(state.reads or {}) do
-          number = n
-          break
-        end
-      end
-      local db = db_for(state, number)
       for _, input in ipairs(variables.t or {}) do
         local ok, err = validate(state, variables.c, input.path, input.side and (input.side == 'LEFT' and 'old' or 'new'), input.startLine or input.line, input.line)
         if not ok then
-          fail(cb, err)
+          gql_error(cb, 'UNPROCESSABLE', err)
           return
         end
       end
@@ -524,7 +721,7 @@ function M.new(state)
           author = { login = state.viewer },
           state = REVIEW_STATES[variables.e],
           body = variables.b,
-          submittedAt = os.date('!%Y-%m-%dT%H:%M:%SZ'),
+          submittedAt = M.now(state),
           commit = { oid = variables.c },
         })
         respond(cb, { addPullRequestReview = { pullRequestReview = { id = review_id } } })
@@ -532,92 +729,66 @@ function M.new(state)
       end
       db.pending[state.viewer] = { id = review_id, commitOID = variables.c }
       for _, input in ipairs(variables.t or {}) do
-        local id = fresh_id(db, 'COMMENT')
-        local first = {
-          id = id,
-          author = { login = state.viewer },
+        local c = comment_node(state, fresh_id(db, 'COMMENT'), review_id, {
           body = input.body,
-          createdAt = os.date('!%Y-%m-%dT%H:%M:%SZ'),
-          diffHunk = '',
+          path = input.path,
           line = input.line,
           originalLine = input.line,
           startLine = input.startLine,
           originalStartLine = input.startLine,
           commit = { oid = variables.c },
           originalCommit = { oid = variables.c },
-          pullRequestReview = { id = review_id },
-        }
-        local tnode = thread_node(fresh_id(db, 'THREAD'), input.path, input.side, first)
-        tnode._pending_review_id = review_id
-        table.insert(db.threads, tnode)
-      end
-      -- GitHub creates a big review, then fails returning it (measured: 20
-      -- threads fine, 35 RESOURCE_LIMITS_EXCEEDED with all 35 created)
-      if #(variables.t or {}) > 30 then
-        fail(cb, 'Resource limits for this query exceeded.')
-        return
+        })
+        table.insert(db.threads, thread_node(fresh_id(db, 'THREAD'), input.path, input.side, c))
       end
       respond(cb, { addPullRequestReview = { pullRequestReview = { id = review_id } } })
       return
     end
 
     if query:find('submitPullRequestReview(', 1, true) then
-      for _, db in pairs(state._db or {}) do
-        for viewer, p in pairs(db.pending) do
-          if p.id == variables.r then
-            db.pending[viewer] = nil
-            for _, t in ipairs(db.threads) do
-              if t._pending_review_id == p.id then
-                t._pending_review_id = nil
-                for _, c in ipairs(t.comments.nodes) do
-                  if c.pullRequestReview and c.pullRequestReview.id == p.id then
-                    c.pullRequestReview = { id = p.id }
-                  end
-                end
-              end
-            end
-            table.insert(db.reviews, {
-              id = p.id,
-              author = { login = viewer },
-              state = REVIEW_STATES[variables.e],
-              body = variables.b,
-              submittedAt = os.date('!%Y-%m-%dT%H:%M:%SZ'),
-              commit = { oid = p.commitOID },
-            })
-            respond(cb, { submitPullRequestReview = { pullRequestReview = { id = p.id } } })
-            return
+      local db, viewer = pending_review(state, variables.r)
+      if not db then
+        not_found(cb, variables.r)
+        return
+      end
+      local p = db.pending[viewer]
+      db.pending[viewer] = nil
+      local at = M.now(state)
+      for _, t in ipairs(db.threads) do
+        for _, c in ipairs(t.comments.nodes) do
+          if c.pullRequestReview and c.pullRequestReview.id == p.id and c.state == 'PENDING' then
+            c.state = 'SUBMITTED'
+            c.updatedAt = at
           end
         end
       end
-      fail(cb, 'no such pending review')
+      table.insert(db.reviews, {
+        id = p.id,
+        author = { login = viewer },
+        state = REVIEW_STATES[variables.e],
+        body = variables.b,
+        submittedAt = at,
+        commit = { oid = p.commitOID },
+      })
+      respond(cb, { submitPullRequestReview = { pullRequestReview = { id = p.id } } })
       return
     end
 
-    if query:find('unresolveReviewThread(', 1, true) then
+    -- `resolveReviewThread(` is a suffix of `unresolveReviewThread(`
+    local resolve_name = query:find('unresolveReviewThread(', 1, true) and 'unresolveReviewThread'
+      or query:find('resolveReviewThread(', 1, true) and 'resolveReviewThread'
+    if resolve_name then
+      local resolved = resolve_name == 'resolveReviewThread'
       for _, db in pairs(state._db or {}) do
         for _, t in ipairs(db.threads) do
           if t.id == variables.t then
-            t.isResolved = false
-            respond(cb, { unresolveReviewThread = { thread = { isResolved = false } } })
+            t.isResolved = resolved
+            respond(cb, { [resolve_name] = { thread = { isResolved = resolved } } })
             return
           end
         end
       end
-      fail(cb, 'no such thread')
-      return
-    end
-
-    if query:find('resolveReviewThread(', 1, true) then
-      for _, db in pairs(state._db or {}) do
-        for _, t in ipairs(db.threads) do
-          if t.id == variables.t then
-            t.isResolved = true
-            respond(cb, { resolveReviewThread = { thread = { isResolved = true } } })
-            return
-          end
-        end
-      end
-      fail(cb, 'no such thread')
+      not_found(cb, variables.t)
       return
     end
 

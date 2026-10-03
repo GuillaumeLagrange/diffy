@@ -1154,11 +1154,11 @@ T[':Diffy completes subcommands, then what the session review and threads take']
     return child.fn.getcompletion(line, 'cmdline')
   end
   MiniTest.expect.equality(complete('Diffy re'), { 'restore', 'review' })
-  -- no session yet: every review subcommand
-  MiniTest.expect.equality(complete('Diffy review '), { 'clear', 'pull', 'push', 'submit' })
+  -- no session yet: every review subcommand, push and pull gone
+  MiniTest.expect.equality(complete('Diffy review '), { 'clear', 'submit' })
   open_default()
   write_comment(ui.wins(child).right, 5, 'a comment')
-  -- the local review has no push/pull and no review events
+  -- the local review has no review events
   MiniTest.expect.equality(complete('Diffy review '), { 'clear', 'submit' })
   MiniTest.expect.equality(complete('Diffy review submit '), {})
   MiniTest.expect.equality(complete('Diffy threads state=o'), { 'state=open', 'state=outdated' })

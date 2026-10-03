@@ -41,7 +41,7 @@ lua/diffy/
                         jump to another file; a left-window jump is moved to the right window
   checkout.lua          X checkout mode (the selected commit stays checked out as you move), checkout.json, restore
   conflict.lua          :Diffy conflicts and the 4-window conflict view
-  prompt.lua            key-driven yes/no and pick-one floats (vim.fn.confirm can't be driven in tests)
+  prompt.lua            key-driven yes/no, pick-one and checklist floats (vim.fn.confirm can't be driven in tests)
   highlight.lua         highlight groups (default links, card backgrounds) and width-fitting helpers
   avatar.lua            images over the terminal (kitty graphics): avatars, body badges; detect, fetch, place, clear
   review/model.lua      thread data, ids, excerpt relocation, the placement rule (source, line tracking),
@@ -52,10 +52,12 @@ lua/diffy/
   review/render.lua     comment body -> card lines: HTML to markdown, link table (gx), <details> folds, badges
   review/threads.lua    the threads view (:Diffy threads): grouped rows, preview pane, jump keys
   review/store.lua      JSON in .git/diffy/<branch>/: atomic writes, read-apply-write updates, file watch
-  review/drafts.lua     the branch's one store of your comments (threads.json), shared by sessions, migration
+  review/drafts.lua     the branch's one store of your comments (threads.json), shared by sessions, migration;
+                        the mirror's bookkeeping and staged changes
   review/local.lua      local backend + review.md export
   review/github.lua     the GitHub layer: `gh pr view` lookup, paginated read, cache in threads.json, attach/detach,
-                        read cadence; gh transport; push/pull/submit
+                        read cadence; gh transport; reconcile (a read against your drafts), the background sync
+                        into your pending review, staged changes, submit, clear
 ```
 
 Conventions the code relies on:
@@ -79,8 +81,9 @@ Conventions the code relies on:
   dropping one link drops the chain.
 - **DiffyReady.** `run.ready({ session, event })` fires `User DiffyReady` when something finished drawing.
   Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `choose`, `conflict`,
-  `checkout`, `restore`, `pr` (a GitHub layer read finished, attached or not; `:Diffy pr` warning), `close`,
-  `commitmsg`, `feedback`, `viewed`. Tests wait on these; never sleep.
+  `checkout`, `restore`, `pr` (a GitHub layer read finished, attached or not; `:Diffy pr` warning), `sync`
+  (a background sync into the pending review finished, or had nothing to do), `confirm` (the GitHub submit's
+  checklist is open), `close`, `commitmsg`, `feedback`, `viewed`. Tests wait on these; never sleep.
 - **The GitHub layer.** `:Diffy` and `:Diffy branch` render without GitHub; `github.start` then reads
   (`session.layer`). Attaching swaps `session.review.backend` to `review/github.lua` and adds the
   published threads and `review.pr`; detaching swaps back to `review/local.lua`. The log's layer rows
@@ -90,8 +93,9 @@ Conventions the code relies on:
 - **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `author`,
   `place(session, thread) -> {win, start_line, end_line} | nil` (in the open file), `view_place` (the same
   for any file of the current pair, or of a given pair: the threads view uses it to pick a selection that
-  shows a thread), and for authoring `save(session, thread, comment?)`, `clear`,
-  `submit` (local: to the agent) or `push`/`pull`/`submit`/`resolve_thread` (GitHub). Both place through `review/track.lua`,
+  shows a thread), and for authoring `save(session, thread, comment?)`, `clear(session, cb)`,
+  `submit` (local: to the agent; GitHub: the confirm float, then the pending review), and on GitHub the
+  staging calls `toggle_resolve`/`stage_edit`/`drop_edit`/`toggle_delete`. Both place through `review/track.lua`,
   so a thread shows in every view it tracks to, whichever backend wrote it. `review/ui.lua` only draws what
   `place` returns and caches it on `thread._place`.
 - **One store per branch.** Your comments live in `.git/diffy/<branch>/threads.json`, keyed by
@@ -101,6 +105,16 @@ Conventions the code relies on:
   nvims reload through the file watch, stopped when the last session on the branch tears down. Session
   threads are per-session objects brought in line by `drafts.apply`, matched by id; ids are time + random
   (`model.new_id`).
+- **The background sync.** Every change through `drafts.update` (except the sync's own, `{ sync = true }`)
+  schedules `github.mirror` `github.sync_delay` ms later in the nvim that made it; every successful read
+  runs `github.reconcile` (the read against the store) then a sync, and so does a rebuild. One sync at a
+  time per branch store in an nvim (`syncs[path]`), held during a submit or a clear. A mirrored draft is a
+  `draft` with `gh = { id, body, updated_at }`; the read's copy of it is hidden (`mirrored_ids`), so the
+  store is what shows. Deleting a mirrored draft leaves a tombstone in `mirror.deleted` for the sync. A
+  published comment is stored only with a staged change (`staged_body`/`staged_delete`, `edited_at`);
+  `drafts.apply` lays it over the live comment. GitHub ids of threads: `github = true` stored threads are
+  published GitHub threads (their id is GitHub's), `gh_thread` the GitHub thread a draft thread became,
+  valid while its first comment is mirrored.
 - **One-sided files.** An added or deleted file closes the empty side's window (`session.hidden_side`,
   `session.wins[side] = nil`) until `diffpair.restore`; anything reaching for `session.wins.left/right`
   checks it exists. The conflict view restores both first.
@@ -146,7 +160,11 @@ tests swap both with `fake_github.install(state)`, which implements the GitHub b
 responses are real GraphQL recorded from sandbox PRs #2–#4 (`tests/fixtures/github/pr*.json`), with git bundles of their
 branches so shas match. `make test-gh` (`DIFFY_TESTGH=1`) runs the same test files against the real sandbox,
 one fresh PR per case, closed afterwards; placement cases are fake-only because they depend on PR #2's
-between-pushes state. When fake and GitHub disagree, fix the fake.
+between-pushes state, and write cases needing a state only the fake can produce (a failing mutation, a
+thread deleted under a draft) are fake-only too. When fake and GitHub disagree, fix the fake. The fake
+also offers web-side actions (`edit_comment`, `delete_comment`, `push`), a ticking clock (`now`), mutation
+failures (`state.fail`) and the mutations in order (`state.calls`). Write tests lower
+`github.sync_delay` (ms) so the background sync runs soon after a change.
 
 Harness gotchas:
 
@@ -313,8 +331,9 @@ Pending reviews:
   `includesCreatedEdit`.
 - `position` = 1-based index of the line below the file's first `@@` in `merge-base...commitOID`, later `@@`
   headers counting as lines.
-- `addPullRequestReview` returns no thread ids: replies drafted on a new thread are pushed afterwards with
-  `addPullRequestReviewThreadReply`, finding the new thread by path and first comment body.
+- `addPullRequestReview` returns no thread ids, and neither does the legacy `addPullRequestReviewComment`
+  (a comment has no `thread` field): the sync finds the thread a legacy comment made in `reviewThreads(last:
+  20)` by its first comment's id. `addPullRequestReviewThread` returns its thread.
 - Replies with a pending review id become pending replies; resolve/unresolve is immediate. A submitted review
   keeps the `commit` it was created with. You can't approve or request changes on your own PR.
 
@@ -349,7 +368,13 @@ listing every comment id (the first word of its body) and where it must show.
   push to `sandbox/placement`**: it would remap the between-pushes comments.
 - **#3 Content**: multi-line bodies, nested fences, suggestions, reply chains, resolved threads, conversation.
 - **#4 Pending**: an unsubmitted review with threads on three commits and a pending reply. **Never submit,
-  delete or push over it** (`:Diffy review push` deletes your pending review first).
+  delete or push over it.**
+
+**With the GitHub layer on, never open a diffy session on `sandbox/pending` (nor on the branches of #2 and
+#3) in the sandbox clone**: the session adopts your pending review and mirrors into it, and drafts already
+in the store for that branch are mirrored on open; that would write into PR #4's pending review. Write-side
+smoke tests use throwaway PRs (`tests/helpers/github_live.lua`-style branches, closed and deleted
+afterwards), or `github = false`.
 
 A local clone is at `~/projects/diffy-tests` for manual runs; never push from it, and use a separate
 `git worktree` when several agents smoke-test at once. Write-side experiments go on a throwaway PR.

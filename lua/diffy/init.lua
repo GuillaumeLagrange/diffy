@@ -101,17 +101,10 @@ end
 local review_subcommands = {}
 
 function review_subcommands.clear(s, review)
-  review.backend.clear(s)
-  vim.notify('diffy: review cleared')
-  review_ready(s)
-end
-
-function review_subcommands.push(s, review)
-  review.backend.push(s, report_remote(s, 'diffy: pushed'))
-end
-
-function review_subcommands.pull(s, review)
-  review.backend.pull(s, function()
+  review.backend.clear(s, function(done)
+    if done ~= false then
+      vim.notify('diffy: review cleared')
+    end
     review_ready(s)
   end)
 end
@@ -141,7 +134,13 @@ function review_subcommands.submit(s, review, ui, args)
     verdicts = match
   end
   local to_agent = function(body)
-    require('diffy.review.local').submit(s, nil, body, report_remote(s))
+    require('diffy.review.local').submit(s, nil, body, function(ok, warnings)
+      -- what went to the agent leaves your pending review
+      if ok and review.pr then
+        require('diffy.review.github').mirror(s)
+      end
+      report_remote(s)(ok, warnings)
+    end)
   end
   if not verdicts then
     ui.open_submit_body(s, to_agent, { title = 'Send review to the agent', action = 'send' })
@@ -166,10 +165,9 @@ function review_subcommands.submit(s, review, ui, args)
   end, { title = 'Submit review', action = 'submit', choices = choices, choose_title = 'Send to' })
 end
 
-local REVIEW_SUBCOMMANDS = { 'clear', 'pull', 'push', 'submit' }
+local REVIEW_SUBCOMMANDS = { 'clear', 'submit' }
 
---- `:Diffy review clear|submit` (local backend) and `push|pull|submit`
---- (GitHub backend).
+--- `:Diffy review clear|submit`.
 function M.dispatch.review(args)
   local s = current_session()
   if not s then

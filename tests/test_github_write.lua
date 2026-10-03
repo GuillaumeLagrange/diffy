@@ -1,8 +1,10 @@
--- The GitHub layer's write side through the UI: push (local validation,
--- per-commit routing, tracking to HEAD), pull, reply, resolve/unresolve,
--- submit and its destination. Repo: a git bundle of the sandbox's `pending`
--- PR (exact shas). `make test-gh`: the real transport against a fresh PR
--- per case.
+-- The GitHub layer's write side through the UI: drafts mirrored into your
+-- pending review in the background, the sync conflict rules, staged changes,
+-- submitting (to the agent or GitHub) and clearing. Repo: a git bundle of the
+-- sandbox's `pending` PR (exact shas). `make test-gh`: the real transport
+-- against a fresh PR per case; the cases that need GitHub in a state only
+-- the fake can be put in (a failing mutation, a thread deleted under a
+-- draft) are fake-only.
 local leak = require('tests.helpers.leak')
 local live = require('tests.helpers.github_live')
 local ui = require('tests.helpers.ui')
@@ -18,10 +20,9 @@ local MERGE_BASE = '00c9d496d93a587199db453b2f18d7c4e0c994e8' -- == base/pending
 local Q1 = '624697d43fdafc6e982d28e5cc504dc58ffd78f3' -- f.txt L5-7
 local Q2 = '555868b2a02f69191ea2a6f02ce7365285b02ce6' -- f.txt L20
 local HEAD_SHA = '5a5dae9a718551dcddd9ecd66fb85ef6c43c6b28' -- Q3, sandbox/pending's tip, f.txt L30
+local OWNER, NAME = live.REPO:match('(.+)/(.+)')
 
-local function clone_pending()
-  return live.clone_sandbox(PENDING_BUNDLE, 'pending')
-end
+local eq = MiniTest.expect.equality
 
 local function pr_number()
   return live.enabled and live.current.number or 4
@@ -42,7 +43,7 @@ local function setup_pending()
       state.branches = { ['sandbox/pending'] = 4 }
       _G.__fake_state = state
       fake.install(state)
-    ]]):format(PR4_FIXTURE, dir, MERGE_BASE, BASE, HEAD_SHA))
+    ]]):format(PR4_FIXTURE, dir, MERGE_BASE))
     return
   end
   local pr = live.current
@@ -57,10 +58,9 @@ local function setup_pending()
       { path = 'f.txt', line = 20, side = 'RIGHT', body = 'D2 published thread, resolved' },
     },
   })
-  local owner, name = live.REPO:match('(.+)/(.+)')
   local threads = live.graphql(
     'query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:10){nodes{id comments(first:1){nodes{body}}}}}}}',
-    { o = owner, r = name, n = pr.number }
+    { o = OWNER, r = NAME, n = pr.number }
   ).repository.pullRequest.reviewThreads.nodes
   for _, t in ipairs(threads) do
     if t.comments.nodes[1].body:find('^D2') then
@@ -79,8 +79,7 @@ local function setup_pending()
   )
 end
 
---- An empty PR (no threads, no pending review) - for the push scenarios,
---- so pushed drafts are the *only* content. Live: the fresh PR as is.
+--- An empty PR (no threads, no pending review). Live: the fresh PR as is.
 local function setup_empty()
   if live.enabled then
     return
@@ -109,11 +108,12 @@ local T = MiniTest.new_set({
     pre_case = function()
       child.restart({ '-u', 'tests/minimal_init.lua' })
       snapshot = leak.snapshot(child)
-      dir = clone_pending()
+      dir = live.clone_sandbox(PENDING_BUNDLE, 'pending')
       if live.enabled then
         live.open_pr(dir, MERGE_BASE, HEAD_SHA)
       end
       child.fn.chdir(dir)
+      child.lua('require("diffy.review.github").sync_delay = 100')
     end,
     post_case = function()
       if live.enabled then
@@ -128,62 +128,133 @@ local T = MiniTest.new_set({
 })
 
 local view = live.bind(child)
-local wins, open_pr, open_file, select_commit, lines_with_signs =
-  view.wins, view.open_pr, view.open_file, view.select_commit, view.lines_with_signs
-
-local function select_all()
-  local w = wins()
-  child.api.nvim_set_current_win(w.log)
-  ui.arm_ready(child, 'select')
-  child.fn.win_execute(w.log, 'call cursor(1, 1)')
-  child.type_keys('a')
-  ui.wait_ready(child, live.timeout)
-end
-
-local function arm_ready_raw(event)
-  ui.arm_ready_raw(child, event)
-end
+local wins, open_pr, open_file, select_commit = view.wins, view.open_pr, view.open_file, view.select_commit
 
 local function wait_ready_raw()
   ui.wait_ready_raw(child, live.timeout)
 end
 
---- GitHub's state of the PR's reviews: `{ pending = bool, submitted =
---- { { state, body }, … } }` (the fake's recorded db, or the live API).
-local function remote_reviews()
-  if live.enabled then
-    local owner, name = live.REPO:match('(.+)/(.+)')
-    local pr = live.graphql(
-      'query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviews(last:50){nodes{state body}}}}}',
-      { o = owner, r = name, n = pr_number() }
-    ).repository.pullRequest
-    local out = { pending = false, submitted = {} }
-    for _, r in ipairs(pr.reviews.nodes) do
-      if r.state == 'PENDING' then
-        out.pending = true
-      else
-        table.insert(out.submitted, { state = r.state, body = r.body })
-      end
-    end
-    return out
+local function wait_for(pred, what)
+  local ok = vim.wait(live.timeout, pred, live.enabled and 1000 or 20)
+  if not ok then
+    local err = child.api.nvim_exec_lua('return vim.v.errmsg', {})
+    error(('timed out waiting for %s (last error: %s)'):format(what or 'a condition', err))
   end
-  return child.api.nvim_exec_lua(
-    [[
-    local db = (_G.__fake_state._db or {})[4] or { pending = {}, reviews = {} }
-    local out = { pending = next(db.pending) ~= nil, submitted = {} }
-    for _, r in ipairs(db.reviews) do
+end
+
+local ALL_COMMENTS = 'id body state line originalLine commit{oid} originalCommit{oid} pullRequestReview{id}'
+
+--- GitHub's side of the PR: `{ pending = review id | nil, threads = { {
+--- id, side, resolved, comments = { { id, body, state, line, original_line,
+--- commit, original_commit, review } } } }, submitted = { {state, body} } }`.
+local function remote()
+  local raw
+  if live.enabled then
+    local pr = live.graphql(
+      ('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){pending:reviews(states:[PENDING],first:1){nodes{id}} reviews(last:50){nodes{state body}} reviewThreads(first:50){nodes{id diffSide isResolved comments(first:50){nodes{%s}}}}}}}'):format(ALL_COMMENTS),
+      { o = OWNER, r = NAME, n = pr_number() }
+    ).repository.pullRequest
+    raw = { pending = pr.pending.nodes[1] and pr.pending.nodes[1].id, threads = pr.reviewThreads.nodes, reviews = pr.reviews.nodes }
+  else
+    raw = child.api.nvim_exec_lua(
+      [[
+      local db = require('tests.helpers.fake_github').db(_G.__fake_state, 4)
+      local p = db.pending[_G.__fake_state.viewer]
+      return { pending = p and p.id or vim.NIL, threads = db.threads, reviews = db.reviews }
+    ]],
+      {}
+    )
+  end
+  local out = { pending = raw.pending ~= vim.NIL and raw.pending or nil, threads = {}, submitted = {} }
+  for _, t in ipairs(raw.threads) do
+    local th = { id = t.id, side = t.diffSide, resolved = t.isResolved, comments = {} }
+    for _, c in ipairs(t.comments.nodes) do
+      table.insert(th.comments, {
+        id = c.id,
+        body = c.body,
+        state = c.state,
+        line = c.line ~= vim.NIL and c.line or nil,
+        original_line = c.originalLine,
+        commit = c.commit and c.commit.oid,
+        original_commit = c.originalCommit and c.originalCommit.oid,
+        review = c.pullRequestReview and c.pullRequestReview.id,
+      })
+    end
+    table.insert(out.threads, th)
+  end
+  for _, r in ipairs(raw.reviews) do
+    if r.state ~= 'PENDING' then
       table.insert(out.submitted, { state = r.state, body = r.body })
     end
-    return out
-  ]],
-    {}
-  )
+  end
+  return out
+end
+
+--- The remote comment whose body starts with `prefix` (and its thread), or nil.
+local function remote_comment(prefix, r)
+  for _, t in ipairs((r or remote()).threads) do
+    for _, c in ipairs(t.comments) do
+      if c.body:sub(1, #prefix) == prefix then
+        return c, t
+      end
+    end
+  end
+  return nil
+end
+
+local function web_edit(prefix, body)
+  local c = assert(remote_comment(prefix), 'no remote comment ' .. prefix)
+  if live.enabled then
+    live.graphql('mutation($id:ID!,$b:String!){updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$id,body:$b}){clientMutationId}}', { id = c.id, b = body })
+  else
+    child.lua(('require("tests.helpers.fake_github").edit_comment(_G.__fake_state, %q, %q)'):format(c.id, body))
+  end
+end
+
+local function web_delete(prefix)
+  local c = assert(remote_comment(prefix), 'no remote comment ' .. prefix)
+  if live.enabled then
+    live.graphql('mutation($id:ID!){deletePullRequestReviewComment(input:{id:$id}){clientMutationId}}', { id = c.id })
+  else
+    child.lua(('require("tests.helpers.fake_github").delete_comment(_G.__fake_state, %q)'):format(c.id))
+  end
+end
+
+local function fake_only()
+  if live.enabled then
+    MiniTest.skip('needs a GitHub state only the fake can be put in')
+  end
+end
+
+local function branch_dir()
+  return ('%s/.git/diffy/%s'):format(dir, ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' }))
+end
+
+--- threads.json as it is on disk (`threads`, `mirror`), `{}` without one.
+local function store()
+  local path = branch_dir() .. '/threads.json'
+  if vim.fn.filereadable(path) == 0 then
+    return {}
+  end
+  return vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
+end
+
+--- The stored comment whose body starts with `prefix`, and its thread.
+local function stored(prefix)
+  for _, t in ipairs(store().threads or {}) do
+    for _, c in ipairs(t.comments) do
+      if (c.body or c.staged_body or ''):sub(1, #prefix) == prefix then
+        return c, t
+      end
+    end
+  end
+  return nil
 end
 
 local function save_composed(body)
   wait_ready_raw()
   child.type_keys(body, '<Esc>')
-  arm_ready_raw('review')
+  ui.arm_ready_raw(child, 'review')
   child.type_keys('<C-s>')
   wait_ready_raw()
 end
@@ -191,94 +262,9 @@ end
 local function compose_draft(win, lnum, body)
   child.api.nvim_set_current_win(win)
   child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum))
-  arm_ready_raw('compose')
+  ui.arm_ready_raw(child, 'compose')
   child.type_keys('gc')
   save_composed(body)
-end
-
-local function compose_draft_range(win, lnum1, lnum2, body)
-  child.api.nvim_set_current_win(win)
-  child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum1))
-  child.type_keys('v')
-  child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum2))
-  arm_ready_raw('compose')
-  child.type_keys('gc')
-  save_composed(body)
-end
-
---- Replies to the default thread at `lnum` of `win`; the float stays open.
-local function reply_at(win, lnum, body)
-  child.api.nvim_set_current_win(win)
-  child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum))
-  child.type_keys('K')
-  arm_ready_raw('compose')
-  child.type_keys('r')
-  save_composed(body)
-end
-
---- Your drafts in the branch's threads.json (not the GitHub cache next to
---- them), as JSON text, or nil when there is no file.
-local function drafts_text()
-  local branch = ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' })
-  local path = ('%s/.git/diffy/%s/threads.json'):format(dir, branch)
-  if vim.fn.filereadable(path) == 0 then
-    return nil
-  end
-  local data = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
-  return vim.json.encode({ threads = data.threads or {} })
-end
-
-local function drafts_file()
-  local text = drafts_text()
-  MiniTest.expect.equality(text ~= nil, true)
-  return vim.json.decode(text)
-end
-
-local function push()
-  ui.arm_ready(child, 'review')
-  child.cmd('Diffy review push')
-  ui.wait_ready(child, live.timeout)
-end
-
---- Every thread row of `:Diffy threads`, groups unfolded: `{ lnum, text,
---- group, shown }`, `lnum` being the line the row says and `shown` the
---- preview's list of the views showing it (the cursor moved onto the row).
-local function thread_entries()
-  child.o.columns = 200
-  ui.all_threads(child, 'Diffy threads')
-  local out, group = {}, nil
-  for i, r in ipairs(ui.thread_rows(ui.threads_view(child))) do
-    if r.kind == 'group' then
-      group = r.label
-    elseif r.kind == 'thread' then
-      child.type_keys(i .. 'G')
-      local shown = ui.threads_view(child).preview[1]
-      table.insert(out, { lnum = tonumber(r.text:match(':(%d+)%s')), text = r.text, group = group, shown = shown })
-    end
-  end
-  child.type_keys('q')
-  return out
-end
-
---- The entry of the single thread at `lnum`.
-local function thread_at(lnum)
-  for _, e in ipairs(thread_entries()) do
-    if e.lnum == lnum then
-      return e
-    end
-  end
-  return nil
-end
-
---- The entry of the thread whose first line starts with `id` (the
---- sandbox's comment ids, e.g. 'D2').
-local function thread_of(id)
-  for _, e in ipairs(thread_entries()) do
-    if e.text:find(' ' .. id .. ' ', 1, true) then
-      return e
-    end
-  end
-  return nil
 end
 
 --- Enter the thread at `lnum` of `win` whose text has `needle`: `K` opens the
@@ -291,7 +277,7 @@ local function enter_thread_with(win, lnum, needle)
     for _ = 1, 4 do
       local f = ui.thread_float(child)
       if f ~= vim.NIL and table.concat(f.text, '\n'):find(needle, 1, true) then
-        return
+        return f
       end
       child.type_keys(step)
     end
@@ -300,345 +286,767 @@ local function enter_thread_with(win, lnum, needle)
   error('no thread with ' .. needle .. ' at line ' .. lnum)
 end
 
-T['push validates locally, sends nothing for an invalid draft (kept local with a warning), and pushes the rest'] = function()
-  setup_empty()
-  open_pr()
-  open_file('f.txt')
-
-  local right = wins().right
-  compose_draft(right, 30, 'valid: on the head hunk')
-  compose_draft(right, 1, 'invalid: nowhere near a change')
-
-  ui.capture_warnings(child)
-  push()
-
-  MiniTest.expect.equality(#ui.warnings(child, 'WARN') > 0, true)
-  MiniTest.expect.equality(ui.warnings(child, 'ERROR'), {})
-
-  -- the valid one is now `pending` on GitHub (no longer just a local
-  -- draft): still visible at its line after the push+refresh round-trip
-  MiniTest.expect.equality(lines_with_signs('right')[30], true)
-
-  -- the invalid one stayed local: persisted to disk, still `draft`
-  local data = drafts_file()
-  local found
-  for _, t in ipairs(data.threads) do
-    for _, c in ipairs(t.comments) do
-      if c.body:find('invalid', 1, true) then
-        found = c
-      end
+--- In the open thread float: put the cursor on the card whose text has
+--- `needle`.
+local function to_card(needle)
+  local f = ui.thread_float(child)
+  for i, l in ipairs(f.text) do
+    if l:find(needle, 1, true) then
+      child.api.nvim_win_set_cursor(0, { i, 0 })
+      return
     end
   end
-  MiniTest.expect.equality(found ~= nil, true)
-  MiniTest.expect.equality(found.state, 'draft')
-
-  child.cmd('Diffy close')
+  error('no card with ' .. needle)
 end
 
-T['push with drafts on two commits lands each on its own commit; a multi-line draft on the second is tracked to HEAD'] = function()
-  setup_empty()
-  open_pr()
-  open_file('f.txt')
-
-  -- log entries, newest first: head(Q3)=1, Q2=2, Q1=3
-  select_commit(3)
-  local q1_right = wins().right
-  compose_draft(q1_right, 5, 'on Q1 line 5')
-  compose_draft(q1_right, 7, 'on Q1 line 7')
-
-  select_commit(2)
-  local q2_right = wins().right
-  compose_draft_range(q2_right, 18, 22, 'on Q2, multi-line 18-22')
-
-  push()
-
-  -- Q1's two single-line drafts: primary commit (most drafts), pushed via
-  -- the batched `addPullRequestReview` call, visible at their own commit
-  select_commit(3)
-  local at_q1 = lines_with_signs('right')
-  MiniTest.expect.equality(at_q1[5], true)
-  MiniTest.expect.equality(at_q1[7], true)
-
-  -- Q2's multi-line draft: "other commit", tracked to HEAD via
-  -- `addPullRequestReviewThread` (unshifted - Q3's own edit is at L30)
-  select_all()
-  local at_head = lines_with_signs('right')
-  MiniTest.expect.equality(at_head[5], true)
-  MiniTest.expect.equality(at_head[7], true)
-  MiniTest.expect.equality(at_head[22], true)
-
-  -- diffy's own cross-commit placement would show still-local drafts at the
-  -- same lines, so only the emptied drafts file proves they were pushed
-  local text = drafts_text() or ''
-  MiniTest.expect.equality(text:find('multi-line 18-22', 1, true), nil)
-  MiniTest.expect.equality(text:find('on Q1 line', 1, true), nil)
-
-  local q1 = thread_at(5)
-  local q2 = thread_at(18)
-  MiniTest.expect.equality(q1 ~= nil, true)
-  MiniTest.expect.equality(q1.shown:find(Q1:sub(1, 7), 1, true) ~= nil, true)
-  MiniTest.expect.equality(q2 ~= nil, true)
-  MiniTest.expect.equality(q2.shown:find('head', 1, true) ~= nil, true)
-
-  child.cmd('Diffy close')
-end
-
-T['a reply drafted on a not-yet-pushed thread lands in that thread on push'] = function()
-  setup_empty()
-  open_pr()
-  open_file('f.txt')
-
-  local right = wins().right
-  compose_draft(right, 30, 'root comment')
-  reply_at(right, 30, 'follow-up')
-
-  push()
-
-  -- one thread on GitHub holding both comments, nothing left as a local draft
-  local at_30 = {}
-  for _, e in ipairs(thread_entries()) do
-    if e.lnum == 30 then
-      table.insert(at_30, e.text)
-    end
-  end
-  MiniTest.expect.equality(#at_30, 1)
-  MiniTest.expect.equality(at_30[1]:find('+1', 1, true) ~= nil, true)
-  MiniTest.expect.equality((drafts_text() or ''):find('follow-up', 1, true), nil)
-
-  child.cmd('Diffy close')
-end
-
-T['a reply drafted on one of two new same-file threads with the same body lands in its own thread'] = function()
-  setup_empty()
-  open_pr()
-  open_file('f.txt')
-
-  local right = wins().right
-  compose_draft(right, 20, 'nit')
-  reply_at(right, 20, 'follow-up')
-  compose_draft(right, 30, 'nit')
-
-  push()
-
-  local by_line = {}
-  for _, e in ipairs(thread_entries()) do
-    by_line[e.lnum] = (by_line[e.lnum] or '') .. e.text
-  end
-  MiniTest.expect.equality(by_line[20]:find('+1', 1, true) ~= nil, true)
-  MiniTest.expect.equality(by_line[30]:find('+1', 1, true), nil)
-
-  child.cmd('Diffy close')
-end
-
-T['pull restores a pending comment (eagerly remapped for display) at its original commit and line'] = function()
-  setup_pending()
-  open_pr()
-  open_file('f.txt')
-
-  ui.arm_ready(child, 'review')
-  child.cmd('Diffy review pull')
-  ui.wait_ready(child, live.timeout)
-
-  local data = drafts_file()
-
-  -- E3 was written via the legacy position API against Q2 and eagerly
-  -- remapped by GitHub to `commit = head` - `pull` must restore
-  -- its *original* commit/line (Q2, L20), not the live-tracked one
-  local e3
-  for _, t in ipairs(data.threads) do
-    for _, c in ipairs(t.comments) do
-      if c.body:find('E3', 1, true) then
-        e3 = { thread = t, comment = c }
-      end
-    end
-  end
-  MiniTest.expect.equality(e3 ~= nil, true)
-  MiniTest.expect.equality(e3.thread.anchor.commit, Q2)
-  MiniTest.expect.equality(e3.thread.anchor.end_line, 20)
-  MiniTest.expect.equality(e3.comment.state, 'draft')
-
-  child.cmd('Diffy close')
-end
-
-T['the thread float names each author and marks drafts and resolved threads'] = function()
-  setup_pending()
-  open_pr()
-  open_file('f.txt')
-  local right = wins().right
-  reply_at(right, 30, 'a reply')
-
-  local text = ui.thread_float(child).text
-  -- D1 is published: its header carries no state
-  MiniTest.expect.equality(text[1]:find('^GuillaumeLagrange  ') ~= nil, true)
-  MiniTest.expect.equality({ text[1]:find('draft', 1, true), text[1]:find('pending', 1, true) }, {})
-  MiniTest.expect.equality(text[2]:find('^D1 published thread') ~= nil, true)
-  if not live.enabled then
-    -- the recorded PR has E4, a reply in the viewer's pending review
-    MiniTest.expect.equality(text[3]:find('  pending$') ~= nil, true)
-  end
-  MiniTest.expect.equality({ text[#text - 1]:find('  draft$') ~= nil, text[#text] }, { true, 'a reply' })
-  child.type_keys('q')
-
-  enter_thread_with(right, 20, 'D2')
-  MiniTest.expect.equality(ui.thread_float(child).text[1]:match('  ✓ resolved$') ~= nil, true)
-  child.type_keys('q')
-
-  child.cmd('Diffy close')
-end
-
-T['reply, resolve/unresolve and submit'] = function()
-  setup_pending()
-  open_pr()
-  open_file('f.txt')
-
-  -- pull first: recreating the pending review
-  -- on push/submit must not silently drop the pre-existing E1/E2/E3/E4
-  ui.arm_ready(child, 'review')
-  child.cmd('Diffy review pull')
-  ui.wait_ready(child, live.timeout)
-
-  local right = wins().right
-  -- D1 (published, head R30) and D2 (published, resolved, head R20)
-  reply_at(right, 30, 'a reply from the test')
-
-  MiniTest.expect.equality(lines_with_signs('right')[30], true)
-
-  -- saving the reply went back into the thread; `x` resolves it in place and
-  -- the thread stays open until `q`
-  arm_ready_raw('review')
-  child.type_keys('x')
+--- In the open thread float: `e` on the card with `needle`, its text
+--- replaced by `body`.
+local function edit_card(needle, body)
+  to_card(needle)
+  ui.arm_ready_raw(child, 'compose')
+  child.type_keys('e')
   wait_ready_raw()
-  child.type_keys('q')
-
-  enter_thread_with(right, 20, 'D2')
-  arm_ready_raw('review')
-  child.type_keys('x')
+  child.type_keys('ggdG', 'i' .. body, '<Esc>')
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys('<C-s>')
   wait_ready_raw()
-  child.type_keys('q')
+end
 
-  local d1 = thread_of('D1')
-  local d2 = thread_of('D2')
-  MiniTest.expect.equality(d1 ~= nil, true)
-  MiniTest.expect.equality(d1.group:find('^Resolved') ~= nil, true)
-  MiniTest.expect.equality(d2 ~= nil, true)
-  MiniTest.expect.equality(d2.group:find('^Resolved'), nil)
+local function key_in_float(needle, keys)
+  to_card(needle)
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys(keys)
+  wait_ready_raw()
+end
 
-  arm_ready_raw('compose')
+--- `R`: rebuild and read GitHub again, then wait for `done()`.
+local function read_github(done, what)
+  child.api.nvim_set_current_win(wins().log)
+  ui.arm_ready(child, 'pr')
+  child.type_keys('R')
+  ui.wait_ready(child, live.timeout)
+  if done then
+    wait_for(done, what)
+  end
+end
+
+local function pr_row()
+  return ui.layout(child).log[1]
+end
+
+--- `:Diffy review submit comment` with `body`, up to the confirm float.
+local function submit_to_github(body)
+  ui.arm_ready_raw(child, 'compose')
   child.cmd('Diffy review submit comment')
   wait_ready_raw()
-  child.type_keys('looks good', '<Esc>')
+  child.type_keys(body, '<Esc>')
+  ui.arm_ready_raw(child, 'confirm')
   child.type_keys('<C-s>')
-  -- push+submit consumes the pending review on GitHub
-  local function submitted()
-    local r = remote_reviews()
-    if r.pending then
-      return false
+  wait_ready_raw()
+  return child.api.nvim_buf_get_lines(0, 0, -1, false)
+end
+
+local function submitted(body)
+  for _, s in ipairs(remote().submitted) do
+    if s.body == body then
+      return true
     end
-    for _, s in ipairs(r.submitted) do
-      if s.body == 'looks good' then
+  end
+  return false
+end
+
+T['a draft is in your pending review moments after you write it; its edit and deletion follow'] = function()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  compose_draft(right, 30, 'mirrored draft')
+
+  wait_for(function()
+    local c = remote_comment('mirrored draft')
+    return c and c.state == 'PENDING'
+  end, 'the draft in the pending review')
+  local r = remote()
+  local c, t = remote_comment('mirrored draft', r)
+  eq({ side = t.side, line = c.original_line, commit = c.original_commit, review = c.review }, { side = 'RIGHT', line = 30, commit = HEAD_SHA, review = r.pending })
+  eq(stored('mirrored draft').gh.id, c.id)
+
+  enter_thread_with(right, 30, 'mirrored draft')
+  eq(ui.thread_float(child).text[1]:find('  pending$') ~= nil, true)
+  edit_card('mirrored draft', 'mirrored draft, edited')
+  wait_for(function()
+    local e = remote_comment('mirrored draft')
+    return e and e.body == 'mirrored draft, edited'
+  end, 'the edit on GitHub')
+
+  key_in_float('mirrored draft', 'dd')
+  -- its last comment gone, GitHub deletes the review itself
+  wait_for(function()
+    local now = remote()
+    return #now.threads == 0 and now.pending == nil
+  end, 'the deletion on GitHub')
+  eq(store().mirror, nil)
+  child.cmd('Diffy close')
+end
+
+T['a draft on an older commit mirrors on that commit, a removed line as a left-side comment'] = function()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  -- log entries, newest first: head(Q3)=1, Q2=2, Q1=3
+  select_commit(3)
+  compose_draft(wins().right, 5, 'on Q1 line 5')
+  -- Q2's old side is Q1 (Q1's own is the merge-base: a head comment)
+  select_commit(2)
+  compose_draft(wins().left, 20, 'on the removed line 20')
+
+  wait_for(function()
+    return remote_comment('on Q1 line 5') and remote_comment('on the removed line 20')
+  end, 'both drafts on GitHub')
+  local new, nt = remote_comment('on Q1 line 5')
+  eq({ nt.side, new.original_commit, new.original_line, new.state }, { 'RIGHT', Q1, 5, 'PENDING' })
+  local old, ot = remote_comment('on the removed line 20')
+  eq({ ot.side, old.original_commit, old.original_line }, { 'LEFT', Q2, 20 })
+  child.cmd('Diffy close')
+end
+
+T['a draft an nvim closed on before mirroring goes with the next sync'] = function()
+  setup_empty()
+  child.lua('require("diffy.review.github").sync_delay = 60000')
+  open_pr()
+  open_file('f.txt')
+  compose_draft(wins().right, 30, 'left behind')
+  child.cmd('Diffy close')
+  eq(remote_comment('left behind'), nil)
+
+  open_pr()
+  wait_for(function()
+    return remote_comment('left behind') ~= nil
+  end, 'the leftover mirrored')
+  child.cmd('Diffy close')
+end
+
+T['two copies of one draft, mirrored by two nvims at once, are merged on read'] = function()
+  fake_only()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  compose_draft(wins().right, 30, 'mirrored twice')
+  wait_for(function()
+    return remote_comment('mirrored twice') ~= nil
+  end, 'the draft mirrored')
+  -- the other nvim's copy: same place, same body
+  child.lua([[
+    local db = require('tests.helpers.fake_github').db(_G.__fake_state, 4)
+    local copy = vim.deepcopy(db.threads[1])
+    copy.id = 'OTHER_THREAD'
+    copy.comments.nodes[1].id = 'OTHER_COMMENT'
+    table.insert(db.threads, copy)
+  ]])
+  read_github(function()
+    return #remote().threads == 1
+  end, 'one copy left')
+  eq(remote_comment('mirrored twice') ~= nil, true)
+  local n = 0
+  for _, t in ipairs(store().threads or {}) do
+    n = n + #t.comments
+  end
+  eq(n, 1)
+  child.cmd('Diffy close')
+end
+
+T['creating the pending review while another nvim just made one adopts that one'] = function()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  -- the other nvim's review, created after this one's read
+  local other
+  if live.enabled then
+    other = live.graphql('mutation($pr:ID!,$c:GitObjectID!){addPullRequestReview(input:{pullRequestId:$pr,commitOID:$c}){pullRequestReview{id}}}', { pr = live.current.id, c = HEAD_SHA })
+      .addPullRequestReview.pullRequestReview.id
+  else
+    other = child.lua([[
+      local db = require('tests.helpers.fake_github').db(_G.__fake_state, 4)
+      db.pending[_G.__fake_state.viewer] = { id = 'OTHER_NVIM_REVIEW', commitOID = db.head }
+      return 'OTHER_NVIM_REVIEW'
+    ]])
+  end
+  compose_draft(wins().right, 30, 'into the adopted review')
+
+  wait_for(function()
+    return remote_comment('into the adopted review') ~= nil
+  end, 'the draft on GitHub')
+  local r = remote()
+  eq({ r.pending, remote_comment('into the adopted review', r).review }, { other, other })
+  child.cmd('Diffy close')
+end
+
+T['deleting the last mirrored draft deletes the pending review; the next draft makes a fresh one'] = function()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  compose_draft(right, 30, 'first draft')
+  wait_for(function()
+    return remote().pending ~= nil and remote_comment('first draft') ~= nil
+  end, 'the first review')
+  local first = remote().pending
+
+  enter_thread_with(right, 30, 'first draft')
+  key_in_float('first draft', 'dd')
+  wait_for(function()
+    return remote().pending == nil
+  end, 'the review deleted with its last comment')
+
+  compose_draft(right, 28, 'second draft')
+  wait_for(function()
+    return remote_comment('second draft') ~= nil
+  end, 'the second draft on GitHub')
+  local r = remote()
+  eq(r.pending ~= nil and r.pending ~= first, true)
+  eq(remote_comment('second draft', r).review, r.pending)
+  child.cmd('Diffy close')
+end
+
+T['a reply drafted on a new thread follows it into the same GitHub thread'] = function()
+  setup_empty()
+  child.lua('require("diffy.review.github").sync_delay = 60000')
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  compose_draft(right, 20, 'nit')
+  enter_thread_with(right, 20, 'nit')
+  ui.arm_ready_raw(child, 'compose')
+  child.type_keys('r')
+  save_composed('follow-up')
+  child.type_keys('q')
+  compose_draft(right, 30, 'nit')
+  -- a read syncs too
+  read_github(function()
+    local c, t = remote_comment('follow-up')
+    return c and #t.comments == 2
+  end, 'the reply in its thread')
+  local r = remote()
+  local _, t = remote_comment('follow-up', r)
+  eq({ t.comments[1].body, t.comments[1].original_line }, { 'nit', 20 })
+  child.cmd('Diffy close')
+end
+
+T['a pending comment changed on both sides keeps both versions until dd drops one'] = function()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  compose_draft(right, 30, 'mine v1')
+  wait_for(function()
+    return remote_comment('mine v1') ~= nil
+  end, 'the draft on GitHub')
+
+  web_edit('mine v1', 'web v2')
+  enter_thread_with(right, 30, 'mine v1')
+  edit_card('mine v1', 'mine v2')
+  wait_for(function()
+    local c = stored('mine v2')
+    return c and c.conflict
+  end, 'the conflict')
+  child.type_keys('q')
+  -- nothing was overwritten
+  eq(remote_comment('web v2') ~= nil, true)
+  eq(pr_row():find('1 conflict', 1, true) ~= nil, true)
+  local text = enter_thread_with(right, 30, 'mine v2').text
+  local function header_of(body)
+    for i, l in ipairs(text) do
+      if l:find(body, 1, true) then
+        return text[i - 1]
+      end
+    end
+  end
+  eq(header_of('mine v2'):find('conflict', 1, true) ~= nil, true)
+  eq(header_of('web v2'):find('github%.com$') ~= nil, true)
+
+  -- dropping the github.com version: yours goes to GitHub, the conflict ends
+  key_in_float('web v2', 'dd')
+  wait_for(function()
+    local c = remote_comment('mine v2')
+    return c ~= nil
+  end, 'your version on GitHub')
+  eq(stored('mine v2').conflict, nil)
+  eq(stored('web v2'), nil)
+  eq(pr_row():find('conflict', 1, true), nil)
+  child.cmd('Diffy close')
+end
+
+T['an edit beats a delete, whichever side made which'] = function()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  compose_draft(right, 30, 'deleted here')
+  compose_draft(right, 28, 'deleted there')
+  wait_for(function()
+    return remote_comment('deleted here') and remote_comment('deleted there')
+  end, 'both drafts on GitHub')
+
+  -- edited on github.com, deleted here: it comes back with the web text
+  web_edit('deleted here', 'deleted here, but edited on the web')
+  enter_thread_with(right, 30, 'deleted here')
+  key_in_float('deleted here', 'dd')
+  -- edited here, deleted on github.com: mirrored again
+  web_delete('deleted there')
+  enter_thread_with(right, 28, 'deleted there')
+  edit_card('deleted there', 'deleted there, but edited here')
+  child.type_keys('q')
+
+  read_github(function()
+    return stored('deleted here, but edited on the web') ~= nil and remote_comment('deleted there, but edited here') ~= nil
+  end, 'both edits kept')
+  eq(remote_comment('deleted here, but edited on the web') ~= nil, true)
+  child.cmd('Diffy close')
+end
+
+T['x stages a resolve, x again cancels it; nothing reaches GitHub before a submit'] = function()
+  setup_pending()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  enter_thread_with(right, 30, 'D1')
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys('x')
+  wait_ready_raw()
+  local f = ui.thread_float(child)
+  eq(f.text[1]:find('resolve staged', 1, true) ~= nil, true)
+  local _, d1 = remote_comment('D1')
+  eq(d1.resolved, false)
+
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys('x')
+  wait_ready_raw()
+  eq(ui.thread_float(child).text[1]:find('staged', 1, true), nil)
+  child.type_keys('q')
+  for _, t in ipairs(store().threads or {}) do
+    eq(t.resolve_staged, nil)
+  end
+  eq(select(2, remote_comment('D1')).resolved, false)
+  child.cmd('Diffy close')
+end
+
+T['a staged edit next to an edit made on github.com: dd drops yours, dd on the live one stages its deletion'] = function()
+  setup_pending()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  enter_thread_with(right, 30, 'D1')
+  edit_card('D1', 'D1 my staged edit')
+  eq(ui.thread_float(child).text[1]:find('edit staged', 1, true) ~= nil, true)
+  child.type_keys('q')
+  -- staged only
+  eq(remote_comment('D1').body:find('^D1 published') ~= nil, true)
+
+  web_edit('D1', 'D1 edited on the web')
+  read_github(function()
+    local c = stored('D1 my staged edit')
+    return c and c.staged_conflict
+  end, 'the conflict')
+  eq(pr_row():find('1 conflict', 1, true) ~= nil, true)
+  local text = enter_thread_with(right, 30, 'D1 edited on the web').text
+  local joined = table.concat(text, '\n')
+  eq(joined:find('edited on github.com', 1, true) ~= nil, true)
+  eq(joined:find('your edit', 1, true) ~= nil, true)
+  key_in_float('D1 my staged edit', 'dd')
+  eq(table.concat(ui.thread_float(child).text, '\n'):find('D1 my staged edit', 1, true), nil)
+  key_in_float('D1 edited on the web', 'dd')
+  eq(ui.thread_float(child).text[1]:find('deletion staged', 1, true) ~= nil, true)
+  child.type_keys('q')
+  eq(remote_comment('D1 edited on the web') ~= nil, true)
+  child.cmd('Diffy close')
+end
+
+T['a staged deletion of a comment edited on github.com is cancelled, with a notification'] = function()
+  setup_pending()
+  open_pr()
+  open_file('f.txt')
+  enter_thread_with(wins().right, 30, 'D1')
+  key_in_float('D1', 'dd')
+  eq(ui.thread_float(child).text[1]:find('deletion staged', 1, true) ~= nil, true)
+  child.type_keys('q')
+  eq(remote_comment('D1') ~= nil, true)
+  web_edit('D1', 'D1 edited on the web')
+  ui.capture_warnings(child)
+  read_github(function()
+    for _, t in ipairs(store().threads or {}) do
+      for _, c in ipairs(t.comments) do
+        if c.staged_delete then
+          return false
+        end
+      end
+    end
+    return true
+  end, 'the deletion cancelled')
+  local warned = table.concat(ui.warnings(child, 'WARN'), '\n')
+  eq(warned:find('deletion cancelled', 1, true) ~= nil, true)
+  child.cmd('Diffy close')
+end
+
+T['a staged edit of a comment deleted on github.com becomes a draft reply, or goes with a notification when its thread is gone'] = function()
+  fake_only()
+  setup_pending()
+  -- a second published comment of yours under D1, and D2 alone in its thread
+  child.lua([[
+    local fake = require('tests.helpers.fake_github')
+    local db = fake.db(_G.__fake_state, 4)
+    local d1 = db.threads[1]
+    local at = fake.now(_G.__fake_state)
+    table.insert(d1.comments.nodes, 2, vim.tbl_extend('force', vim.deepcopy(d1.comments.nodes[1]), {
+      id = 'PRRC_D1_REPLY', body = 'D1R published reply', createdAt = at, updatedAt = at,
+    }))
+  ]])
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  enter_thread_with(right, 30, 'D1R')
+  edit_card('D1R', 'D1R my edit')
+  child.type_keys('q')
+  enter_thread_with(right, 20, 'D2')
+  edit_card('D2', 'D2 my edit')
+  child.type_keys('q')
+
+  web_delete('D1R')
+  web_delete('D2')
+  ui.capture_warnings(child)
+  read_github(function()
+    local c = stored('D1R my edit')
+    return c and c.state == 'draft' and stored('D2 my edit') == nil
+  end, 'the edit as a reply, the other dropped')
+  local _, t = stored('D1R my edit')
+  eq(t.id, select(2, remote_comment('D1 published')).id)
+  local warned = table.concat(ui.warnings(child, 'WARN'), '\n')
+  eq(warned:find('D2 my edit', 1, true) ~= nil, true)
+  child.cmd('Diffy close')
+end
+
+T['your pending review made elsewhere is adopted: its comments are your drafts, mirrored into it'] = function()
+  setup_pending()
+  open_pr()
+  wait_for(function()
+    return stored('E3') ~= nil
+  end, 'the adopted comments')
+  -- E3 was written through the legacy position API on Q2: it keeps where
+  -- it was written, not where GitHub moved it
+  local e3, t3 = stored('E3')
+  eq({ t3.anchor.commit, t3.anchor.end_line, e3.state }, { Q2, 20, 'draft' })
+  local review = remote().pending
+  open_file('f.txt')
+  select_commit(3)
+  enter_thread_with(wins().right, 7, 'E1')
+  eq(ui.thread_float(child).text[1]:find('pending', 1, true) ~= nil, true)
+  edit_card('E1', 'E1 edited in diffy')
+  wait_for(function()
+    return remote_comment('E1 edited in diffy') ~= nil
+  end, 'the edit on GitHub')
+  eq(remote_comment('E1 edited in diffy').review, review)
+  child.type_keys('q')
+  child.cmd('Diffy close')
+end
+
+T['a draft GitHub cannot take stays local with a badge until a commit and a push make it mirrorable'] = function()
+  setup_empty()
+  local lines = vim.fn.readfile(dir .. '/f.txt')
+  lines[35] = 'line 35 in the worktree'
+  vim.fn.writefile(lines, dir .. '/f.txt')
+  open_pr()
+  ui.select_log_row(child, 'Working tree')
+  open_file('f.txt')
+  local right = wins().right
+  compose_draft(right, 35, 'on the worktree')
+  compose_draft(right, 1, 'nowhere near a change')
+  read_github(function()
+    local w, o = stored('on the worktree'), stored('nowhere near')
+    return w and w.blocked == 'worktree' and o and o.blocked == 'outside the diff'
+  end, 'both drafts kept local')
+  eq(enter_thread_with(right, 35, 'on the worktree').text[1]:find('local only: worktree', 1, true) ~= nil, true)
+  child.type_keys('q')
+  eq(#remote().threads, 0)
+
+  ui.git(dir, { 'commit', '-qam', 'worktree change' })
+  local sha = ui.git(dir, { 'rev-parse', 'HEAD' })
+  read_github(function()
+    local w = stored('on the worktree')
+    return w and w.blocked == 'unpushed'
+  end, 'the draft on an unpushed commit')
+  eq(#remote().threads, 0)
+
+  if live.enabled then
+    ui.git(dir, { 'push', '-q', 'origin', 'HEAD:refs/heads/' .. live.current.head })
+  else
+    child.lua(('require("tests.helpers.fake_github").push(_G.__fake_state, 4, %q)'):format(sha))
+  end
+  read_github(function()
+    return remote_comment('on the worktree') ~= nil
+  end, 'the draft mirrored after the push')
+  local c = remote_comment('on the worktree')
+  eq({ c.original_commit, c.original_line }, { sha, 35 })
+  eq(remote_comment('nowhere near'), nil)
+  child.cmd('Diffy close')
+end
+
+T['a draft reply on a resolved thread is mirrored; once its thread is deleted, it goes with its text in a notification'] = function()
+  fake_only()
+  setup_pending()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  enter_thread_with(right, 20, 'D2')
+  ui.arm_ready_raw(child, 'compose')
+  child.type_keys('r')
+  save_composed('reply on a resolved thread')
+  child.type_keys('q')
+  wait_for(function()
+    return remote_comment('reply on a resolved thread') ~= nil
+  end, 'the reply in the pending review')
+  eq(select(2, remote_comment('reply on a resolved thread')).resolved, true)
+
+  child.lua([[
+    local db = require('tests.helpers.fake_github').db(_G.__fake_state, 4)
+    for i, t in ipairs(db.threads) do
+      if t.comments.nodes[1].body:find('^D2') then
+        table.remove(db.threads, i)
+        break
+      end
+    end
+  ]])
+  ui.capture_warnings(child)
+  read_github(function()
+    return stored('reply on a resolved thread') == nil
+  end, 'the reply dropped')
+  eq(table.concat(ui.warnings(child, 'WARN'), '\n'):find('reply on a resolved thread', 1, true) ~= nil, true)
+  child.cmd('Diffy close')
+end
+
+T['submitting to the agent takes your drafts out of the pending review'] = function()
+  setup_pending()
+  open_pr()
+  open_file('f.txt')
+  compose_draft(wins().right, 30, 'for the agent')
+  wait_for(function()
+    return remote_comment('for the agent') ~= nil
+  end, 'the draft mirrored')
+
+  ui.arm_ready_raw(child, 'compose')
+  child.cmd('Diffy review submit')
+  wait_ready_raw()
+  ui.arm_ready_raw(child, 'choose')
+  child.type_keys('<C-s>')
+  wait_ready_raw()
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys('a')
+  wait_ready_raw()
+
+  local md = table.concat(vim.fn.readfile(branch_dir() .. '/review.md'), '\n')
+  -- your drafts, adopted ones included; not D1, which is published
+  eq({ md:find('for the agent', 1, true) ~= nil, md:find('E1 pending', 1, true) ~= nil, md:find('D1 published', 1, true) }, { true, true, nil })
+  wait_for(function()
+    return remote().pending == nil
+  end, 'the pending review emptied')
+  eq(remote_comment('for the agent'), nil)
+  eq(remote_comment('D1 published') ~= nil, true)
+  eq({ stored('for the agent').state, stored('for the agent').gh }, { 'sent', nil })
+  child.cmd('Diffy close')
+end
+
+T['the submit float lists what goes out; a draft left out returns into a fresh pending review'] = function()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  compose_draft(right, 30, 'goes out')
+  compose_draft(right, 28, 'stays for later')
+  compose_draft(right, 1, 'cannot go')
+  wait_for(function()
+    return remote_comment('goes out') and remote_comment('stays for later')
+  end, 'both drafts mirrored')
+  local first = remote().pending
+
+  local float = submit_to_github('round one')
+  local text = table.concat(float, '\n')
+  eq(text:find('[x] new thread f.txt:30  goes out', 1, true) ~= nil, true)
+  eq(text:find('[x] new thread f.txt:28  stays for later', 1, true) ~= nil, true)
+  eq(text:find('stays behind: f.txt:1  cannot go (outside the diff)', 1, true) ~= nil, true)
+  for i, l in ipairs(float) do
+    if l:find('stays for later', 1, true) then
+      child.api.nvim_win_set_cursor(0, { i, 0 })
+    end
+  end
+  child.type_keys('x')
+  eq(table.concat(child.api.nvim_buf_get_lines(0, 0, -1, false), '\n'):find('[ ] new thread f.txt:28', 1, true) ~= nil, true)
+  child.type_keys('<CR>')
+
+  wait_for(function()
+    local r = remote()
+    local later = remote_comment('stays for later', r)
+    return submitted('round one') and later and later.state == 'PENDING' and r.pending ~= nil
+  end, 'the submit, then the left-out draft in a new review')
+  local r = remote()
+  eq(remote_comment('goes out', r).state, 'SUBMITTED')
+  eq(r.pending ~= first, true)
+  eq(stored('goes out'), nil)
+  child.cmd('Diffy close')
+end
+
+T['a GitHub submit sends the review, then staged edits and deletions, then resolves; a failing one stays staged and the next sync retries it'] = function()
+  fake_only()
+  setup_pending()
+  child.lua([[_G.__fake_state.fail = { resolveReviewThread = 'boom' }]])
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  enter_thread_with(right, 30, 'D1')
+  edit_card('D1', 'D1 edited at submit')
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys('x')
+  wait_ready_raw()
+  child.type_keys('q')
+  enter_thread_with(right, 20, 'D2')
+  key_in_float('D2', 'dd')
+  child.type_keys('q')
+  child.lua('_G.__fake_state.calls = {}')
+
+  local text = table.concat(submit_to_github('with staged changes'), '\n')
+  for _, want in ipairs({ 'edit       f.txt:30  D1 edited at submit', 'delete     f.txt:20  D2', 'resolve    f.txt:30  D1', 'new thread f.txt:7  E1', 'reply      f.txt:30  E4' }) do
+    eq({ want, text:find(want, 1, true) ~= nil }, { want, true })
+  end
+  ui.capture_warnings(child)
+  child.type_keys('<CR>')
+  wait_for(function()
+    return submitted('with staged changes') and remote_comment('D1 edited at submit') ~= nil and remote_comment('D2') == nil
+  end, 'the submit and the staged changes')
+  local calls = child.lua_get('_G.__fake_state.calls')
+  local order = vim.tbl_filter(function(c)
+    return c == 'submitPullRequestReview' or c == 'updatePullRequestReviewComment' or c == 'deletePullRequestReviewComment' or c == 'resolveReviewThread'
+  end, calls)
+  -- the syncs after it may retry the failed resolve already
+  eq(vim.list_slice(order, 1, 4), { 'submitPullRequestReview', 'updatePullRequestReviewComment', 'deletePullRequestReviewComment', 'resolveReviewThread' })
+  -- the resolve failed: still staged
+  wait_for(function()
+    for _, t in ipairs(store().threads or {}) do
+      if t.resolve_staged == 'resolve' and t.retry then
         return true
       end
     end
     return false
-  end
-  MiniTest.expect.equality(vim.wait(live.timeout, submitted, live.enabled and 1000 or 10), true)
+  end, 'the resolve kept staged')
+  eq(select(2, remote_comment('D1 edited')).resolved, false)
 
+  child.lua('_G.__fake_state.fail = nil')
+  read_github(function()
+    return select(2, remote_comment('D1 edited')).resolved == true
+  end, 'the resolve retried')
   child.cmd('Diffy close')
 end
 
 T['review submit asks agent or GitHub, then comment, approve or request changes; approving needs no drafts'] = function()
   setup_empty()
   open_pr()
-  MiniTest.expect.equality(child.fn.getcompletion('Diffy review submit ', 'cmdline'), live.enabled and { 'comment' } or { 'comment', 'approve', 'request_changes' })
+  eq(child.fn.getcompletion('Diffy review submit ', 'cmdline'), live.enabled and { 'comment' } or { 'comment', 'approve', 'request_changes' })
 
-  arm_ready_raw('compose')
+  ui.arm_ready_raw(child, 'compose')
   child.cmd('Diffy review submit')
   wait_ready_raw()
   child.type_keys('lgtm', '<Esc>')
-  arm_ready_raw('choose')
+  ui.arm_ready_raw(child, 'choose')
   child.type_keys('<C-s>')
   wait_ready_raw()
-  MiniTest.expect.equality(vim.list_slice(child.api.nvim_buf_get_lines(0, 0, -1, false), 2), { '  a  agent', '  g  GitHub' })
+  eq(vim.list_slice(child.api.nvim_buf_get_lines(0, 0, -1, false), 2), { '  a  agent', '  g  GitHub' })
   local expected
   if live.enabled then
     -- your own PR: comment is the only event, no second prompt
     child.type_keys('g')
     expected = { state = 'COMMENTED', body = 'lgtm' }
   else
-    arm_ready_raw('choose')
+    ui.arm_ready_raw(child, 'choose')
     child.type_keys('g')
     wait_ready_raw()
-    local prompt = child.api.nvim_buf_get_lines(0, 0, -1, false)
-    MiniTest.expect.equality(vim.list_slice(prompt, 2), { '  c  comment', '  a  approve', '  r  request changes' })
+    eq(vim.list_slice(child.api.nvim_buf_get_lines(0, 0, -1, false), 2), { '  c  comment', '  a  approve', '  r  request changes' })
     -- cancelling goes back to the message, kept
     child.type_keys('q')
-    MiniTest.expect.equality(child.api.nvim_buf_get_lines(0, 0, -1, false), { 'lgtm' })
-    arm_ready_raw('choose')
+    eq(child.api.nvim_buf_get_lines(0, 0, -1, false), { 'lgtm' })
+    ui.arm_ready_raw(child, 'choose')
     child.type_keys('<C-s>')
     wait_ready_raw()
-    arm_ready_raw('choose')
+    ui.arm_ready_raw(child, 'choose')
     child.type_keys('g')
     wait_ready_raw()
     child.type_keys('a')
     expected = { state = 'APPROVED', body = 'lgtm' }
   end
-  MiniTest.expect.equality(vim.wait(live.timeout, function()
-    return vim.deep_equal(remote_reviews().submitted, { expected })
-  end, live.enabled and 1000 or 10), true)
-
+  wait_for(function()
+    return vim.deep_equal(remote().submitted, { expected })
+  end, 'the review')
   child.cmd('Diffy close')
 end
 
-T['with a PR, submitting to the agent sends only your drafts, marks them sent and leaves GitHub alone'] = function()
+T[':Diffy review clear asks, then drops your drafts and deletes your pending review'] = function()
   setup_pending()
   open_pr()
   open_file('f.txt')
-  compose_draft(wins().right, 30, 'for the agent')
-  local remote = remote_reviews()
+  compose_draft(wins().right, 30, 'to be cleared')
+  wait_for(function()
+    return remote_comment('to be cleared') ~= nil and remote().pending ~= nil
+  end, 'the draft mirrored')
 
-  arm_ready_raw('compose')
-  child.cmd('Diffy review submit')
-  wait_ready_raw()
-  arm_ready_raw('choose')
-  child.type_keys('<C-s>')
-  wait_ready_raw()
-  arm_ready_raw('review')
-  child.type_keys('a')
-  wait_ready_raw()
+  child.cmd('Diffy review clear')
+  child.type_keys('n')
+  eq(stored('to be cleared') ~= nil, true)
+  eq(remote().pending ~= nil, true)
 
-  local md = table.concat(vim.fn.readfile(dir .. '/.git/diffy/' .. ui.git(dir, { 'rev-parse', '--abbrev-ref', 'HEAD' }) .. '/review.md'), '\n')
-  MiniTest.expect.equality(md:find('for the agent', 1, true) ~= nil, true)
-  -- D1 is published, E1 in your pending review: GitHub's, not the agent's
-  MiniTest.expect.equality({ md:find('D1 published', 1, true), md:find('E1 pending', 1, true) }, {})
-  MiniTest.expect.equality(drafts_file().threads[1].comments[1].state, 'sent')
-  MiniTest.expect.equality(remote_reviews(), remote)
+  ui.arm_ready_raw(child, 'review')
+  child.cmd('Diffy review clear')
+  child.type_keys('y')
+  wait_ready_raw()
+  wait_for(function()
+    return remote().pending == nil
+  end, 'the pending review deleted')
+  -- adopted comments went with it; published ones stay
+  eq({ remote_comment('E1'), remote_comment('to be cleared'), remote_comment('D1') ~= nil }, { nil, nil, true })
+  eq(#(store().threads or {}), 0)
   child.cmd('Diffy close')
 end
 
-T['submitting 35 drafts lands them all even though GitHub errors returning the review'] = function()
+T['with a PR, review has no push or pull'] = function()
   setup_empty()
+  open_pr()
+  eq(child.fn.getcompletion('Diffy review ', 'cmdline'), { 'clear', 'submit' })
+  ui.capture_warnings(child)
+  child.cmd('Diffy review push')
+  eq(table.concat(ui.warnings(child, 'WARN'), '\n'):find('expects clear|submit', 1, true) ~= nil, true)
+  child.cmd('Diffy close')
+end
+
+T['the thread float names each author and marks drafts, pending comments and resolved threads'] = function()
+  setup_pending()
+  child.lua('require("diffy.review.github").sync_delay = 60000')
   open_pr()
   open_file('f.txt')
   local right = wins().right
-  for i = 1, 35 do
-    compose_draft(right, 30, ('draft %d'):format(i))
+  enter_thread_with(right, 30, 'D1')
+  ui.arm_ready_raw(child, 'compose')
+  child.type_keys('r')
+  save_composed('a reply')
+
+  local text = ui.thread_float(child).text
+  -- D1 is published: its header carries no state
+  eq(text[1]:find('^GuillaumeLagrange  ') ~= nil, true)
+  eq({ text[1]:find('draft', 1, true), text[1]:find('pending', 1, true) }, {})
+  eq(text[2]:find('^D1 published thread') ~= nil, true)
+  if not live.enabled then
+    -- the recorded PR has E4, a reply in the viewer's pending review
+    eq(text[3]:find('  pending$') ~= nil, true)
   end
+  eq({ text[#text - 1]:find('  draft$') ~= nil, text[#text] }, { true, 'a reply' })
+  child.type_keys('q')
 
-  arm_ready_raw('compose')
-  child.cmd('Diffy review submit comment')
-  wait_ready_raw()
-  child.type_keys('big review', '<Esc>')
-  child.type_keys('<C-s>')
-
-  -- the layer re-reads (and redraws) between the push and the submit: wait on GitHub itself
-  local want = { pending = false, submitted = { { state = 'COMMENTED', body = 'big review' } } }
-  vim.wait(live.timeout, function()
-    return vim.deep_equal(remote_reviews(), want)
-  end, live.enabled and 1000 or 10)
-  MiniTest.expect.equality(remote_reviews(), want)
-  -- pushed drafts leave the local file; nothing is pushed twice later
-  MiniTest.expect.equality(vim.json.decode(drafts_text()).threads or {}, {})
-
+  enter_thread_with(right, 20, 'D2')
+  eq(ui.thread_float(child).text[1]:match('  ✓ resolved$') ~= nil, true)
+  child.type_keys('q')
   child.cmd('Diffy close')
 end
 

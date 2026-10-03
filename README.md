@@ -1,7 +1,7 @@
 # diffy
 
 A diff viewer for Neovim built on git and fugitive, with a review layer: comment on diffs, then either
-hand the comments to an LLM agent or push them as a GitHub pull request review.
+hand the comments to an LLM agent or submit them as a GitHub pull request review.
 
 Each `:Diffy` session lives in its own tab: a column of views on the left (changed files on top, commits
 below; `column` in `setup` picks which) and a side-by-side diff in native diff mode. A view that isn't in
@@ -57,8 +57,8 @@ require('diffy').setup({
 | `:Diffy panel` | hide/show the panel column | |
 | `:Diffy viewed [clear]` | mark the file shown viewed, or unmark it; `clear` drops all its marks. See Viewed files | |
 | `:Diffy threads [file] [author=… state=… review=…]` | the threads view: every review thread, grouped; `file`: those of the file in the diff (`state`: open, resolved, outdated, detached). See Review | |
-| `:Diffy review submit\|clear` | to the agent, or to GitHub when the branch has an open PR, see Review | |
-| `:Diffy review submit [comment\|approve\|request_changes]\|push\|pull` | GitHub review, when the branch has an open PR, see below | |
+| `:Diffy review submit [comment\|approve\|request_changes]` | to the agent, or to GitHub when the branch has an open PR (an argument means GitHub), see Review | |
+| `:Diffy review clear` | drop your comments; with an open PR, also your staged changes and pending review (asks first) | |
 | `:Diffy restore` | go back to your branch after an interrupted full checkout | |
 | `:Diffy feedback` | describe what bothers you in the current session, see below | |
 | `:Diffy close` | close the session | |
@@ -101,7 +101,8 @@ then the message wrapped to fit. It closes on a non-commit row, when you leave t
 (until you move to another row).
 
 With an open PR (see GitHub review), the log's first row is the PR: `#42 Retry failed uploads · 2 unpushed`.
-After the number and title, where your branch stands against the PR head on GitHub: nothing when in sync,
+After the number and title, the sync conflicts waiting for you (`1 conflict`, see GitHub review), then
+where your branch stands against the PR head on GitHub: nothing when in sync,
 `N unpushed`, `behind N`, `diverged`, or `GitHub has newer commits` when the PR head isn't a local commit
 (diffy never fetches); then `offline` when the last read failed. Resting the cursor on it shows the PR's
 description, each reviewer's state (`alice ✗ changes requested`, `bob ✓ approved`), every review with its
@@ -254,8 +255,11 @@ card is at most 100 columns wide and centred over the window's text; it follows 
 under it and is fitted again when the editor or the diff windows are resized. The
 comment boxes are placed the same way; the `gP` card is centred on the editor and refitted too. Each comment gets a header strip: avatar, author (on
 GitHub; "You" in a local review), age, and its state when it isn't published yet: `draft` (only in
-diffy), `pending` (in your unsubmitted GitHub review), `sent` (exported to the agent). The first header
-also says `outdated` or `✓ resolved`. Bodies render as markdown; suggestion blocks are labelled, empty
+diffy), `pending` (in your unsubmitted GitHub review), `local only: <why>` (a draft GitHub can't take yet),
+`sent` (exported to the agent), and with a PR `conflict`/`github.com` (both sides of a sync conflict),
+`edit staged`, `deletion staged`, `edited on github.com`/`your edit` (see GitHub review). The first header
+also says `outdated`, `✓ resolved`, `resolve staged`. Summaries carry the same states, shortened (`conflict`,
+`local only`, `edit staged`, …). Bodies render as markdown; suggestion blocks are labelled, empty
 ones as "remove these lines". A preview taller than half the window is cut, with a hint to press `K`.
 
 Bodies full of HTML, as bots like greptile write them, are shown as their markdown equivalent: HTML
@@ -277,8 +281,9 @@ lines wrap at words. This is display only: bodies are stored and sent as written
   an SVG delegate, librsvg or its own MSVG) and they fit it; otherwise `[P0]`/`[P1]` are red, `[P2]`
   yellow, `[P3]` blue. A heading's `Confidence Score: N/5` is green from 4, yellow at 3, red below.
 
-In the thread float, the footer lists the keys that apply: `r` reply, `e` edit the draft under the cursor,
-`dd` delete the draft under the cursor, `x` resolve/unresolve, `]t`/`[t` switch thread, `q` close. A
+In the thread float, the footer lists the keys that apply: `r` reply, `e` edit the comment under the
+cursor (a draft, or with a PR your published comment), `dd` delete it, `x` resolve/unresolve, `]t`/`[t`
+switch thread, `q` close. A
 reply or an edit is written in a box under the thread, which stays in view (a reply starts in insert
 mode, an edit in normal mode at the end of the draft); saving or cancelling goes
 back into the thread. Leaving a comment box or the thread for the diff puts the cursor back where it
@@ -291,7 +296,7 @@ worktree comment's text is), Resolved, and Resolved,
 outdated; within a group, under a header per file, the file in the diff first (in bold). Group headers
 carry the count; the resolved groups start folded, and the cursor starts on the first thread of the file in the
 diff. Each row gives the line, who started the thread ("you" for yours), how many replies and who wrote
-the last one when it's someone else, `draft`/`pending`, and the first line. A thread the selected range
+the last one when it's someone else, its states (`draft`, `pending`, `conflict`, …), and the first line. A thread the selected range
 doesn't show has its line dimmed.
 
 It opens in a float over the diff with a preview beside it (on a wide enough screen): which commits show
@@ -303,7 +308,7 @@ instead, compact and without the preview, and `:Diffy threads` moves the cursor 
 |---|---|
 | `<CR>` | go to the thread: its file, the cursor on its first line, the thread hovered there (that one, when several share the line; `K` enters it). An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). Resolved or hidden threads are shown again. On a group header: fold / unfold; on a file header: its first thread |
 | `<Tab>` | fold / unfold the group under the cursor |
-| `x` | resolve / unresolve the thread under the cursor |
+| `x` | resolve / unresolve the thread under the cursor (with a PR, staged until you submit) |
 | `m` | only threads you started / everyone's (GitHub) |
 | `<C-f>` / `<C-b>` | scroll the preview |
 | `q` / `<Esc>` | close the float; leaving it for another window closes it too |
@@ -365,18 +370,45 @@ the PR merged or closed: its row, its threads and what was read, not your drafts
 - Threads are placed like every thread (see above), as github.com's "Changes" view does: in the full view
   and in each commit's view, at the line they track to, hidden where their lines changed. Outdated threads
   are in the threads view with the others; `<CR>` there opens the commit they were written on.
-- Your comments are drafts in the branch's store until you push.
-- `:Diffy review push` replaces your pending review on GitHub with your drafts. Each lands on the commit
-  you wrote it in. Drafts GitHub would reject (outside the diff and its 3 lines of context) stay local
-  with a warning.
-- `:Diffy review pull` imports your pending review from GitHub (it asks before replacing local drafts).
+- **Your pending review follows your drafts.** About 2 seconds after you write, edit or delete a draft,
+  diffy mirrors it into your pending review on GitHub, which only you see: the review is created with the
+  first draft, a draft lands on the commit you wrote it on (a removed line as a left-side comment), a
+  reply in its thread. Offline, the next successful read does it; a change an nvim closed on before
+  mirroring goes with the next sync of any session. Deleting your last pending comment deletes the review
+  on GitHub; the next draft makes a new one. A pending review diffy didn't create (github.com, another
+  machine) is adopted: its comments become your drafts. Nothing anyone else sees changes before a GitHub
+  submit.
+- A draft GitHub can't take stays in diffy, marked `local only: worktree` (written on the working tree or
+  the index), `unpushed` (its commit isn't on GitHub) or `outside the diff` (beyond the changes and their
+  3 lines of context): it's mirrored once that changes, e.g. after you commit and push.
+- **Sync conflicts.** Before changing a mirrored comment, diffy reads it again; it never overwrites a
+  change made on github.com:
+  - a pending comment changed on both sides: both versions show in the thread, the web one marked
+    `github.com`, and the PR row counts the conflict; `dd` the version you drop (or `e` either). Edited on
+    one side and deleted on the other: the edit wins.
+  - a staged edit (below) of a comment edited on github.com: the live comment (`edited on github.com`)
+    then `your edit`; `dd` on your edit drops it, `dd` on the live one stages its deletion, `e` on your edit
+    keeps it over the web one.
+  - a staged edit of a comment deleted on github.com becomes a draft reply in its thread; a staged deletion
+    of a comment edited there is cancelled. A draft reply, or a staged edit, whose thread was deleted is
+    dropped. Each comes with a notification holding your text.
+- **Staged changes**, kept in diffy until a GitHub submit: `x` on a published thread stages resolving or
+  unresolving it (`x` again cancels); `e` on your published comment stages an edit, `dd` its deletion
+  (`dd` again cancels).
 - `:Diffy review submit` opens a box for the review message; `<C-s>` then asks where it goes: `a` the agent
-  (as without a PR, see above: only your comments, marked sent) or `g` GitHub, which then asks `c` comment,
-  `a` approve or `r` request changes (`q` goes back to the message). GitHub gets your drafts pushed and the
-  review submitted; with no drafts, the message alone (approving without comments). An argument picks the
-  event and means GitHub, skipping both questions; on your own PR, where GitHub only allows a comment,
-  there's no second question.
-- `x` resolves or unresolves a published thread on GitHub immediately.
+  (as without a PR, see above: your drafts, marked sent and taken out of your pending review) or `g`
+  GitHub, which then asks `c` comment, `a` approve or `r` request changes (`q` goes back to the message).
+  An argument picks the event and means GitHub, skipping both questions; on your own PR, where GitHub only
+  allows a comment, there's no second question. Each comment goes to one place.
+- Before a GitHub submit, a float lists everything going out: new threads, replies, staged edits,
+  deletions and resolves, each `[x]`; `x` leaves one out (a draft left out stays a draft and goes into a
+  new pending review afterwards), `<CR>` sends, `q` cancels. It also lists the drafts that stay behind and
+  unpushed commits. Sync conflicts must be settled first. Then: the drafts left out leave the pending
+  review, the review is submitted (with no comment going, the message alone: approving without comments),
+  then the staged edits and deletions, then the staged resolves. A staged change that fails stays staged
+  and the next sync retries it.
+- `:Diffy review clear` asks, then drops your drafts and staged changes and deletes your pending review on
+  GitHub, adopted comments included.
 
 ## Highlights
 
@@ -400,6 +432,7 @@ All set with `default = true`, so a colorscheme or your config can override any 
 | `DiffyThreadAuthor`, `DiffyThreadAuthor1`…`5` | bold, `Identifier` `DiagnosticHint` `Constant` `Title` `Function` | author names, a colour per login |
 | `DiffyThreadTime` | `Comment` | comment age |
 | `DiffyThreadDraft` / `DiffyThreadPending` / `DiffyThreadSent` | `DiagnosticWarn` / `DiagnosticInfo` / `Comment` | comment states |
+| `DiffyThreadConflict` / `DiffyThreadStaged` | `DiagnosticError` / `DiagnosticHint` | sync conflicts / staged changes |
 | `DiffyThreadResolved` / `DiffyThreadOutdated` | `DiagnosticOk` / `DiagnosticWarn` | thread states |
 | `DiffyThreadCodeBar` / `DiffyThreadSuggestion` | `Comment` / `Added` | code block bar / suggestion bar and label |
 | `DiffyThreadLink` | `Underlined` | link text in cards |

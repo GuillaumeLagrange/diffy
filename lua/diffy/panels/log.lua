@@ -252,6 +252,13 @@ function M.with_layer(session, entries)
   local pr = l.cache.pr
   local out = { base = entries.base, follow_pathspec = entries.follow_pathspec }
   local status = {}
+  local conflicts = 0
+  for _, t in ipairs(type(session.review) == 'table' and session.review.threads or {}) do
+    conflicts = conflicts + require('diffy.review.model').conflicts(t)
+  end
+  if conflicts > 0 then
+    table.insert(status, (' · %d conflict%s'):format(conflicts, conflicts == 1 and '' or 's'))
+  end
   if l.standing then
     table.insert(status, ' · ' .. l.standing)
   end

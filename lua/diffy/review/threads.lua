@@ -149,11 +149,21 @@ local function cells(session, e, full, me)
     end
   end
   local badges, seen = {}, {}
-  for _, c in ipairs(t.comments) do
-    if (c.state == 'draft' or c.state == 'pending') and not seen[c.state] then
-      seen[c.state] = true
-      table.insert(badges, { (#badges > 0 and ' ' or '') .. c.state, c.state == 'draft' and 'DiffyThreadDraft' or 'DiffyThreadPending' })
+  local function add(b)
+    if not seen[b[1]] then
+      seen[b[1]] = true
+      table.insert(badges, { (#badges > 0 and ' ' or '') .. b[1], b[2] })
     end
+  end
+  for _, c in ipairs(t.comments) do
+    for _, b in ipairs(model.comment_badges(c)) do
+      if b[1] ~= 'sent' then
+        add(b)
+      end
+    end
+  end
+  for _, b in ipairs(model.thread_badges(t)) do
+    add(b)
   end
   local state_name = state_of(t)
   local icon = ICONS[state_name]

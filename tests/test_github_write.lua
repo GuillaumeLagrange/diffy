@@ -150,10 +150,11 @@ local ALL_COMMENTS = 'id body state line originalLine commit{oid} originalCommit
 local function remote()
   local raw
   if live.enabled then
-    local pr = live.graphql(
-      ('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){pending:reviews(states:[PENDING],first:1){nodes{id}} reviews(last:50){nodes{state body}} reviewThreads(first:50){nodes{id diffSide isResolved comments(first:50){nodes{%s}}}}}}}'):format(ALL_COMMENTS),
-      { o = OWNER, r = NAME, n = pr_number() }
-    ).repository.pullRequest
+    local query = ('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){pending:reviews(states:[PENDING],first:1){nodes{id}} reviews(last:50){nodes{state body}} reviewThreads(first:50){nodes{id diffSide isResolved comments(first:50){nodes{%s}}}}}}}'):format(ALL_COMMENTS)
+    local vars = { o = OWNER, r = NAME, n = pr_number() }
+    -- GitHub answers "Something went wrong" now and then: one more try
+    local ok, data = pcall(live.graphql, query, vars)
+    local pr = (ok and data or live.graphql(query, vars)).repository.pullRequest
     raw = { pending = pr.pending.nodes[1] and pr.pending.nodes[1].id, threads = pr.reviewThreads.nodes, reviews = pr.reviews.nodes }
   else
     raw = child.api.nvim_exec_lua(
@@ -175,9 +176,9 @@ local function remote()
         state = c.state,
         line = c.line ~= vim.NIL and c.line or nil,
         original_line = c.originalLine,
-        commit = c.commit and c.commit.oid,
-        original_commit = c.originalCommit and c.originalCommit.oid,
-        review = c.pullRequestReview and c.pullRequestReview.id,
+        commit = c.commit ~= vim.NIL and c.commit and c.commit.oid or nil,
+        original_commit = c.originalCommit ~= vim.NIL and c.originalCommit and c.originalCommit.oid or nil,
+        review = c.pullRequestReview ~= vim.NIL and c.pullRequestReview and c.pullRequestReview.id or nil,
       })
     end
     table.insert(out.threads, th)
@@ -383,9 +384,8 @@ T['a draft is in your pending review moments after you write it; its edit and de
   -- its last comment gone, GitHub deletes the review itself
   wait_for(function()
     local now = remote()
-    return #now.threads == 0 and now.pending == nil
-  end, 'the deletion on GitHub')
-  eq(store().mirror, nil)
+    return #now.threads == 0 and now.pending == nil and store().mirror == nil
+  end, 'the deletion on GitHub, forgotten here')
   child.cmd('Diffy close')
 end
 
@@ -453,6 +453,25 @@ T['two copies of one draft, mirrored by two nvims at once, are merged on read'] 
   end
   eq(n, 1)
   child.cmd('Diffy close')
+end
+
+T['a sync answer arriving after the session closed is kept, and leaves nothing watched'] = function()
+  fake_only()
+  setup_empty()
+  open_pr()
+  open_file('f.txt')
+  child.lua('_G.__fake_state.hold_answers = true')
+  compose_draft(wins().right, 30, 'late answer')
+  wait_for(function()
+    return remote().pending ~= nil
+  end, 'the review created, its answer held')
+  child.cmd('Diffy close')
+  child.lua('require("tests.helpers.fake_github").release_answers(_G.__fake_state)')
+  wait_for(function()
+    local c = stored('late answer')
+    return c and c.gh ~= nil
+  end, 'the late answer recorded')
+  eq(stored('late answer').gh.id, remote_comment('late answer').id)
 end
 
 T['creating the pending review while another nvim just made one adopts that one'] = function()
@@ -777,6 +796,11 @@ T['a draft GitHub cannot take stays local with a badge until a commit and a push
 
   if live.enabled then
     ui.git(dir, { 'push', '-q', 'origin', 'HEAD:refs/heads/' .. live.current.head })
+    -- GitHub moves the PR head a moment after the push
+    wait_for(function()
+      return live.graphql('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){headRefOid}}}', { o = OWNER, r = NAME, n = pr_number() })
+        .repository.pullRequest.headRefOid == sha
+    end, 'the PR head moved')
   else
     child.lua(('require("tests.helpers.fake_github").push(_G.__fake_state, 4, %q)'):format(sha))
   end

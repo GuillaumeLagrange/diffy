@@ -661,7 +661,8 @@ function M.decorate(session)
     if session.current_path and not (review.hide_resolved and thread.resolved) then
       local place = review.backend.place(session, thread)
       local win = place and wins[place.win]
-      if win and vim.api.nvim_win_is_valid(win) then
+      -- while a window is being swapped its buffer can be shorter than the place
+      if win and vim.api.nvim_win_is_valid(win) and (place.end_line or 0) <= vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(win)) then
         thread._place = place
         table.insert(placed[place.win], thread)
       end

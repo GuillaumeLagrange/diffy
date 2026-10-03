@@ -13,6 +13,8 @@
 --   state.branches     branch -> PR number, what `gh pr view <branch>` finds
 --   state.offline      every request fails, as without network
 --   state.hold         `gh pr view` doesn't answer until `M.release(state)`
+--   state.hold_answers GitHub acts on every request but answers only on
+--                      `M.release_answers(state)`
 --   state.fail         mutation name -> error message: that mutation fails
 --                      (e.g. `{ resolveReviewThread = 'boom' }`)
 --   state.repo_dir     the fixture repo, for real `git diff` validation
@@ -411,14 +413,23 @@ function M.new(state)
   state.viewer = state.viewer or 'diffy-test-user'
   local self = { state = state }
 
+  -- `state.hold_answers`: GitHub has acted, the answer waits for `M.release_answers`
+  local function answer(f)
+    if state.hold_answers then
+      state.held_answers = state.held_answers or {}
+      table.insert(state.held_answers, f)
+    else
+      vim.schedule(f)
+    end
+  end
   local function respond(cb, data)
     data = vim.deepcopy(data)
-    vim.schedule(function()
+    answer(function()
       cb(data, nil)
     end)
   end
   local function fail(cb, message)
-    vim.schedule(function()
+    answer(function()
       cb(nil, message)
     end)
   end
@@ -823,6 +834,16 @@ function M.release(state)
   state.hold = false
   local held = state.held or {}
   state.held = {}
+  for _, f in ipairs(held) do
+    f()
+  end
+end
+
+--- Deliver the answers `state.hold_answers` kept back, and stop holding.
+function M.release_answers(state)
+  state.hold_answers = false
+  local held = state.held_answers or {}
+  state.held_answers = {}
   for _, f in ipairs(held) do
     f()
   end

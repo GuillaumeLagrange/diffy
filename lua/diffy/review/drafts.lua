@@ -302,11 +302,13 @@ end
 --- (`data.threads`, `data.mirror` always present) and returns false when it
 --- changed nothing. Then every session of the branch follows; `opts.quiet`
 --- skips redrawing `session` itself; `opts.sync` marks the background
---- sync's own writes, which don't schedule another.
+--- sync's own writes, which don't schedule another. A closed session's
+--- late write (a sync answer arriving after teardown) still lands, without
+--- joining the entry again.
 function M.update(session, fn, opts)
-  local e = M.attach(session)
+  local e = session.closed and entries[path_of(session)] or (not session.closed and M.attach(session)) or nil
   local changed = true
-  local written = store.update(e.path, function(data)
+  local written = store.update(path_of(session), function(data)
     data.threads = data.threads or {}
     data.mirror = data.mirror or {}
     data.mirror.deleted = data.mirror.deleted or {}
@@ -315,9 +317,13 @@ function M.update(session, fn, opts)
       data.mirror = nil
     end
   end)
-  e.threads = written.threads
-  if changed then
-    broadcast(e, opts and opts.quiet and session or nil)
+  if e then
+    e.threads = written.threads
+    if changed then
+      broadcast(e, opts and opts.quiet and session or nil)
+    end
+  end
+  if changed and not session.closed then
     changed_hook(session, opts)
   end
   return changed

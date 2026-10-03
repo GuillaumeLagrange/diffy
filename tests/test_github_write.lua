@@ -628,11 +628,14 @@ T['submitting 35 drafts lands them all even though GitHub errors returning the r
   child.cmd('Diffy review submit comment')
   wait_ready_raw()
   child.type_keys('big review', '<Esc>')
-  arm_ready_raw('review')
   child.type_keys('<C-s>')
-  wait_ready_raw()
 
-  MiniTest.expect.equality(remote_reviews(), { pending = false, submitted = { { state = 'COMMENTED', body = 'big review' } } })
+  -- the layer re-reads (and redraws) between the push and the submit: wait on GitHub itself
+  local want = { pending = false, submitted = { { state = 'COMMENTED', body = 'big review' } } }
+  vim.wait(live.timeout, function()
+    return vim.deep_equal(remote_reviews(), want)
+  end, live.enabled and 1000 or 10)
+  MiniTest.expect.equality(remote_reviews(), want)
   -- pushed drafts leave the local file; nothing is pushed twice later
   MiniTest.expect.equality(vim.json.decode(drafts_text()).threads or {}, {})
 

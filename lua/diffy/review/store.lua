@@ -72,6 +72,9 @@ function M.delete(path)
   own_writes[path] = nil
 end
 
+--- handle -> watched path, while the watch runs (the leak check reads it).
+M.watched = {}
+
 --- Call `cb()` (scheduled) whenever another process writes or deletes
 --- `path`. The parent directory is watched, not the file: an atomic write
 --- replaces the file's inode. Returns a handle for `M.unwatch`.
@@ -96,6 +99,7 @@ function M.watch(path, cb)
       cb()
     end)
   end)
+  M.watched[handle] = path
   return handle
 end
 
@@ -104,6 +108,9 @@ function M.unwatch(handle)
   if handle and not handle:is_closing() then
     handle:stop()
     handle:close()
+  end
+  if handle then
+    M.watched[handle] = nil
   end
 end
 

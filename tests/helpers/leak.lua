@@ -15,7 +15,7 @@
 -- doesn't mask a real leak), then fails the case (via `error`) if any
 -- diffy augroup, `diffy://` buffer, buffer-local keymap tagged `diffy: `,
 -- extmark in a `diffy/...` namespace, or extra tab/window/window-option
--- change, or listed [No Name]/fugitive buffer remains.
+-- change, listed [No Name]/fugitive buffer, or store file watch remains.
 local M = {}
 
 --- Window count/options and tab count before a test's session(s) open, to
@@ -89,6 +89,11 @@ function M.check(child, snapshot)
           end
         end
       end
+    end
+
+    local store = package.loaded['diffy.review.store']
+    for _, path in pairs(store and store.watched or {}) do
+      table.insert(bad, 'file watch: ' .. path)
     end
 
     return bad

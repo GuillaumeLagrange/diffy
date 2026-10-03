@@ -369,6 +369,9 @@ listing every comment id (the first word of its body) and where it must show.
 - **#3 Content**: multi-line bodies, nested fences, suggestions, reply chains, resolved threads, conversation.
 - **#4 Pending**: an unsubmitted review with threads on three commits and a pending reply. **Never submit,
   delete or push over it.**
+- **`example/*`** (no PR): branches off `main` (a ~80-file project) named `<label>-<N>-commits-<M>-files`, for
+  exploring the left panel layout. Open with `:Diffy branch main` or plain `:Diffy branch` (origin/HEAD = main).
+  `buildExamples()` rebuilds only these and main's project commit.
 
 **With the GitHub layer on, never open a diffy session on `sandbox/pending` (nor on the branches of #2 and
 #3) in the sandbox clone**: the session adopts your pending review and mirrors into it, and drafts already

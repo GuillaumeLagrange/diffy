@@ -1,6 +1,8 @@
 // Rebuilds the GitHub review sandbox (GuillaumeLagrange/diffy-tests): one PR per concern.
 // Run from the omp eval kernel (Bun): `const s = await import('<abs path>/build.js'); await s.buildAll()`.
 // Needs `gh` authenticated with repo scope. Force-pushes every sandbox branch.
+// example/* branches (no PR) fill the panel for layout exploration; `buildExamples()` rebuilds only those
+// plus main's project commit. Open with `:Diffy branch` (origin/HEAD = main).
 
 const OWNER = 'GuillaumeLagrange';
 const REPO = 'diffy-tests';
@@ -329,9 +331,202 @@ async function pending() {
   return { number: n, shas: { base, Q1, Q2, Q3 }, pendingReviewId: rid, e3Position: pos };
 }
 
+// ── example/* branches: a project tree on main, then branches sized to explore the panel layout ──────
+let seed = 42;
+const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+const pick = (a) => a[Math.floor(rand() * a.length)];
+const cap = (s) => s[0].toUpperCase() + s.slice(1);
+const exists = (path) => Bun.file(`${DIR}/${path}`).size > 0;
+
+const DOMAINS = {
+  'src/api/routes': ['users', 'sessions', 'billing', 'invoices', 'webhooks', 'health', 'search', 'exports'],
+  'src/api/middleware': ['auth', 'rate_limit', 'cors', 'request_id', 'error_handler'],
+  'src/db/models': ['user', 'session', 'invoice', 'plan', 'subscription', 'audit_event', 'api_key'],
+  'src/db/migrations': ['0001_init', '0002_sessions', '0003_billing', '0004_audit', '0005_api_keys'],
+  'src/db': ['pool', 'tx', 'query_builder'],
+  'src/auth': ['tokens', 'passwords', 'oauth', 'permissions', 'mfa'],
+  'src/billing/providers': ['stripe', 'paddle', 'manual'],
+  'src/billing': ['pricing', 'proration', 'tax', 'dunning'],
+  'src/jobs': ['scheduler', 'retry', 'send_invoice', 'cleanup_sessions', 'sync_usage'],
+  'src/ui/components/forms': ['text_input', 'select', 'checkbox', 'date_picker'],
+  'src/ui/components': ['button', 'modal', 'table', 'toast', 'avatar', 'sidebar'],
+  'src/ui/pages/settings': ['profile', 'security', 'billing', 'team'],
+  'src/ui/pages': ['dashboard', 'login', 'invoices'],
+  'src/utils': ['dates', 'money', 'strings', 'logger', 'config', 'cache'],
+  'tests/api': ['users.test', 'billing.test', 'webhooks.test'],
+  'tests/billing': ['pricing.test', 'proration.test'],
+  'tests/auth': ['tokens.test', 'mfa.test'],
+  'docs/architecture': ['overview', 'data_model', 'jobs'],
+  docs: ['getting_started', 'deploy'],
+};
+const VERBS = ['load', 'save', 'validate', 'format', 'parse', 'resolve', 'compute', 'refresh', 'list', 'find'];
+const NOUNS = ['entry', 'record', 'config', 'payload', 'window', 'quota', 'token', 'batch', 'cursor', 'range'];
+
+function exFn() {
+  const name = pick(VERBS) + cap(pick(NOUNS));
+  const arg = pick(NOUNS);
+  const body = [];
+  const n = 3 + Math.floor(rand() * 6);
+  for (let i = 0; i < n; i++) {
+    body.push(pick([
+      `  if (!${arg}) throw new Error('missing ${arg}');`,
+      `  const ${pick(NOUNS)}${i} = await ctx.db.${pick(VERBS)}(${arg}.id);`,
+      `  log.debug('${name}', { id: ${arg}.id, step: ${i} });`,
+      `  const limit = Math.min(${arg}.limit ?? ${10 * (i + 1)}, MAX_${pick(NOUNS).toUpperCase()});`,
+      `  ${arg}.updatedAt = clock.now();`,
+      `  if (${arg}.retries > ${i + 2}) return null;`,
+      `  results.push(${pick(VERBS)}(${arg}, ${i}));`,
+    ]));
+  }
+  return [`export async function ${name}(ctx: Ctx, ${arg}: ${cap(arg)}) {`, '  const results = [];', ...body, '  return results;', '}', ''];
+}
+
+function exTs(path) {
+  const ls = [`// ${path}`, "import { Ctx } from '@/ctx';", "import { log } from '@/utils/logger';", "import { clock } from '@/utils/dates';", ''];
+  const n = 2 + Math.floor(rand() * 4);
+  for (let i = 0; i < n; i++) ls.push(...exFn());
+  return ls;
+}
+
+function exContent(path) {
+  if (path.endsWith('.sql')) {
+    const t = pick(NOUNS) + 's';
+    return [`-- ${path}`, `CREATE TABLE ${t} (`, '  id BIGSERIAL PRIMARY KEY,', `  ${pick(NOUNS)}_id BIGINT NOT NULL,`, '  created_at TIMESTAMPTZ NOT NULL DEFAULT now()', ');'];
+  }
+  if (!path.endsWith('.md')) return exTs(path);
+  const ls = [`# ${cap(path.split('/').pop().replace('.md', '').replace(/_/g, ' '))}`, ''];
+  for (let i = 0; i < 4; i++) {
+    ls.push(`## ${cap(pick(NOUNS))} ${pick(VERBS)}`, '');
+    ls.push(`The ${pick(NOUNS)} is ${pick(VERBS)}d before each ${pick(NOUNS)} so the ${pick(NOUNS)} stays consistent.`, '');
+  }
+  return ls;
+}
+
+function exPaths() {
+  const out = [];
+  for (const [dir, names] of Object.entries(DOMAINS)) {
+    const ext = dir.startsWith('docs') ? '.md' : dir.endsWith('migrations') ? '.sql' : dir.startsWith('src/ui') ? '.tsx' : '.ts';
+    for (const n of names) out.push(`${dir}/${n}${ext}`);
+  }
+  return out;
+}
+
+// One edit: change a line, insert a function, or delete a few lines.
+function exEdit(path) {
+  return edit(path, (ls) => {
+    const r = rand();
+    if (r < 0.4 && ls.length > 8) {
+      const i = 5 + Math.floor(rand() * (ls.length - 6));
+      ls[i] = ls[i].replace(/\d+/, (d) => String(Number(d) + 1)) + (ls[i].includes('//') ? '' : ' // tuned');
+    } else if (r < 0.75 || path.endsWith('.sql')) {
+      const at = Math.min(ls.length, 5 + Math.floor(rand() * 10));
+      const extra = path.endsWith('.md') ? ['', `Note: ${pick(NOUNS)}s are ${pick(VERBS)}d lazily.`, '']
+        : path.endsWith('.sql') ? [`CREATE INDEX ON ${pick(NOUNS)}s (created_at);`] : exFn();
+      ls.splice(at, 0, ...extra);
+    } else if (ls.length > 12) {
+      ls.splice(6 + Math.floor(rand() * (ls.length - 10)), 2 + Math.floor(rand() * 3));
+    }
+  });
+}
+
+async function exCommit(msg) {
+  await sh('git add -A');
+  if ((await sh('git status --porcelain')).trim() === '') {
+    const f = (await sh('git ls-files src')).trim().split('\n')[0];
+    await edit(f, (ls) => ls.push(`// ${msg}`));
+  }
+  return commit(msg);
+}
+
+const SUBJECTS = [
+  'Fix off-by-one in %s', 'Handle empty %s', 'Refactor %s', 'Add retries to %s', 'Log %s failures',
+  'Tighten types in %s', 'Speed up %s', 'Validate %s input', 'Clean up %s', 'Document %s',
+];
+const subject = (path) => pick(SUBJECTS).replace('%s', path.split('/').pop().replace(/\.\w+$/, ''));
+
+async function project() {
+  await sh('git checkout -q main');
+  for (const p of exPaths()) await write(p, exContent(p));
+  await write('package.json', JSON.stringify({ name: 'tidepool', version: '0.4.0', type: 'module', scripts: { test: 'vitest' } }, null, 2).split('\n'));
+  await write('tsconfig.json', JSON.stringify({ compilerOptions: { strict: true, paths: { '@/*': ['./src/*'] } } }, null, 2).split('\n'));
+  return commit('Import tidepool service');
+}
+
+// `commits` commits over `fileCount` files: edits plus an add, a delete and a rename.
+// Built as example/tmp, then named after what the panel shows.
+async function example(label, fileCount, commits) {
+  await sh('git checkout -q main && git checkout -q -B example/tmp');
+  const pool = exPaths().filter(exists);
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  const files = pool.slice(0, fileCount);
+  const touched = new Set();
+  for (let c = 0; c < commits; c++) {
+    let batch;
+    if (touched.size < files.length) {
+      const per = Math.max(1, Math.ceil((files.length - touched.size) / (commits - c)));
+      batch = files.filter((f) => !touched.has(f)).slice(0, per);
+    } else {
+      batch = [pick(files.filter(exists))];
+    }
+    let msg = subject(batch[0]);
+    for (const f of batch) {
+      touched.add(f);
+      if (!exists(f)) continue;
+      if (c === 1 && batch.length > 1 && f === batch[1]) { await sh(`git rm -q ${f}`); continue; }
+      if (c === 2 && f === batch[0] && f.endsWith('.ts')) {
+        const to = f.replace(/\.ts$/, '_v2.ts');
+        await sh(`git mv ${f} ${to}`);
+        files[files.indexOf(f)] = to;
+        await exEdit(to);
+        msg = `Rename ${f.split('/').pop()} to ${to.split('/').pop()}`;
+        continue;
+      }
+      await exEdit(f);
+    }
+    if (c === 0) {
+      const p = `${batch[0].replace(/\/[^/]+$/, '')}/new_${pick(NOUNS)}.ts`;
+      await write(p, exTs(p));
+      msg = `Add ${p.split('/').pop()}`;
+    }
+    await exCommit(msg);
+  }
+  const n = (await sh('git rev-list --count main..HEAD')).trim();
+  const m = (await sh('git diff --name-only -M main...HEAD')).trim().split('\n').length;
+  const name = `example/${label}-${n}-commits-${m}-files`;
+  await sh(`git branch -q -m ${name}`);
+  return name;
+}
+
+async function examples() {
+  const names = [
+    await example('fits', 10, 6),
+    await example('many-files', 80, 4),
+    await example('many-commits', 3, 60),
+    await example('both-overflow', 70, 45),
+  ];
+  await sh('git checkout -q main');
+  return names;
+}
+
 export async function buildAll() {
   await init();
+  await project();
   const out = { placement: await placement(), content: await content(), pending: await pending() };
+  out.examples = await examples();
+  await push(...out.examples.map((b) => `+${b}`));
   await sh(`git checkout -q main`);
   return out;
 }
+
+// Adds the project commit to origin's main and (re)builds example/* without touching other refs.
+export async function buildExamples() {
+  await sh(`rm -rf ${DIR} && git clone -q https://github.com/${OWNER}/${REPO}.git ${DIR}`, '/tmp');
+  await project();
+  const names = await examples();
+  await sh(`git push -q origin main ${names.map((b) => `+${b}`).join(' ')}`);
+  return names;
+}
+

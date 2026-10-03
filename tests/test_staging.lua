@@ -109,8 +109,8 @@ T[':Diffy selects the working tree and lists its Unstaged and Staged sections, e
 
   MiniTest.expect.equality(ui.rows_with(child, 'log', 'DiffySelection'), { '\226\150\140 Working tree' })
   local lines = tree()
-  MiniTest.expect.equality(lines[1], 'Unstaged (2)')
-  MiniTest.expect.equality(lines[4], 'Staged (2)')
+  MiniTest.expect.equality(lines[1], '▾ Unstaged (2)')
+  MiniTest.expect.equality(lines[4], '▾ Staged (2)')
   MiniTest.expect.equality(line_in('Unstaged', 'M f.txt'), 2)
   MiniTest.expect.equality(line_in('Unstaged', '? u.txt'), 3)
   MiniTest.expect.equality(line_in('Staged', 'M f.txt'), 5)
@@ -241,7 +241,7 @@ T['`-` moves a file to the other section and the cursor follows it'] = function(
   press_in_tree(line_in('Unstaged', 'g.txt'), '-')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'g.txt')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--name-only' }), 'f.txt')
-  MiniTest.expect.equality(tree()[1], 'Unstaged (1)')
+  MiniTest.expect.equality(tree()[1], '▾ Unstaged (1)')
   local staged_g = line_in('Staged', 'g.txt')
   MiniTest.expect.equality(staged_g ~= nil, true)
   MiniTest.expect.equality(line_in('Unstaged', 'g.txt'), nil)
@@ -268,14 +268,15 @@ T['keys on a section header apply to all its files'] = function()
 
   press_in_tree(1, '-')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'f.txt\ng.txt\nu.txt')
-  MiniTest.expect.equality(tree()[1], 'Unstaged (0)')
-  MiniTest.expect.equality(tree()[2], 'Staged (3)')
-  MiniTest.expect.equality(tree_cursor_text(), 'Unstaged (0)')
+  -- an empty section has nothing to fold: no marker
+  MiniTest.expect.equality(tree()[1], '  Unstaged (0)')
+  MiniTest.expect.equality(tree()[2], '▾ Staged (3)')
+  MiniTest.expect.equality(tree_cursor_text(), '  Unstaged (0)')
 
   press_in_tree(2, 'u')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), '')
-  MiniTest.expect.equality(tree()[1], 'Unstaged (3)')
-  MiniTest.expect.equality(tree_cursor_text(), 'Staged (0)')
+  MiniTest.expect.equality(tree()[1], '▾ Unstaged (3)')
+  MiniTest.expect.equality(tree_cursor_text(), '  Staged (0)')
 
   child.cmd('Diffy close')
 end
@@ -403,6 +404,35 @@ T['staging keys are a no-op, with a warning, when the selection is not the worki
   child.cmd('Diffy close')
 end
 
+T['section and unstage keys leave a conflicted file in conflict'] = function()
+  repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(3) })
+  repo:branch('other'):commit('Theirs', { ['f.txt'] = Repo.edit(2, 'theirs') })
+  repo:checkout('main'):commit('Ours', { ['f.txt'] = Repo.edit(2, 'ours') })
+  repo:merge_conflict('other')
+  child.fn.chdir(repo.dir)
+
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+
+  local w = ui.wins(child)
+  child.api.nvim_set_current_win(w.tree)
+  -- `git add` on the Unstaged header would skip the marker check, `git
+  -- reset` on the Staged row would drop the conflict stages
+  child.api.nvim_win_set_cursor(w.tree, { 1, 0 })
+  child.type_keys('s')
+  child.api.nvim_win_set_cursor(w.tree, { line_in('Staged', 'U f.txt'), 0 })
+  child.type_keys('u')
+  child.lua([[
+    vim.wait(1000, function()
+      return vim.system({ 'git', 'ls-files', '-u' }, { text = true }):wait().stdout == ''
+    end, 50)
+  ]])
+  MiniTest.expect.equality(ui.git(repo.dir, { 'ls-files', '-u', '--', 'f.txt' }) ~= '', true)
+
+  child.cmd('Diffy close')
+end
+
 T['nested directories group under collapsible headers, single-child chains flattened'] = function()
   repo = Repo.new()
     :commit('Base', { ['top.txt'] = Repo.lines(1) })
@@ -421,12 +451,12 @@ T['nested directories group under collapsible headers, single-child chains flatt
   local lines = tree()
   -- a/b/c collapses into one "b/c/" row under "a/" (chain flattening), not
   -- three separate header rows
-  MiniTest.expect.equality(has(lines, 'a/'), true)
-  MiniTest.expect.equality(has(lines, '  b/c/'), true)
-  MiniTest.expect.equality(has(lines, 'b/'), false)
-  MiniTest.expect.equality(has(lines, 'c/'), false)
+  MiniTest.expect.equality(has(lines, '▾ a/'), true)
+  MiniTest.expect.equality(has(lines, '  ▾ b/c/'), true)
+  MiniTest.expect.equality(has(lines, '  ▾ b/'), false)
+  MiniTest.expect.equality(has(lines, '    ▾ c/'), false)
   -- a/d holds a single file, so `d/` never gets a header row at all
-  MiniTest.expect.equality(has(lines, 'd/'), false)
+  MiniTest.expect.equality(has(lines, '  ▾ d/'), false)
 
   -- rows under a header show the path relative to it
   local f1 = find_line(lines, 'A file1.txt')
@@ -453,7 +483,7 @@ local function keys_on(text, keys)
   child.type_keys(keys)
 end
 
-T['<CR> on a folder collapses it to its header and expands it back, top-level folders included'] = function()
+T['<CR> on a folder collapses it to its header and expands it back, top-level folders included; ▸/▾ say which'] = function()
   repo = Repo.new()
     :commit('Base', { ['top.txt'] = Repo.lines(1) })
     :commit('Add', {
@@ -469,20 +499,21 @@ T['<CR> on a folder collapses it to its header and expands it back, top-level fo
   ui.wait_ready(child)
   local w = ui.wins(child)
 
-  keys_on('  b/c/', '<CR>')
-  MiniTest.expect.equality(tree_rows(), { 'a/', '  b/c/ …', '  A d/file3.txt', 'z/', '  A one.txt', '  A two.txt' })
+  keys_on('  ▾ b/c/', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { '▾ a/', '  ▸ b/c/', '  A d/file3.txt', '▾ z/', '  A one.txt', '  A two.txt' })
   -- the cursor stays on the header, in the tree
   MiniTest.expect.equality(child.api.nvim_get_current_win(), w.tree)
   MiniTest.expect.equality(child.api.nvim_win_get_cursor(w.tree)[1], 2)
 
-  keys_on('z/', '<CR>')
-  MiniTest.expect.equality(tree_rows(), { 'a/', '  b/c/ …', '  A d/file3.txt', 'z/ …' })
-  keys_on('a/', '<CR>')
-  MiniTest.expect.equality(tree_rows(), { 'a/ …', 'z/ …' })
+  keys_on('▾ z/', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { '▾ a/', '  ▸ b/c/', '  A d/file3.txt', '▸ z/' })
+  keys_on('▾ a/', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { '▸ a/', '▸ z/' })
   -- expanding a/ shows b/c/ as it was left
-  keys_on('a/ …', '<CR>')
-  MiniTest.expect.equality(tree_rows(), { 'a/', '  b/c/ …', '  A d/file3.txt', 'z/ …' })
-  keys_on('  b/c/ …', '<CR>')
+  keys_on('▸ a/', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { '▾ a/', '  ▸ b/c/', '  A d/file3.txt', '▸ z/' })
+  keys_on('  ▸ b/c/', '<CR>')
+  MiniTest.expect.equality(tree_rows()[2], '  ▾ b/c/')
   MiniTest.expect.equality(tree_rows()[3], '    A file1.txt')
   child.cmd('Diffy close')
 end
@@ -504,13 +535,13 @@ T['a collapsed folder stays collapsed across renders, ]f skips it, a jump to a f
   ui.wait_ready(child)
 
   press_in_tree(exact_line(tree_rows(), '    M one.txt'), 'o', 'open_row')
-  keys_on('  a/', '<CR>')
+  keys_on('  ▾ a/', '<CR>')
   ui.arm_ready(child, 'render')
   child.type_keys('R')
   ui.wait_ready(child)
   MiniTest.expect.equality(
     tree_rows(),
-    { 'Unstaged (5)', '  M 0.txt', '  a/ …', '  z/', '    M four.txt', '    M three.txt', 'Staged (0)' }
+    { '▾ Unstaged (5)', '  M 0.txt', '  ▸ a/', '  ▾ z/', '    M four.txt', '    M three.txt', '  Staged (0)' }
   )
   MiniTest.expect.equality(ui.layout(child).right.path, 'a/one.txt')
 
@@ -525,7 +556,7 @@ T['a collapsed folder stays collapsed across renders, ]f skips it, a jump to a f
   vim.wait(2000, function()
     return ui.layout(child).right.path == 'a/two.txt'
   end)
-  MiniTest.expect.equality(tree_rows()[3], '  a/')
+  MiniTest.expect.equality(tree_rows()[3], '  ▾ a/')
   MiniTest.expect.equality(marked_lines(), { exact_line(tree_rows(), '    M two.txt') })
   child.cmd('Diffy close')
 end
@@ -540,8 +571,8 @@ T['<CR> on a section header collapses the section; s on it stages every file'] =
   child.cmd('Diffy')
   ui.wait_ready(child)
 
-  keys_on('Unstaged (3)', '<CR>')
-  MiniTest.expect.equality(tree_rows(), { 'Unstaged (3) …', 'Staged (0)' })
+  keys_on('▾ Unstaged (3)', '<CR>')
+  MiniTest.expect.equality(tree_rows(), { '▸ Unstaged (3)', '  Staged (0)' })
   press_in_tree(1, 's')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'd/g.txt\nd/h.txt\nf.txt')
   child.cmd('Diffy close')
@@ -562,7 +593,7 @@ T['a new untracked directory shows its files individually as ? rows, grouped und
   -- without `--untracked-files=all`, git status collapses a new untracked
   -- directory into one `?? newdir/` entry
   MiniTest.expect.equality(has(lines, '  ? newdir/'), false)
-  MiniTest.expect.equality(has(lines, '  newdir/'), true)
+  MiniTest.expect.equality(has(lines, '  ▾ newdir/'), true)
   local a_lnum = find_line(lines, '? a.txt')
   local b_lnum = find_line(lines, '? b.txt')
   MiniTest.expect.equality(find_line(lines, 'newdir/a.txt'), nil)

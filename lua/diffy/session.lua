@@ -125,15 +125,8 @@ function M.unmap_buffer(session, buf)
   end
 end
 
--- Deferred to the next event-loop tick: a `WinClosed`/`BufWipeout` callback
--- can fire while a native multi-window closer (`:tabclose`, `:qa`) is still
--- midway through closing this same tab's other windows; force-closing them
--- from inside that nested callback races the native loop (nvim reports
--- E444 on a now-misnumbered tab). Scheduling runs teardown only once the
--- triggering command has fully finished, by which point a `:tabclose` has
--- already closed everything itself and teardown's window/tab steps are
--- no-ops, while a lone `:q` still has its siblings open for teardown to
--- close.
+-- Next tick: closing windows from a `WinClosed`/`BufWipeout` callback races
+-- a `:tabclose`/`:qa` still closing this tab's windows (E444).
 local function schedule_teardown(session, opts)
   return function()
     vim.schedule(function()
@@ -201,6 +194,15 @@ function M.unregister_window(session, name)
   session.wins[name] = nil
 end
 
+--- Unregister `session.wins[name]` and close it.
+function M.close_window(session, name)
+  local win = session.wins[name]
+  M.unregister_window(session, name)
+  if win and vim.api.nvim_win_is_valid(win) then
+    pcall(vim.api.nvim_win_close, win, true)
+  end
+end
+
 --- Register a managed buffer under `name` (`session.bufs[name]`),
 --- `bufhidden=wipe` unless `opts.bufhidden`. `opts.panel = true` makes its
 --- `:bwipe` tear the session down (tree/log); diff-content buffers are
@@ -233,6 +235,37 @@ end
 function M.unbind(win)
   vim.wo[win].scrollbind = false
   vim.wo[win].cursorbind = false
+end
+
+--- Show `lines` in `name`, a non-focusable float laid over other windows (a
+--- peek, the tree's hover, the commit message): opened at `cfg` with
+--- `winhighlight` `winhl` the first time, moved to `cfg` after. Returns its
+--- buffer, for the caller's highlights.
+function M.overlay(session, name, cfg, lines, winhl)
+  local win, buf = session.wins[name], session.bufs[name]
+  if not (win and vim.api.nvim_win_is_valid(win) and buf and vim.api.nvim_buf_is_valid(buf)) then
+    M.close_overlay(session, name)
+    buf = M.scratch_buf(session, name)
+    M.register_buffer(session, name, buf)
+    win = vim.api.nvim_open_win(buf, false, cfg)
+    M.register_window(session, name, win, { transient = true })
+    M.unbind(win)
+    vim.wo[win].diff = false
+    vim.wo[win].wrap = false
+    vim.wo[win].winhighlight = winhl
+  else
+    vim.api.nvim_win_set_config(win, cfg)
+  end
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  return buf
+end
+
+--- Close the overlay `name` (its buffer is wiped with it).
+function M.close_overlay(session, name)
+  M.close_window(session, name)
+  session.bufs[name] = nil
 end
 
 --- Make `win` a plain window again: a diff window the session lets go of,

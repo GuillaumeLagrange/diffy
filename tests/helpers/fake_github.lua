@@ -441,7 +441,7 @@ function M.new(state)
     gql_error(cb, 'NOT_FOUND', ("Could not resolve to a node with the global id of '%s'."):format(tostring(id)))
   end
 
-  -- `gh pr view <branch> --json number,url,state,baseRefName,headRefOid`
+  -- `gh pr view <branch> --json number,title,url,state,baseRefName,headRefOid`
   local function pr_view(branch, cb)
     if state.offline then
       fail(cb, 'error connecting to api.github.com')
@@ -455,7 +455,7 @@ function M.new(state)
       return
     end
     local db = db_for(state, number)
-    respond(cb, { number = number, url = URL:format(number), state = db.state, baseRefName = db.base, headRefOid = db.head })
+    respond(cb, { number = number, title = db.title, url = URL:format(number), state = db.state, baseRefName = db.base, headRefOid = db.head })
   end
   self.pr_view = function(_root, branch, cb)
     if state.hold then

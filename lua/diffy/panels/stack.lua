@@ -70,8 +70,14 @@ function M.lnum(session, name, rel)
   return M.offset(session, name) + rel
 end
 
---- `name`'s row at buffer line `lnum`, nil outside its rows.
-function M.rel(session, name, lnum)
+--- The row of `name` under its window's cursor, nil when the cursor is
+--- elsewhere (the other view's rows, the rule) or `name` isn't shown.
+function M.cursor(session, name)
+  local win = session.wins[name]
+  if not valid(win) then
+    return nil
+  end
+  local lnum = vim.api.nvim_win_get_cursor(win)[1]
   local st = stack_of(session, name)
   if not st then
     return lnum
@@ -81,16 +87,6 @@ function M.rel(session, name, lnum)
     return nil
   end
   return rel
-end
-
---- The row of `name` under its window's cursor, nil when the cursor is
---- elsewhere (the other view's rows, the rule) or `name` isn't shown.
-function M.cursor(session, name)
-  local win = session.wins[name]
-  if not valid(win) then
-    return nil
-  end
-  return M.rel(session, name, vim.api.nvim_win_get_cursor(win)[1])
 end
 
 function M.set_cursor(session, name, rel)
@@ -114,11 +110,13 @@ local function view_at_cursor(session)
   return lnum < rule_lnum(st) and st.names[1] or st.names[2]
 end
 
---- `── Label ───…` across `width` cells, and its highlight spans.
+--- `── Label ───…` across `width` cells, and its highlight spans (byte columns: `─` is 3 bytes).
 local function rule(label, width)
-  local head = '── ' .. label .. ' '
+  local lead = '── '
+  local head = lead .. label .. ' '
   local text = head .. ('─'):rep(math.max(0, width - vim.fn.strdisplaywidth(head)))
-  return text, { { 0, 4, 'DiffyPanelRule' }, { 4, 4 + #label, 'DiffyLabel' }, { 4 + #label, #text, 'DiffyPanelRule' } }
+  local s, e = #lead, #lead + #label
+  return text, { { 0, s, 'DiffyPanelRule' }, { s, e, 'DiffyLabel' }, { e, #text, 'DiffyPanelRule' } }
 end
 
 local function label(name)
@@ -136,18 +134,9 @@ end
 -- ---------------------------------------------------------------------
 -- peek floats
 
-local function close_peek(session, key)
-  local win = session.wins[key]
-  session_mod.unregister_window(session, key)
-  session.bufs[key] = nil
-  if valid(win) then
-    pcall(vim.api.nvim_win_close, win, true)
-  end
-end
-
 function M.close_peeks(session)
-  close_peek(session, 'peek_above')
-  close_peek(session, 'peek_below')
+  session_mod.close_overlay(session, 'peek_above')
+  session_mod.close_overlay(session, 'peek_below')
 end
 
 --- Show `lines` (`{ text, spans?, line_hl? }`) over the stack window's
@@ -167,26 +156,11 @@ local function place_peek(session, key, row, lines)
     focusable = false,
     zindex = 40,
   }
-  local win, buf = session.wins[key], session.bufs[key]
-  if not (valid(win) and buf and vim.api.nvim_buf_is_valid(buf)) then
-    buf = session_mod.scratch_buf(session, key)
-    session_mod.register_buffer(session, key, buf)
-    win = vim.api.nvim_open_win(buf, false, cfg)
-    session_mod.register_window(session, key, win, { transient = true })
-    session_mod.unbind(win)
-    vim.wo[win].diff = false
-    vim.wo[win].wrap = false
-    vim.wo[win].winhighlight = 'NormalFloat:DiffyPeek'
-  else
-    vim.api.nvim_win_set_config(win, cfg)
-  end
   local texts = {}
   for i, l in ipairs(lines) do
     texts[i] = l.text
   end
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, texts)
-  vim.bo[buf].modifiable = false
+  local buf = session_mod.overlay(session, key, cfg, texts, 'NormalFloat:DiffyPeek')
   local ns = session_mod.namespace(session, 'stack_peek')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for i, l in ipairs(lines) do
@@ -314,12 +288,12 @@ function M.peek(session)
   if above then
     place_peek(session, 'peek_above', 0, above)
   else
-    close_peek(session, 'peek_above')
+    session_mod.close_overlay(session, 'peek_above')
   end
   if below then
     place_peek(session, 'peek_below', height - #below, below)
   else
-    close_peek(session, 'peek_below')
+    session_mod.close_overlay(session, 'peek_below')
   end
 end
 

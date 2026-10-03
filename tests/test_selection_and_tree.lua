@@ -77,6 +77,26 @@ T['a rename shows as one entry whose sides are the old and new file'] = function
   child.cmd('Diffy close')
 end
 
+T["selecting a repo's first commit shows the files it added"] = function()
+  local r = Repo.new()
+  r:commit('Root', { ['a.txt'] = { 'a1' } })
+  r:commit('Second', { ['a.txt'] = { 'a1', 'a2' } })
+  child.fn.chdir(r.dir)
+  ui.capture_warnings(child)
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+
+  ui.select_log_row(child, 'Root')
+  MiniTest.expect.equality(ui.warnings(child), {})
+  local l = ui.layout(child)
+  MiniTest.expect.equality(vim.trim(l.tree[#l.tree]):match('^A a%.txt'), 'A a.txt')
+  MiniTest.expect.equality(l.right.text, { 'a1' })
+
+  child.cmd('Diffy close')
+  r:destroy()
+end
+
 local function open_file(path, key)
   ui.open_tree_row(child, path, key or 'o', 'open_row')
 end

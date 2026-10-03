@@ -123,28 +123,18 @@ end
 --- blob (`index`/a sha). `cb(lines|nil)`.
 local function read_side(session, commit, path, cb)
   if commit == 'worktree' then
+    local buf = track.loaded_buf(session, path)
+    if buf then
+      cb(vim.api.nvim_buf_get_lines(buf, 0, -1, false))
+      return
+    end
     local abspath = session.root .. '/' .. path
-    -- Not bufnr(): it treats the name as a file pattern (`[id]` matches `d`).
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) == abspath then
-        cb(vim.api.nvim_buf_get_lines(buf, 0, -1, false))
-        return
-      end
-    end
-    if vim.fn.filereadable(abspath) == 1 then
-      cb(vim.fn.readfile(abspath))
-    else
-      cb(nil)
-    end
+    cb(vim.fn.filereadable(abspath) == 1 and vim.fn.readfile(abspath) or nil)
     return
   end
   local object = commit == 'index' and (':0:' .. path) or (commit .. ':' .. path)
   quiet_git(session, { 'show', object }, function(res)
-    if res.code ~= 0 then
-      cb(nil)
-      return
-    end
-    cb(vim.split(res.stdout or '', '\n', { plain = true }))
+    cb(res.code == 0 and track.split_blob(res.stdout) or nil)
   end)
 end
 
@@ -195,24 +185,6 @@ local function numbered_excerpt(lines, start_line, end_line)
     table.insert(out, ('%d  %s'):format(l, lines[l] or ''))
   end
   return out
-end
-
---- Join independently-async `jobs` (`fun(done: fun())[]`), calling `done()`
---- once every job has called its own `done`.
-local function join(jobs, done)
-  if #jobs == 0 then
-    done()
-    return
-  end
-  local remaining = #jobs
-  for _, job in ipairs(jobs) do
-    job(function()
-      remaining = remaining - 1
-      if remaining == 0 then
-        done()
-      end
-    end)
-  end
 end
 
 --- Every comment of yours not sent yet (published and pending ones are
@@ -279,7 +251,7 @@ local function fetch_sources(session, pending, done)
       end)
     end)
   end
-  join(jobs, function()
+  track.join(jobs, function()
     done(side_lines, diff_hunks)
   end)
 end
@@ -292,6 +264,20 @@ local function why_not_now(thread)
     return 'old side'
   end
   return 'outdated'
+end
+
+--- A code fence longer than any backtick run in `lines`, which would
+--- close a ``` fence early (a markdown file's own fences).
+local function fence_for(lines)
+  local fence = '```'
+  for _, l in ipairs(lines) do
+    for ticks in l:gmatch('`+') do
+      if #ticks >= #fence then
+        fence = ('`'):rep(#ticks + 1)
+      end
+    end
+  end
+  return fence
 end
 
 --- Append one comment's `review.md` section to `out`: where it is now (the
@@ -313,9 +299,11 @@ local function render_comment(out, item, lines, hunks)
     table.insert(out, ('## %s \226\128\148 written on %s, %s'):format(comment.id, origin, why_not_now(thread)))
   end
   table.insert(out, RESOLVED_BOX)
-  table.insert(out, '```' .. (vim.filetype.match({ filename = now and now.path or a.path }) or ''))
-  vim.list_extend(out, numbered_excerpt(lines, s, e))
-  table.insert(out, '```')
+  local quoted = numbered_excerpt(lines, s, e)
+  local excerpt_fence = fence_for(quoted)
+  table.insert(out, excerpt_fence .. (vim.filetype.match({ filename = now and now.path or a.path }) or ''))
+  vim.list_extend(out, quoted)
+  table.insert(out, excerpt_fence)
   table.insert(out, '')
 
   if now then
@@ -323,22 +311,25 @@ local function render_comment(out, item, lines, hunks)
     table.insert(out, '')
   end
   local hunk = model.find_hunk(hunks, a.side, a.start_line, a.end_line)
-  table.insert(out, '<details><summary>diff hunk</summary>')
-  table.insert(out, '')
-  table.insert(out, '```diff')
+  local diff = {}
   if hunk then
-    vim.list_extend(out, hunk.lines)
+    diff = hunk.lines
   else
     -- no changed hunk covers this anchor (a comment on unchanged
     -- context): synthesize a context-only pseudo-hunk from the excerpt.
     local excerpt = a.excerpt or {}
     local count = #excerpt
-    table.insert(out, ('@@ -%d,%d +%d,%d @@'):format(a.start_line, count, a.start_line, count))
+    table.insert(diff, ('@@ -%d,%d +%d,%d @@'):format(a.start_line, count, a.start_line, count))
     for _, l in ipairs(excerpt) do
-      table.insert(out, ' ' .. l)
+      table.insert(diff, ' ' .. l)
     end
   end
-  table.insert(out, '```')
+  local fence = fence_for(diff)
+  table.insert(out, '<details><summary>diff hunk</summary>')
+  table.insert(out, '')
+  table.insert(out, fence .. 'diff')
+  vim.list_extend(out, diff)
+  table.insert(out, fence)
   table.insert(out, '</details>')
   table.insert(out, '')
   vim.list_extend(out, vim.split(comment.body, '\n', { plain = true }))

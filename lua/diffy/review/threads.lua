@@ -547,6 +547,7 @@ local function setup(session, buf)
     scroll_preview(session, '<C-u>')
   end, { buffer = buf, desc = 'scroll the preview up' })
   layout.map_toggle(session, buf)
+  ui.map_last(session, buf)
 end
 
 M.view = {

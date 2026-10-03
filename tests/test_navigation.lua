@@ -243,7 +243,7 @@ T['<C-t> back into a file listed in both sections returns to the section it left
   open()
   local staged_row
   for i, r in ipairs(ui.panel(child, 'tree')) do
-    if staged_row == nil and r.text:match('^Staged') then
+    if staged_row == nil and r.text:find('Staged (', 1, true) then
       staged_row = false
     elseif staged_row == false and r.text:find('a.txt', 1, true) then
       staged_row = i

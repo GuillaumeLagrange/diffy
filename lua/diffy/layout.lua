@@ -114,7 +114,7 @@ end
 
 --- 'float' or 'column': where `name` is shown (nil when it isn't).
 function M.host(session, name)
-  if session.floats and session.floats[name] then
+  if session.floats[name] then
     return 'float'
   end
   return valid(session.wins[name]) and 'column' or nil
@@ -129,7 +129,7 @@ function M.refresh(session, name)
   if spec.render then
     spec.render(session)
   end
-  local f = session.floats and session.floats[name]
+  local f = session.floats[name]
   if f and f.preview and spec.preview then
     spec.preview(session, f.preview_buf, f.preview)
   end
@@ -204,7 +204,7 @@ local function open_column_windows(session)
 end
 
 local function place_floats(session)
-  for name in pairs(session.floats or {}) do
+  for name in pairs(session.floats) do
     M.place_float(session, name)
   end
 end
@@ -309,9 +309,7 @@ local function show_column(session)
   if not session.panel_hidden then
     return
   end
-  session._nav_guard = (session._nav_guard or 0) + 1
-  open_column_windows(session)
-  session._nav_guard = session._nav_guard - 1
+  require('diffy.navigation').guarded(session, open_column_windows, session)
   for _, slot in ipairs(slots(session)) do
     local name = slot[1]
     vim.bo[session.bufs[name]].bufhidden = 'wipe'
@@ -461,25 +459,25 @@ end
 --- Move `name`'s float (and its preview) back over the diff area, keeping
 --- the title and footer current.
 function M.place_float(session, name)
-  local f = session.floats and session.floats[name]
+  local f = session.floats[name]
   if not (f and valid(f.win)) then
     return
   end
   local main, preview = float_configs(session, name)
   vim.api.nvim_win_set_config(f.win, main)
-  if f.preview and valid(f.preview) then
-    if preview then
-      vim.api.nvim_win_set_config(f.preview, preview)
-    else
-      pcall(vim.api.nvim_win_close, f.preview, true)
-    end
+  if valid(f.preview) and not preview then
+    -- too narrow for the pane now: drop it for good, its buffer goes with it
+    session_mod.close_window(session, name .. '_preview')
+    f.preview, f.preview_buf = nil, nil
+  elseif valid(f.preview) then
+    vim.api.nvim_win_set_config(f.preview, preview)
   end
 end
 
 --- Close `name`'s float and its preview; the view's buffer goes too unless
 --- it's persistent.
 function M.close_float(session, name)
-  local f = session.floats and session.floats[name]
+  local f = session.floats[name]
   if not f then
     return
   end
@@ -509,7 +507,6 @@ local function open_float(session, name)
   if spec.persistent then
     vim.bo[buf].bufhidden = 'hide'
   end
-  session.floats = session.floats or {}
   local main, preview_cfg = float_configs(session, name)
   local win = vim.api.nvim_open_win(buf, true, main)
   float_window(win)
@@ -569,7 +566,9 @@ local function open_float(session, name)
         if session.floats[name] ~= f then
           return true
         end
-        spec.preview(session, f.preview_buf, f.preview)
+        if f.preview then
+          spec.preview(session, f.preview_buf, f.preview)
+        end
       end,
     })
   end
@@ -583,7 +582,7 @@ function M.show(session, name)
   if vim.tbl_contains(session.column, name) then
     show_column(session)
     M.refresh(session, name)
-  elseif not (session.floats and session.floats[name]) then
+  elseif not session.floats[name] then
     open_float(session, name)
   else
     M.refresh(session, name)

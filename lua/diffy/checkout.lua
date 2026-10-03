@@ -6,6 +6,7 @@
 local run = require('diffy.git.run')
 local repo = require('diffy.git.repo')
 local parse = require('diffy.git.parse')
+local store = require('diffy.review.store')
 
 local M = {}
 
@@ -18,25 +19,18 @@ local function state_path(gitdir)
   return gitdir .. '/diffy/checkout.json'
 end
 
+-- written atomically: a nvim killed mid-write would otherwise leave a file
+-- the next start can't restore from
 local function write_state(gitdir, state)
-  vim.fn.mkdir(gitdir .. '/diffy', 'p')
-  vim.fn.writefile({ vim.json.encode(state) }, state_path(gitdir))
+  store.save(state_path(gitdir), state)
 end
 
 local function read_state(gitdir)
-  local path = state_path(gitdir)
-  if vim.fn.filereadable(path) == 0 then
-    return nil
-  end
-  local ok, decoded = pcall(vim.json.decode, vim.fn.readfile(path)[1] or '')
-  if not ok or type(decoded) ~= 'table' then
-    return nil
-  end
-  return decoded
+  return store.load(state_path(gitdir))
 end
 
 local function delete_state(gitdir)
-  vim.fn.delete(state_path(gitdir))
+  store.delete(state_path(gitdir))
 end
 
 -- Check out `branch` and delete the state file on success; `cb(ok)` is optional.
@@ -155,8 +149,7 @@ end
 function M.enter(session)
   repo.is_clean(session.root, nil, function(clean, err)
     if not clean then
-      local why = clean == nil and ('git status failed: ' .. err) or 'commit or stash tracked changes first'
-      vim.notify('diffy: cannot check out — ' .. why, vim.log.levels.ERROR)
+      vim.notify('diffy: cannot check out — ' .. refusal(clean, err), vim.log.levels.ERROR)
       run.ready({ session = session.id, event = 'checkout' })
       return
     end

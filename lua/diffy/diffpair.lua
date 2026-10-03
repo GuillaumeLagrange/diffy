@@ -2,6 +2,7 @@
 -- buffers or the real worktree file, native diff mode with scrollbind/
 -- cursorbind, winbars, and the navigation keymaps shared by both windows.
 local session_mod = require('diffy.session')
+local nav_guarded = require('diffy.navigation').guarded
 
 local M = {}
 
@@ -41,20 +42,6 @@ local function load_buf(name)
   local buf = vim.fn.bufadd(name)
   vim.fn.bufload(buf)
   return buf
-end
-
--- navigation.lua's BufWinEnter handler must ignore diffy's own buffer
--- swaps; this counter lets it tell them apart from user navigation. Another
--- plugin's BufWinEnter error propagates out of `nvim_win_set_buf`: the
--- counter must still drop or navigation stays off for the whole session.
-local function nav_guarded(session, fn, ...)
-  session._nav_guard = (session._nav_guard or 0) + 1
-  local ok, ret = pcall(fn, ...)
-  session._nav_guard = session._nav_guard - 1
-  if not ok then
-    error(ret, 0)
-  end
-  return ret
 end
 
 --- Stop managing the real worktree buffer shown in window `name`, if any.
@@ -313,7 +300,6 @@ local OUTSIDE = '(outside diff)'
 --- diffy keymaps removed), the left one becomes a placeholder. Selecting a
 --- listed file again (`M.show`) restores the pair.
 function M.leave(session)
-  local left, right = session.wins.left, session.wins.right
   for _, name in ipairs(SIDES) do
     local win = session.wins[name]
     if valid_win(win) then
@@ -322,16 +308,14 @@ function M.leave(session)
       vim.api.nvim_win_call(win, function()
         pcall(vim.cmd, 'diffoff')
       end)
+      vim.w[win].diffy_rev = nil
+      vim.w[win].diffy_path = nil
+      vim.wo[win].winbar = OUTSIDE
     end
   end
+  drop_real(session, 'right')
 
-  if valid_win(right) then
-    drop_real(session, 'right')
-    vim.w[right].diffy_rev = nil
-    vim.w[right].diffy_path = nil
-    vim.wo[right].winbar = OUTSIDE
-  end
-
+  local left = session.wins.left
   if valid_win(left) then
     local buf = session_mod.scratch_buf(session, 'left')
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, { OUTSIDE })
@@ -339,9 +323,6 @@ function M.leave(session)
     -- the only diffy window left with keys: the right one's real file lost them
     M.set_nav_keymaps(session, buf)
     vim.api.nvim_win_set_buf(left, buf)
-    vim.w[left].diffy_rev = nil
-    vim.w[left].diffy_path = nil
-    vim.wo[left].winbar = OUTSIDE
   end
 
   session.current_path = nil

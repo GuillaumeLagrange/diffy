@@ -10,14 +10,15 @@ local parse = require('diffy.git.parse')
 
 local M = {}
 
+--- `run.git` without error notification: these lookups report failure to
+--- their caller instead.
+local function quiet(root, args, session, on_exit)
+  run.git(args, { cwd = root, session = session, notify_on_error = false, on_exit = on_exit })
+end
+
 --- `git rev-parse --show-toplevel` for `cwd`. `on_exit(root, err)`.
 function M.root(cwd, on_exit, session)
-  run.git({ 'rev-parse', '--show-toplevel' }, {
-    cwd = cwd,
-    session = session,
-    notify_on_error = false,
-    on_exit = run.parsed(vim.trim, on_exit),
-  })
+  quiet(cwd, { 'rev-parse', '--show-toplevel' }, session, run.parsed(vim.trim, on_exit))
 end
 
 function M.notify_not_repo(err)
@@ -26,22 +27,12 @@ end
 
 --- Current `HEAD` sha, or `nil` on an unborn branch. `on_exit(sha, err)`.
 function M.head_sha(root, on_exit, session)
-  run.git({ 'rev-parse', 'HEAD' }, {
-    cwd = root,
-    session = session,
-    notify_on_error = false,
-    on_exit = run.parsed(vim.trim, on_exit),
-  })
+  quiet(root, { 'rev-parse', 'HEAD' }, session, run.parsed(vim.trim, on_exit))
 end
 
 --- `git merge-base a b`. `on_exit(sha, err)`.
 function M.merge_base(root, a, b, on_exit, session)
-  run.git({ 'merge-base', a, b }, {
-    cwd = root,
-    session = session,
-    notify_on_error = false,
-    on_exit = run.parsed(vim.trim, on_exit),
-  })
+  quiet(root, { 'merge-base', a, b }, session, run.parsed(vim.trim, on_exit))
 end
 
 --- The ref to diff against for a base branch GitHub names: the local
@@ -51,7 +42,7 @@ end
 --- as given. `on_exit(ref)`.
 function M.base_ref(root, name, on_exit, session)
   local function git(args, cb)
-    run.git(args, { cwd = root, session = session, notify_on_error = false, on_exit = cb })
+    quiet(root, args, session, cb)
   end
   git({ 'rev-parse', '--abbrev-ref', '--symbolic-full-name', name .. '@{upstream}' }, function(res)
     local upstream = vim.trim(res.stdout or '')
@@ -90,31 +81,26 @@ function M.resolve_base(root, explicit, on_exit, session, pr_base)
     found(pr_base)
     return
   end
-  run.git({ 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD' }, {
-    cwd = root,
-    session = session,
-    notify_on_error = false,
-    on_exit = function(res)
-      local ref = vim.trim(res.stdout or '')
-      if res.code == 0 and ref ~= '' then
-        on_exit(ref, nil)
-        return
-      end
-      run.run({ 'gh', 'repo', 'view', '--json', 'defaultBranchRef', '-q', '.defaultBranchRef.name' }, {
-        cwd = root,
-        session = session,
-        notify_on_error = false,
-        on_exit = function(res2)
-          local default_branch = vim.trim(res2.stdout or '')
-          if res2.code == 0 and default_branch ~= '' then
-            found(default_branch)
-          else
-            on_exit(nil, 'diffy: could not resolve branch base (' .. vim.trim(res2.stderr or '') .. ')')
-          end
-        end,
-      })
-    end,
-  })
+  quiet(root, { 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD' }, session, function(res)
+    local ref = vim.trim(res.stdout or '')
+    if res.code == 0 and ref ~= '' then
+      on_exit(ref, nil)
+      return
+    end
+    run.run({ 'gh', 'repo', 'view', '--json', 'defaultBranchRef', '-q', '.defaultBranchRef.name' }, {
+      cwd = root,
+      session = session,
+      notify_on_error = false,
+      on_exit = function(res2)
+        local default_branch = vim.trim(res2.stdout or '')
+        if res2.code == 0 and default_branch ~= '' then
+          found(default_branch)
+        else
+          on_exit(nil, 'diffy: could not resolve branch base (' .. vim.trim(res2.stderr or '') .. ')')
+        end
+      end,
+    })
+  end)
 end
 
 --- Parsed `git status --porcelain=v2 -z --untracked-files=all` entries for
@@ -124,12 +110,12 @@ end
 --- files individually, so the tree can't group them like any other
 --- directory. `on_exit(entries, err)`.
 function M.status(root, on_exit, session)
-  run.git({ 'status', '--porcelain=v2', '-z', '--untracked-files=all' }, {
-    cwd = root,
-    session = session,
-    notify_on_error = false,
-    on_exit = run.parsed(parse.status_v2, on_exit),
-  })
+  quiet(
+    root,
+    { 'status', '--porcelain=v2', '-z', '--untracked-files=all' },
+    session,
+    run.parsed(parse.status_v2, on_exit)
+  )
 end
 
 --- Whether `root`'s tree has no staged/unstaged changes to tracked files
@@ -140,19 +126,19 @@ function M.is_clean(root, path, on_exit, session)
   if path then
     vim.list_extend(args, { '--', path })
   end
-  run.git(args, {
-    cwd = root,
-    session = session,
-    notify_on_error = false,
-    on_exit = run.parsed(function(stdout)
+  quiet(
+    root,
+    args,
+    session,
+    run.parsed(function(stdout)
       for _, e in ipairs(parse.status_v2(stdout)) do
         if e.kind ~= 'untracked' and e.kind ~= 'ignored' then
           return false
         end
       end
       return true
-    end, on_exit),
-  })
+    end, on_exit)
+  )
 end
 
 --- Default commit range for bare `:Diffy`: `@{u}..HEAD` if the current
@@ -160,18 +146,9 @@ end
 --- `spec` is `{ expr = 'A..B' }` or `{ n = 20 }` (passed to `git log` as a
 --- rev range or a `-n` limit respectively).
 function M.default_range(root, on_exit, session)
-  run.git({ 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}' }, {
-    cwd = root,
-    session = session,
-    notify_on_error = false,
-    on_exit = function(res)
-      if res.code == 0 then
-        on_exit({ expr = '@{u}..HEAD' })
-      else
-        on_exit({ n = 20 })
-      end
-    end,
-  })
+  quiet(root, { 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}' }, session, function(res)
+    on_exit(res.code == 0 and { expr = '@{u}..HEAD' } or { n = 20 })
+  end)
 end
 
 --- Args to append to `git diff [flags]` for the pair `(left, right)`, where

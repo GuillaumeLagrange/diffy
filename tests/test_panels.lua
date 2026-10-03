@@ -184,9 +184,9 @@ T['a long path under nested dirs renders as one row fitting the panel, the start
   -- the section header, the root dir chain, the long dir chain, its two
   -- files, the sibling, the empty Staged section
   MiniTest.expect.equality(#lines, 7)
-  MiniTest.expect.equality(lines[2], '  nvim/diffy/lua/diffy/')
+  MiniTest.expect.equality(lines[2], '  ▾ nvim/diffy/lua/diffy/')
   -- a dir chain too long shortens the dirs leading to its last one, none hidden
-  MiniTest.expect.equality(lines[3], '    a/with_more/nested_levels/')
+  MiniTest.expect.equality(lines[3], '    ▾ a/with_more/nested_levels/')
   -- a file name too long keeps its start, cut at the end
   MiniTest.expect.equality(lines[4]:match('^      M init_with_an_[%w_]*\226\128\166 +%+1 %-1$') ~= nil, true)
   MiniTest.expect.equality(lines[5]:match('^      M short%.lua +%+1 %-1$') ~= nil, true)
@@ -246,7 +246,7 @@ T['resting the tree cursor on a cut row shows it whole over the row, gone on an 
   local row_pos = child.fn.screenpos(w.tree, lnum, 1)
   MiniTest.expect.equality({ shown[1].row, shown[1].col }, { row_pos.row, row_pos.col })
   -- laid on the row alone: the rows around it stay visible
-  MiniTest.expect.equality(child.fn.screenstring(row_pos.row - 1, row_pos.col + 4), lines[lnum - 1]:sub(5, 5))
+  MiniTest.expect.equality(child.fn.screenstring(row_pos.row - 1, row_pos.col + 4), child.fn.strcharpart(lines[lnum - 1], 4, 1))
 
   -- the uncut sibling row: nothing over it
   child.type_keys('j')

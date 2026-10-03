@@ -392,6 +392,61 @@ T[':Diffy branch renders before gh answers, and the PR row appears once it does'
   child.cmd('Diffy close')
 end
 
+T['while a found PR loads, its row shows with a spinner, then the read replaces it'] = function()
+  fixture_only()
+  child.o.columns = 300
+  -- `gh pr view` answers; the PR's read waits
+  child.lua([[
+    local github = require('diffy.review.github')
+    local real = github.transport
+    _G.__held_reads = {}
+    github.transport = function(...)
+      local args = { ... }
+      table.insert(_G.__held_reads, function() real(unpack(args)) end)
+    end
+    _G.__release_reads = function()
+      github.transport = real
+      for _, f in ipairs(_G.__held_reads) do f() end
+    end
+  ]])
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch')
+  ui.wait_ready(child)
+  local function first_row()
+    return log_rows()[1]
+  end
+  local loading = '^  #2 P.* ([\226][\160-\163][\128-\191])$'
+  MiniTest.expect.no_equality(vim.wait(3000, function()
+    return first_row():match(loading) ~= nil
+  end), false)
+  MiniTest.expect.equality(log_rows()[2], '▌ Working tree')
+  local frame = first_row():match(loading)
+  MiniTest.expect.no_equality(vim.wait(3000, function()
+    local now = first_row():match(loading)
+    return now ~= nil and now ~= frame
+  end), false)
+
+  ui.arm_ready(child, 'pr')
+  child.lua('_G.__release_reads()')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(pr_status(), '')
+  MiniTest.expect.equality(log_rows()[2], '▌ Working tree')
+  child.cmd('Diffy close')
+end
+
+T['a PR whose read fails with nothing cached leaves no loading row'] = function()
+  fixture_only()
+  child.lua([[
+    local github = require('diffy.review.github')
+    github.transport = function(_, _, cb)
+      vim.schedule(function() cb(nil, 'error connecting to api.github.com') end)
+    end
+  ]])
+  open_pr()
+  MiniTest.expect.equality(log_rows()[1], '▌ Working tree')
+  child.cmd('Diffy close')
+end
+
 T['a branch without a PR, or with gh failing and nothing cached, gets no PR row and no warning'] = function()
   fixture_only()
   ui.capture_warnings(child)
@@ -556,6 +611,30 @@ T['a review shows as a marker above its commit; <CR> on it selects everything ab
   log_keys(at - 1, '<CR>', 'select')
   local sel = ui.log_subjects(child, selected_rows())
   MiniTest.expect.equality(sel[1], 'Working tree')
+  MiniTest.expect.equality(sel[#sel], 'P2 edit f 50, re-edit f 11')
+  child.cmd('Diffy close')
+end
+
+T['several reviews on one commit share one row summing their states and threads'] = function()
+  fixture_only()
+  fake(([[local nodes = fake.db(state, 2).reviews
+    local oid = %q
+    for _, r in ipairs({ { 'PRR_alice', 'alice', 'CHANGES_REQUESTED' }, { 'PRR_bob', 'bob', 'COMMENTED' } }) do
+      table.insert(nodes, { id = r[1], author = { login = r[2] }, state = r[3], body = '',
+        submittedAt = '2026-09-28T00:00:00Z', commit = { oid = oid } })
+    end]]):format(git(dir, { 'rev-parse', ':/^P1 edit' })))
+  open_pr()
+  local rows = log_rows()
+  local at
+  for i, r in ipairs(rows) do
+    if r:find('P1 edit', 1, true) then
+      at = i
+    end
+  end
+  MiniTest.expect.equality(vim.trim(rows[at - 1]), '── 3 reviews ✗○ 4 threads')
+  MiniTest.expect.equality(rows[at - 2]:find('──', 1, true), nil)
+  log_keys(at - 1, '<CR>', 'select')
+  local sel = ui.log_subjects(child, selected_rows())
   MiniTest.expect.equality(sel[#sel], 'P2 edit f 50, re-edit f 11')
   child.cmd('Diffy close')
 end

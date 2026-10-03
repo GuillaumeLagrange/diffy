@@ -40,17 +40,6 @@ local T = MiniTest.new_set({
   },
 })
 
-T[':Diffy opens a session tab with the layout skeleton'] = function()
-  child.cmd('Diffy')
-  MiniTest.expect.equality(tabs(), 2)
-  local l = ui.layout(child)
-  MiniTest.expect.equality(
-    { tree = l.tree ~= vim.NIL, log = l.log ~= vim.NIL, left = l.left ~= vim.NIL, right = l.right ~= vim.NIL },
-    { tree = true, log = true, left = true, right = true }
-  )
-  MiniTest.expect.equality(#l.bars, 3)
-end
-
 T['closing the tab with :tabclose leaves no diffy state'] = function()
   child.cmd('Diffy')
   MiniTest.expect.equality(tabs(), 2)
@@ -90,8 +79,9 @@ T[':tabclose before DiffyReady tears down cleanly, and the pending async render 
   expect_no_session()
 end
 
+-- the tree and the log share one window and one buffer
 T['quitting a managed window closes the whole session'] = MiniTest.new_set({
-  parametrize = { { 'tree' }, { 'log' }, { 'left' }, { 'right' } },
+  parametrize = { { 'tree' }, { 'left' }, { 'right' } },
 })
 
 T['quitting a managed window closes the whole session']['leaves no diffy state'] = function(name)
@@ -102,13 +92,9 @@ T['quitting a managed window closes the whole session']['leaves no diffy state']
   expect_no_session()
 end
 
-T['wiping a panel buffer closes the whole session'] = MiniTest.new_set({
-  parametrize = { { 'tree' }, { 'log' } },
-})
-
-T['wiping a panel buffer closes the whole session']['leaves no diffy state'] = function(name)
+T['wiping the panel buffer closes the whole session'] = function()
   child.cmd('Diffy')
-  local bufnr = child.api.nvim_win_get_buf(ui.wins(child)[name])
+  local bufnr = child.api.nvim_win_get_buf(ui.wins(child).tree)
   child.cmd(('bwipeout! %d'):format(bufnr))
   wait_tabs(1)
   expect_no_session()
@@ -166,6 +152,32 @@ T['the worktree side is a listed buffer, like :edit would open'] = function()
   local right = ui.wins(child).right
   -- sidekick's {this} only sends file + position for listed file buffers
   MiniTest.expect.equality(child.lua_get(('vim.bo[vim.api.nvim_win_get_buf(%d)].buflisted'):format(right)), true)
+end
+
+T['narrowing the editor under the threads float drops its preview pane, and the list still moves'] = function()
+  child.o.columns = 160
+  vim.fn.writefile({ '1', 'changed', '3', '4', '5' }, repo.dir .. '/f.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  child.api.nvim_win_set_cursor(0, { 2, 0 })
+  ui.arm_ready_raw(child, 'compose')
+  child.type_keys('gc')
+  ui.wait_ready_raw(child)
+  child.type_keys('a note', '<Esc>')
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys('<C-s>')
+  ui.wait_ready_raw(child)
+  child.cmd('Diffy threads')
+  MiniTest.expect.equality(ui.threads_view(child).preview ~= nil, true)
+  child.o.columns = 60
+  child.lua("vim.v.errmsg = ''")
+  child.type_keys('gg', 'G')
+  MiniTest.expect.equality(child.lua_get('vim.v.errmsg'), '')
+  local view = ui.threads_view(child)
+  MiniTest.expect.equality({ view.float, view.preview }, { true, nil })
+  child.type_keys('q')
 end
 
 local function open_worktree_file()

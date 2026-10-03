@@ -174,26 +174,15 @@ end
 --- alone for `:Diffy`, everything (working tree included) for
 --- `:Diffy branch` and an explicit range.
 function M.default_selection(entries, spec)
-  if #entries == 0 then
-    return nil
-  end
-  if spec.kind == 'default' then
-    local top = selection.first_selectable(entries)
+  local top = selection.first_selectable(entries)
+  if spec.kind == 'default' or spec.kind == 'file' then
     return top and { top = top, bottom = top } or nil
   end
-  if spec.kind == 'file' then
-    local top = selection.first_selectable(entries)
-    if not top then
-      return nil
-    end
-    return { top = top, bottom = top }
+  if not top then
+    -- only merges: all of them, rather than nothing
+    return #entries > 0 and { top = 1, bottom = #entries } or nil
   end
-  local top = selection.first_selectable(entries)
-  local bottom = selection.last_selectable(entries)
-  if not top or not bottom then
-    return { top = 1, bottom = #entries }
-  end
-  return { top = top, bottom = bottom }
+  return { top = top, bottom = selection.last_selectable(entries) }
 end
 
 local function short(sha)
@@ -209,12 +198,16 @@ local SYNC_ICON = {
   ['sync failed'] = { '⚠', 'DiffySyncFailed' },
 }
 
+-- the PR row while the layer's first read loads (`entry.loading`)
+local SPINNER = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
+
 --- One log row fitted to `width` cells: `text` plus highlight spans.
 local function entry_line(entry, selected, width)
   local head = (selected and MARK or ' ') .. ' '
   if entry.kind == 'pr' then
     -- the title gives way: the status after it matters more
-    local icon = entry.sync and SYNC_ICON[entry.sync]
+    local icon = entry.loading and { SPINNER[entry.loading.frame % #SPINNER + 1], 'DiffySyncState' }
+      or entry.sync and SYNC_ICON[entry.sync]
     local status = entry.status .. (icon and (' ' .. icon[1]) or '')
     local title = hl.truncate(entry.title, math.max(1, width - 2 - #entry.number - 1 - vim.fn.strdisplaywidth(status)))
     local text = '  ' .. entry.number .. ' ' .. title .. status
@@ -228,8 +221,7 @@ local function entry_line(entry, selected, width)
     local text = '  ' .. hl.truncate(entry.label, width - 2)
     return text, { { 2, #text, 'DiffyThreadTime' } }
   elseif entry.kind ~= 'commit' then
-    local label = entry.label
-    local text = head .. hl.truncate(label, width - 2)
+    local text = head .. hl.truncate(entry.label, width - 2)
     return text, { { #head, #text, 'DiffyLabel' } }
   end
   local sha = short(entry.sha)
@@ -254,14 +246,23 @@ end
 
 local STATE_ICON = { APPROVED = '✓', CHANGES_REQUESTED = '✗', COMMENTED = '○', DISMISSED = '–' }
 M.STATE_ICON = STATE_ICON
+local STATE_ORDER = { 'CHANGES_REQUESTED', 'APPROVED', 'COMMENTED', 'DISMISSED' }
 
---- `entries` (the log as git lists it) with the GitHub layer's rows when
---- it's attached: the PR row first, a marker above each commit a submitted
---- review was written on.
+--- `entries` (the log as git lists it) with the GitHub layer's rows: when
+--- it's attached, the PR row first, one row above each commit submitted
+--- reviews were written on, summing them up; while its PR loads, a PR row
+--- with a spinner.
 function M.with_layer(session, entries)
   local l = session.layer
   if not (l and l.attached) then
-    return entries
+    if not (l and l.loading) then
+      return entries
+    end
+    local out = { base = entries.base, follow_pathspec = entries.follow_pathspec }
+    local pr = l.loading
+    table.insert(out, { kind = 'pr', loading = pr, number = '#' .. pr.number, title = pr.title or '', status = '' })
+    vim.list_extend(out, entries)
+    return out
   end
   local pr = l.cache.pr
   local out = { base = entries.base, follow_pathspec = entries.follow_pathspec }
@@ -293,13 +294,29 @@ function M.with_layer(session, entries)
     end
   end
   for _, e in ipairs(entries) do
-    for _, rv in ipairs(e.kind == 'commit' and by_commit[e.sha] or {}) do
-      local n = per_review[rv.id] or 0
-      local label = ('── %s %s'):format(rv.author or 'unknown', STATE_ICON[rv.state] or '○')
+    local rvs = e.kind == 'commit' and by_commit[e.sha]
+    if rvs then
+      local n, present = 0, {}
+      for _, rv in ipairs(rvs) do
+        n = n + (per_review[rv.id] or 0)
+        present[rv.state] = true
+      end
+      local label
+      if #rvs == 1 then
+        label = ('── %s %s'):format(rvs[1].author or 'unknown', STATE_ICON[rvs[1].state] or '○')
+      else
+        local icons = {}
+        for _, s in ipairs(STATE_ORDER) do
+          if present[s] then
+            table.insert(icons, STATE_ICON[s])
+          end
+        end
+        label = ('── %d reviews %s'):format(#rvs, #icons > 0 and table.concat(icons) or '○')
+      end
       if n > 0 then
         label = label .. (' %d thread%s'):format(n, n == 1 and '' or 's')
       end
-      table.insert(out, { kind = 'marker', review = rv, label = label })
+      table.insert(out, { kind = 'marker', reviews = rvs, label = label })
     end
     table.insert(out, e)
   end
@@ -359,7 +376,7 @@ function M.render(session)
   end
   local lines, all_spans = {}, {}
   for i, e in ipairs(session.entries) do
-    if e.kind == 'pr' then
+    if e.kind == 'pr' and not e.loading then
       e.sync = require('diffy.review.github').sync_status(session)
     end
     lines[i], all_spans[i] = entry_line(e, selected(i), width)
@@ -426,7 +443,9 @@ function M.select_line(session)
     return
   end
   local e = session.entries[lnum]
-  if e and e.kind == 'pr' then
+  if e and e.kind == 'pr' and e.loading then
+    return
+  elseif e and e.kind == 'pr' then
     if session.range.kind == 'default' then
       open_branch(session)
     else
@@ -435,13 +454,10 @@ function M.select_line(session)
     return
   end
   if e and e.kind == 'marker' then
-    local top = selection.first_selectable(session.entries)
-    if top then
-      select_clamped(session, top, lnum - 1)
-    end
-    return
+    select_clamped(session, 1, lnum - 1)
+  else
+    select_clamped(session, lnum, lnum)
   end
-  select_clamped(session, lnum, lnum)
 end
 
 --- `<CR>` in visual/visual-line mode: select the marked line range (the
@@ -461,13 +477,7 @@ end
 
 --- `a`: select every selectable entry (first..last non-merge endpoint).
 function M.select_all(session)
-  local top = selection.first_selectable(session.entries)
-  local bottom = selection.last_selectable(session.entries)
-  if not top or not bottom or top > bottom then
-    return
-  end
-  session.sel = { top = top, bottom = bottom }
-  session.on_select(session)
+  select_clamped(session, 1, #session.entries)
 end
 
 --- Select entries `top..bottom` (no merge endpoints); `done()` runs once
@@ -547,6 +557,7 @@ function M.setup(session)
     require('diffy.panels.tree').move_file(session, -vim.v.count1)
   end, { buffer = buf, desc = 'previous file' })
   require('diffy.layout').map_panel_keys(session, buf)
+  require('diffy.review.ui').map_last(session, buf)
   require('diffy.panels.commitmsg').setup(session)
 end
 

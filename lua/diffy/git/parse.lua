@@ -5,6 +5,17 @@ local function split_z(stdout)
   return vim.split(stdout or '', '\0', { plain = true })
 end
 
+--- Fill `e.path` (and `e.old_path` for a rename/copy, whose paths are two
+--- tokens) from `tokens[i..]`; returns the index after them.
+local function take_paths(e, tokens, i)
+  if e.status == 'R' or e.status == 'C' then
+    e.old_path, e.path = tokens[i], tokens[i + 1]
+    return i + 2
+  end
+  e.path = tokens[i]
+  return i + 1
+end
+
 --- `git log -z --date-order --pretty=format:'%H%x1f%P%x1f%s'` (any range).
 --- `-z` separates commit records with NUL (no separator before the first or
 --- after the last record); `--date-order` guarantees a merge is listed
@@ -35,69 +46,46 @@ function M.name_status(stdout)
   local i = 1
   while i <= #tokens and tokens[i] ~= '' do
     local status = tokens[i]
-    local letter = status:sub(1, 1)
-    if letter == 'R' or letter == 'C' then
-      table.insert(out, {
-        status = letter,
-        old_path = tokens[i + 1],
-        path = tokens[i + 2],
-        score = tonumber(status:sub(2)),
-      })
-      i = i + 3
-    else
-      table.insert(out, { status = letter, path = tokens[i + 1] })
-      i = i + 2
-    end
-  end
-  return out
-end
-
---- `git diff -z -M --raw --no-abbrev <revs>`: name-status plus both sides'
---- modes and object ids (an all-zero id is a side git didn't hash: a
---- worktree file, or no file at all).
---- @return { status: string, path: string, old_path?: string, score?: number, left_mode: string, right_mode: string, left_id: string, right_id: string }[]
-function M.raw(stdout)
-  local tokens = split_z(stdout)
-  local out = {}
-  local i = 1
-  while i <= #tokens and tokens[i] ~= '' do
-    local lmode, rmode, lid, rid, status = tokens[i]:match('^:(%d+) (%d+) (%x+) (%x+) (%S+)$')
-    if not status then
-      break
-    end
-    local e = { left_mode = lmode, right_mode = rmode, left_id = lid, right_id = rid, status = status:sub(1, 1) }
-    if e.status == 'R' or e.status == 'C' then
-      e.old_path, e.path, e.score = tokens[i + 1], tokens[i + 2], tonumber(status:sub(2))
-      i = i + 3
-    else
-      e.path = tokens[i + 1]
-      i = i + 2
-    end
+    local e = { status = status:sub(1, 1), score = tonumber(status:sub(2)) }
+    i = take_paths(e, tokens, i + 1)
     table.insert(out, e)
   end
   return out
 end
 
---- `git diff -z -M --numstat <revs>`. `added`/`removed` are `nil` for
---- binary files (git prints `-`). Renamed/copied entries carry `old_path`.
---- @return { added: number|nil, removed: number|nil, path: string, old_path?: string }[]
-function M.numstat(stdout)
+--- `git diff -z -M --raw --numstat --no-abbrev <revs>`: git prints every raw
+--- record, then every numstat record. One entry per raw record: both sides'
+--- modes and object ids (an all-zero id is a side git didn't hash: a
+--- worktree file, or no file at all), and the numstat counts of its path
+--- (`added`/`removed` nil for a binary file, which git counts as `-`).
+--- @return { status: string, path: string, old_path?: string, left_mode: string, right_mode: string, left_id: string, right_id: string, added?: number, removed?: number }[]
+function M.diff_files(stdout)
   local tokens = split_z(stdout)
-  local out = {}
+  local out, by_path = {}, {}
   local i = 1
+  while i <= #tokens do
+    local lmode, rmode, lid, rid, status = tokens[i]:match('^:(%d+) (%d+) (%x+) (%x+) (%S+)$')
+    if not status then
+      break
+    end
+    local e = { left_mode = lmode, right_mode = rmode, left_id = lid, right_id = rid, status = status:sub(1, 1) }
+    i = take_paths(e, tokens, i + 1)
+    table.insert(out, e)
+    -- an unmerged path has two raw records: `U` and a spurious `M`
+    by_path[e.path] = by_path[e.path] or {}
+    table.insert(by_path[e.path], e)
+  end
   while i <= #tokens and tokens[i] ~= '' do
-    local added, removed, rest = tokens[i]:match('^(%S+)\t(%S+)\t(.*)$')
-    if rest == '' then
-      table.insert(out, {
-        added = tonumber(added),
-        removed = tonumber(removed),
-        old_path = tokens[i + 1],
-        path = tokens[i + 2],
-      })
+    local added, removed, path = tokens[i]:match('^(%S+)\t(%S+)\t(.*)$')
+    if path == '' then
+      -- a rename: old and new path follow as tokens of their own
+      path = tokens[i + 2]
       i = i + 3
     else
-      table.insert(out, { added = tonumber(added), removed = tonumber(removed), path = rest })
       i = i + 1
+    end
+    for _, e in ipairs(by_path[path] or {}) do
+      e.added, e.removed = tonumber(added), tonumber(removed)
     end
   end
   return out
@@ -182,14 +170,9 @@ function M.log_name_status(stdout)
       if not sha or status == '' then
         i = i + 1
       else
-        local letter = status:sub(1, 1)
-        if letter == 'R' or letter == 'C' then
-          table.insert(out, { sha = sha, status = letter, old_path = tokens[i + 1], path = tokens[i + 2] })
-          i = i + 3
-        else
-          table.insert(out, { sha = sha, status = letter, path = tokens[i + 1] })
-          i = i + 2
-        end
+        local e = { sha = sha, status = status:sub(1, 1) }
+        i = take_paths(e, tokens, i + 1)
+        table.insert(out, e)
       end
     end
   end

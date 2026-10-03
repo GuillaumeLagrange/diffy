@@ -57,7 +57,10 @@ T['a branch with no commits past its base shows the working tree'] = function()
   child.cmd('Diffy branch main')
   ui.wait_ready(child)
 
-  MiniTest.expect.equality(child.lua_get('require("diffy").debug_state().sessions[1].sel'), { top = 1, bottom = 1 })
+  MiniTest.expect.equality(
+    ui.layout(child).tree,
+    { '▾ Unstaged (1)', '  M f.txt                         +1 -0', '  Staged (0)' }
+  )
   MiniTest.expect.equality(child.v.errmsg, '')
   child.cmd('Diffy close')
 end

@@ -148,6 +148,10 @@ local function fetch(url, img)
     end
     vim.system(cmd, {}, function(cv)
       os.remove(src)
+      -- a partial output would pass for a cached image next time
+      if cv.code ~= 0 then
+        os.remove(img.path)
+      end
       vim.schedule(function()
         finish(img, cv.code == 0)
       end)

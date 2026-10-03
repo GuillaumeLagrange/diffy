@@ -287,11 +287,10 @@ local function enter_thread_with(win, lnum, needle)
   error('no thread with ' .. needle .. ' at line ' .. lnum)
 end
 
---- In the open thread float: put the cursor on the card whose text has
+--- In the open thread float: put the cursor on the card whose body has
 --- `needle`.
 local function to_card(needle)
-  local f = ui.thread_float(child)
-  for i, l in ipairs(f.text) do
+  for i, l in ipairs(child.api.nvim_buf_get_lines(0, 0, -1, false)) do
     if l:find(needle, 1, true) then
       child.api.nvim_win_set_cursor(0, { i, 0 })
       return
@@ -472,6 +471,29 @@ T['a sync answer arriving after the session closed is kept, and leaves nothing w
     return c and c.gh ~= nil
   end, 'the late answer recorded')
   eq(stored('late answer').gh.id, remote_comment('late answer').id)
+end
+
+T['a sync the session closed during finishes, and the next session mirrors again'] = function()
+  fake_only()
+  setup_empty()
+  child.lua('require("diffy.review.github").sync_delay = 60000')
+  open_pr()
+  open_file('f.txt')
+  compose_draft(wins().right, 30, 'first of two')
+  child.lua('require("diffy.review.github").sync_delay = 100; _G.__fake_state.hold_answers = true')
+  select_commit(3)
+  compose_draft(wins().right, 5, 'second of two')
+  wait_for(function()
+    return remote().pending ~= nil
+  end, 'the review created, its answer held')
+  child.cmd('Diffy close')
+  child.lua('require("tests.helpers.fake_github").release_answers(_G.__fake_state)')
+
+  open_pr()
+  wait_for(function()
+    return remote_comment('first of two') ~= nil and remote_comment('second of two') ~= nil
+  end, 'both drafts mirrored')
+  child.cmd('Diffy close')
 end
 
 --- The sync icon ending the PR row, or nil.
@@ -1000,6 +1022,31 @@ T['a GitHub submit sends the review, then staged edits and deletions, then resol
   child.cmd('Diffy close')
 end
 
+T['a staged edit GitHub refuses shows ⚠ on the PR row, stays staged and goes with the next sync'] = function()
+  fake_only()
+  setup_pending()
+  child.lua([[_G.__fake_state.fail = { updatePullRequestReviewComment = 'boom' }]])
+  open_pr()
+  open_file('f.txt')
+  enter_thread_with(wins().right, 30, 'D1')
+  edit_card('D1', 'D1 refused edit')
+  child.type_keys('q')
+  submit_to_github('with a refused edit')
+  ui.capture_warnings(child)
+  child.type_keys('<CR>')
+  wait_for(function()
+    return submitted('with a refused edit') and row_icon() == '⚠'
+  end, '⚠ on the row')
+  eq(stored('D1 refused edit').staged_body, 'D1 refused edit')
+  eq(remote_comment('D1 refused edit'), nil)
+
+  child.lua('_G.__fake_state.fail = nil')
+  read_github(function()
+    return remote_comment('D1 refused edit') ~= nil and row_icon() == nil
+  end, 'the edit applied, the row quiet again')
+  child.cmd('Diffy close')
+end
+
 T['review submit asks agent or GitHub, then comment, approve or request changes; approving needs no drafts'] = function()
   setup_empty()
   open_pr()
@@ -1096,7 +1143,7 @@ T['the thread float names each author and marks drafts, pending comments and res
   eq(text[2]:find('^D1 published thread') ~= nil, true)
   if not live.enabled then
     -- the recorded PR has E4, a reply in the viewer's pending review
-    eq(text[3]:find('  pending$') ~= nil, true)
+    eq(text[4]:find('  pending$') ~= nil, true)
   end
   eq({ text[#text - 1]:find('  draft$') ~= nil, text[#text] }, { true, 'a reply' })
   child.type_keys('q')

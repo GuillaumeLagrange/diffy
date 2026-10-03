@@ -53,13 +53,17 @@ local function stored_comment(c)
   return out
 end
 
-local function has_published(t)
+local function any_comment(t, pred)
   for _, c in ipairs(t.comments or {}) do
-    if c.state == 'published' then
+    if pred(c) then
       return true
     end
   end
   return false
+end
+
+local function is_published(c)
+  return c.state == 'published'
 end
 
 local function stored_thread(t)
@@ -69,7 +73,7 @@ local function stored_thread(t)
     anchor = vim.deepcopy(t.anchor),
     resolved = t.resolved,
     view = t.view,
-    github = (t.github or has_published(t)) or nil,
+    github = (t.github or any_comment(t, is_published)) or nil,
     gh_thread = t.gh_thread,
     resolve_staged = t.resolve_staged,
     retry = t.retry,
@@ -188,15 +192,6 @@ function M.sessions(session)
   return e and vim.tbl_keys(e.sessions) or { session }
 end
 
-local function draft_comments(s)
-  for _, c in ipairs(s.comments) do
-    if storable(c) then
-      return true
-    end
-  end
-  return false
-end
-
 --- Make `live` (a session's threads) match `stored`: stored comments are
 --- updated, added or dropped by id; threads left without comments go;
 --- stored threads not in `live` are added when they hold drafts. A stored
@@ -266,7 +261,7 @@ function M.apply(live, stored)
     end
   end
   for _, s in ipairs(stored) do
-    if not seen[s.id] and draft_comments(s) then
+    if not seen[s.id] and any_comment(s, storable) then
       local n = stored_thread(s)
       for _, c in ipairs(s.comments) do
         if storable(c) then
@@ -280,13 +275,16 @@ function M.apply(live, stored)
   end
 end
 
---- The whole file as it is now (`threads` and `mirror` always present).
-function M.load(session)
-  local data = store.load(path_of(session)) or {}
+local function with_defaults(data)
   data.threads = data.threads or {}
   data.mirror = data.mirror or {}
   data.mirror.deleted = data.mirror.deleted or {}
   return data
+end
+
+--- The whole file as it is now (`threads` and `mirror` always present).
+function M.load(session)
+  return with_defaults(store.load(path_of(session)) or {})
 end
 
 local function changed_hook(session, opts)
@@ -306,12 +304,15 @@ end
 --- late write (a sync answer arriving after teardown) still lands, without
 --- joining the entry again.
 function M.update(session, fn, opts)
-  local e = session.closed and entries[path_of(session)] or (not session.closed and M.attach(session)) or nil
+  local e
+  if session.closed then
+    e = entries[path_of(session)]
+  else
+    e = M.attach(session)
+  end
   local changed = true
   local written = store.update(path_of(session), function(data)
-    data.threads = data.threads or {}
-    data.mirror = data.mirror or {}
-    data.mirror.deleted = data.mirror.deleted or {}
+    with_defaults(data)
     changed = fn(data) ~= false
     if not data.mirror.review and #data.mirror.deleted == 0 then
       data.mirror = nil

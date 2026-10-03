@@ -5,6 +5,19 @@
 -- in the left window is moved to the right one, which owns navigation.
 local M = {}
 
+--- Run `fn(...)` as a diffy-made buffer change the `BufWinEnter` handler
+--- ignores. Another plugin's BufWinEnter error propagates out of `fn`: the
+--- guard still drops, or navigation stays off for the whole session.
+function M.guarded(session, fn, ...)
+  session._nav_guard = (session._nav_guard or 0) + 1
+  local ok, ret = pcall(fn, ...)
+  session._nav_guard = session._nav_guard - 1
+  if not ok then
+    error(ret, 0)
+  end
+  return ret
+end
+
 --- `buf`'s path relative to `session.root`, or `nil` if it isn't under it
 --- (a scratch buffer, another repo entirely, or an unnamed buffer). A
 --- fugitive blob of this repo (`<C-o>`/`<C-t>` land on the blobs of earlier
@@ -53,12 +66,7 @@ local function redirect(session, left, buf)
   vim.api.nvim_set_current_win(right)
   vim.cmd("normal! m'")
   vim.fn.settagstack(right, { items = { { tagname = tagname, from = from } } }, 't')
-  session._nav_guard = (session._nav_guard or 0) + 1
-  local ok, err = pcall(vim.api.nvim_win_set_buf, right, buf)
-  session._nav_guard = session._nav_guard - 1
-  if not ok then
-    error(err, 0)
-  end
+  M.guarded(session, vim.api.nvim_win_set_buf, right, buf)
   handle(session, buf)
   if vim.api.nvim_win_is_valid(right) then
     pcall(vim.api.nvim_win_set_cursor, right, pos)
@@ -66,7 +74,7 @@ local function redirect(session, left, buf)
 end
 
 --- Arm the `BufWinEnter` autocmd on the session augroup, scoped to the diff
---- windows. Ignores buffer changes made by diffy itself (`_nav_guard`).
+--- windows. Ignores buffer changes made by diffy itself (`M.guarded`).
 function M.setup(session)
   vim.api.nvim_create_autocmd('BufWinEnter', {
     group = session.augroup,

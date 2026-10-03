@@ -205,8 +205,7 @@ end
 local function float_frame()
   child.cmd('redraw')
   return child.lua([[
-    local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
-    local info = vim.fn.getwininfo(s.wins.left)[1]
+    local info = vim.fn.getwininfo(...)[1]
     local first, last = info.wincol + info.textoff, info.wincol + info.width - 1
     for r = info.winrow, info.winrow + info.height do
       local open, close
@@ -219,7 +218,7 @@ local function float_frame()
         return { width = close - open - 1, left = open - first, right = last - close }
       end
     end
-  ]])
+  ]], { ui.wins(child).left })
 end
 
 T['the thread float is centred over the other side, at most 100 wide, and refitted when the editor is resized'] = function()
@@ -390,7 +389,8 @@ T['each comment in the thread float is headed by who wrote it, when, and its sta
   local text = table.concat(float.text, '\n')
   MiniTest.expect.equality(float.text[1], 'You  just now  draft')
   MiniTest.expect.equality(float.text[2], 'first point')
-  MiniTest.expect.equality(float.text[3], 'You  just now  draft')
+  MiniTest.expect.equality((float.text[3]:gsub('─', '')), '')
+  MiniTest.expect.equality(float.text[4], 'You  just now  draft')
   -- an empty suggestion block would render as nothing at all
   MiniTest.expect.equality(text:find('Suggested change: remove these lines', 1, true) ~= nil, true)
   MiniTest.expect.equality(float.footer:find('e edit', 1, true) ~= nil, true)
@@ -401,7 +401,7 @@ T['each comment in the thread float is headed by who wrote it, when, and its sta
   child.fn.win_execute(w.right, 'call cursor(5, 1)')
   child.type_keys('K')
   float = ui.thread_float(child)
-  MiniTest.expect.equality({ float.text[1], float.text[3] }, { 'You  just now  sent', 'You  just now  sent' })
+  MiniTest.expect.equality({ float.text[1], float.text[4] }, { 'You  just now  sent', 'You  just now  sent' })
   -- a sent comment can't be edited or deleted any more
   MiniTest.expect.equality(float.footer:find('e edit', 1, true), nil)
   MiniTest.expect.equality(float.footer:find('r reply', 1, true) ~= nil, true)
@@ -503,7 +503,7 @@ T['e and dd in the thread float act on the draft under the cursor'] = function()
 
   -- back into the thread, on the edited card
   local float = ui.thread_float(child)
-  MiniTest.expect.equality({ float.focused, float.text[2], float.text[4] }, { true, 'first point, edited', 'second point' })
+  MiniTest.expect.equality({ float.focused, float.text[2], float.text[5] }, { true, 'first point, edited', 'second point' })
   MiniTest.expect.equality(child.api.nvim_win_get_cursor(0)[1], 1)
 
   child.type_keys('dd')
@@ -577,6 +577,98 @@ T['on an added file the thread and its edit box leave the commented lines visibl
   child.type_keys('1G')
   MiniTest.expect.equality(#ui.threads_visible(child, side), 2)
 
+  child.cmd('Diffy close')
+end
+
+T['on an added file the thread float\'s frame starts on its thread\'s bar'] = function()
+  child.o.columns, child.o.lines = 160, 50
+  vim.fn.writefile(Repo.lines(40), repo.dir .. '/new.txt')
+  open_default()
+  ui.open_tree_row(child, 'new.txt', '<CR>', 'open_row')
+  local w = ui.wins(child)
+  local win = w.right or w.left
+  write_comment(win, 10, 'outer', 20)
+  write_comment(win, 12, 'inner', 14)
+
+  -- screen columns of the open thread's heavy bar on line 13 and of the frame's top left corner
+  local function cols()
+    return child.lua([[
+      vim.cmd('redraw')
+      local win = ...
+      local info = vim.fn.getwininfo(win)[1]
+      local row = vim.fn.screenpos(win, 13, 1).row
+      local bar, corner
+      for c = info.wincol, info.wincol + info.textoff - 1 do
+        bar = bar or (vim.fn.screenstring(row, c) == '┃' and c or nil)
+      end
+      for r = 1, vim.o.lines do
+        for c = 1, vim.o.columns do
+          corner = corner or (vim.fn.screenstring(r, c) == '╭' and c or nil)
+        end
+      end
+      return { bar = bar, corner = corner }
+    ]], { win })
+  end
+
+  child.api.nvim_set_current_win(win)
+  arm_ready_raw('thread')
+  child.type_keys('13G')
+  ui.wait_ready_raw(child)
+  MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('outer', 1, true) ~= nil, true)
+  local outer = cols()
+  MiniTest.expect.equality(outer.corner, outer.bar)
+
+  arm_ready_raw('thread')
+  child.type_keys('<Tab>')
+  ui.wait_ready_raw(child)
+  MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('inner', 1, true) ~= nil, true)
+  local inner = cols()
+  MiniTest.expect.equality(inner.corner, inner.bar)
+  MiniTest.expect.equality(inner.bar, outer.bar + 1)
+
+  child.cmd('Diffy close')
+end
+
+T['a thread\'s comments are separated by a rule across the card'] = function()
+  child.o.columns = 160
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'first comment')
+  child.api.nvim_set_current_win(w.right)
+  child.fn.win_execute(w.right, 'call cursor(5, 1)')
+  child.type_keys('K')
+  compose('r')
+  child.type_keys('the reply', '<Esc>')
+  save()
+
+  -- screen rows of the two bodies, and of rows ruled from frame to frame
+  local seen = child.lua([[
+    vim.cmd('redraw')
+    local width
+    for _, f in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(f)):find('/thread/', 1, true) then
+        width = vim.api.nvim_win_get_width(f)
+      end
+    end
+    local out = { rules = {} }
+    for r = 1, vim.o.lines do
+      local text = {}
+      for c = 1, vim.o.columns do
+        text[#text + 1] = vim.fn.screenstring(r, c)
+      end
+      text = table.concat(text)
+      if text:find('│' .. ('─'):rep(width) .. '│', 1, true) then
+        table.insert(out.rules, r)
+      end
+      out.first = out.first or (text:find('first comment', 1, true) and r)
+      out.reply = out.reply or (text:find('the reply', 1, true) and r)
+    end
+    return out
+  ]])
+  MiniTest.expect.equality(#seen.rules, 1)
+  MiniTest.expect.equality(seen.first < seen.rules[1] and seen.rules[1] < seen.reply, true)
+
+  child.type_keys('q')
   child.cmd('Diffy close')
 end
 
@@ -937,10 +1029,7 @@ T['config.column puts the threads view in the column, compact, kept by :Diffy pa
   MiniTest.expect.equality({ groups[1].group, #groups[1].rows }, { 'Open', 1 })
   MiniTest.expect.equality(groups[1].rows[1]:find('in the column', 1, true) ~= nil, true)
   -- the column still holds the file tree and the commit log, in that order
-  local rows = child.lua_get([[(function()
-    local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
-    return vim.tbl_map(function(n) return vim.fn.win_screenpos(s.wins[n])[1] end, { 'tree', 'threads', 'log' })
-  end)()]])
+  local rows = vim.tbl_map(function(n) return child.fn.win_screenpos(ui.wins(child)[n])[1] end, { 'tree', 'threads', 'log' })
   MiniTest.expect.equality(rows[1] < rows[2] and rows[2] < rows[3], true)
 
   child.cmd('Diffy panel')
@@ -1007,6 +1096,50 @@ T['<leader>e in the thread float hides the column, or shows it and goes to the f
   child.cmd('Diffy close')
 end
 
+T['<leader>dl goes back into the last thread you were in, from another file, past threads only hovered'] = function()
+  child.o.columns = 160
+  repo:commit('second file', { ['g.txt'] = Repo.lines(20) })
+  vim.fn.writefile(Repo.edit(3, 'changed again')(vim.fn.readfile(repo.dir .. '/f.txt')), repo.dir .. '/f.txt')
+  vim.fn.writefile(Repo.edit(4, 'g changed')(vim.fn.readfile(repo.dir .. '/g.txt')), repo.dir .. '/g.txt')
+  open_default()
+  ui.open_tree_row(child, 'g.txt', '<CR>', 'render')
+  write_comment(ui.wins(child).right, 4, 'on g')
+  ui.open_tree_row(child, 'f.txt', '<CR>', 'render')
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'come back here')
+  -- a reply, so the jump has to land on the comment you left the thread on
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('1G', '5G', 'K')
+  compose('r')
+  child.type_keys('the reply', '<Esc>')
+  save()
+  child.type_keys('G')
+  MiniTest.expect.equality(ui.thread_float(child).focused, true)
+  child.type_keys('q')
+
+  -- in g.txt, its thread only previewed by the cursor resting on it
+  ui.open_tree_row(child, 'g.txt', '<CR>', 'render')
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  child.type_keys('1G', '4G')
+  MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('on g', 1, true) ~= nil, true)
+
+  ui.cursor_to(child, 'tree', 1)
+  arm_ready_raw('thread')
+  child.type_keys('\\dl')
+  ui.wait_ready_raw(child)
+  w = ui.wins(child)
+  MiniTest.expect.equality(ui.layout(child).right.path, 'f.txt')
+  MiniTest.expect.equality(child.api.nvim_win_get_cursor(w.right)[1], 5)
+  local float = ui.thread_float(child)
+  MiniTest.expect.equality(float.focused, true)
+  MiniTest.expect.equality(table.concat(float.text, '\n'):find('come back here', 1, true) ~= nil, true)
+  -- on the reply's card, where you left it
+  local below = table.concat(child.api.nvim_buf_get_lines(0, child.fn.line('.') - 1, -1, false), '\n')
+  MiniTest.expect.equality({ below:find('the reply', 1, true) ~= nil, below:find('come back here', 1, true) }, { true, nil })
+
+  child.cmd('Diffy close')
+end
+
 T['drafts survive restarting nvim'] = function()
   open_default()
   local w = ui.wins(child)
@@ -1027,18 +1160,22 @@ T['drafts survive restarting nvim'] = function()
   child.cmd('Diffy close')
 end
 
-T['editing lines above an anchor moves it with its excerpt'] = function()
+T['a thread deleted by another nvim closes its open card'] = function()
   open_default()
   local w = ui.wins(child)
-  write_comment(w.right, 20, 'about line 20')
+  write_comment(w.right, 5, 'deleted elsewhere')
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('1G', '5G')
+  MiniTest.expect.equality(ui.thread_float(child) ~= vim.NIL, true)
 
-  -- a buffer edit, not a disk write: the loaded worktree buffer wouldn't
-  -- see the latter
-  child.api.nvim_buf_set_lines(child.api.nvim_win_get_buf(w.right), 0, 0, false, { 'inserted a', 'inserted b' })
-  refresh()
-
-  local visible = ui.threads_visible(child, 'right')
-  MiniTest.expect.equality(vim.tbl_map(function(v) return v.line end, visible), { 22 })
+  local path = review_file('threads.json')
+  local data = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
+  data.threads = {}
+  vim.fn.writefile({ vim.json.encode(data) }, path)
+  MiniTest.expect.equality(vim.wait(3000, function()
+    return #ui.threads_visible(child, 'right') == 0
+  end, 20), true)
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
 
   child.cmd('Diffy close')
 end
@@ -1341,6 +1478,39 @@ T['review submit quotes a bracketed path from its own file, not a loaded file it
   child.cmd('bwipeout! ' .. vim.fn.fnameescape(repo.dir .. '/ab.txt'))
 end
 
+T["review.md quotes a markdown file's ``` lines inside longer fences, in the excerpt and the diff hunk"] = function()
+  repo:commit('doc', { ['doc.md'] = { '# title', 'text', 'more' } })
+  vim.fn.writefile({ '# title', '```lua', 'more' }, repo.dir .. '/doc.md')
+  open_default()
+  ui.open_tree_row(child, 'doc.md', '<CR>', 'open_row')
+  write_comment(ui.wins(child).right, 2, 'a fence')
+  send_review('')
+
+  local text = table.concat(vim.fn.readfile(review_file('review.md')), '\n')
+  local hunk = text:match('\n````diff\n(.-)\n````\n')
+  MiniTest.expect.equality(hunk and hunk:find('+```lua', 1, true) ~= nil, true)
+  local excerpt = text:match('%- %[ %] resolved\n````markdown\n(.-)\n````\n')
+  MiniTest.expect.equality(excerpt and excerpt:find('```lua', 1, true) ~= nil, true)
+  child.cmd('Diffy close')
+end
+
+T["review.md quotes an outdated comment on a commit's last line without a phantom empty line after it"] = function()
+  repo:commit('second', { ['f.txt'] = Repo.edit(30, 'second: 30') })
+  -- the line edited since: the comment is outdated, quoted from the commit's blob
+  vim.fn.writefile(Repo.edit(30, 'thirty, edited')(vim.fn.readfile(repo.dir .. '/f.txt')), repo.dir .. '/f.txt')
+  open_default()
+  ui.select_log_row(child, 'second')
+  write_comment(ui.wins(child).right, 30, 'at the end')
+  ui.select_log_row(child, 1)
+  send_review('')
+
+  local text = table.concat(vim.fn.readfile(review_file('review.md')), '\n')
+  local excerpt = text:match('%- %[ %] resolved\n```[^\n]*\n(.-)\n```') or ''
+  MiniTest.expect.equality(excerpt:find('30  second: 30', 1, true) ~= nil, true)
+  MiniTest.expect.equality(excerpt:match('31'), nil)
+  child.cmd('Diffy close')
+end
+
 T['the previewed thread stays level with its lines when the diff scrolls under it'] = function()
   child.o.lines, child.o.columns = 40, 160
   open_default()
@@ -1349,14 +1519,14 @@ T['the previewed thread stays level with its lines when the diff scrolls under i
   -- float's top row minus the thread's first line's row, as drawn
   local function offset()
     return child.lua([[
-      local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
+      local right = ...
       vim.cmd('redraw')
       for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
         if vim.api.nvim_win_get_config(w).relative ~= '' then
-          return vim.fn.win_screenpos(w)[1] - vim.fn.screenpos(s.wins.right, 8, 1).row
+          return vim.fn.win_screenpos(w)[1] - vim.fn.screenpos(right, 8, 1).row
         end
       end
-    ]])
+    ]], { w.right })
   end
   child.type_keys('1G', '12G')
   local before = offset()

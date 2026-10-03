@@ -20,32 +20,22 @@ local M = {}
 
 local ZERO = ('0'):rep(40)
 
--- after a collapsed folder or section header
-local COLLAPSED = ' …'
+-- before a folder or section header: `▸` collapsed, `▾` expanded
+local function chevron(row)
+  if not row.foldable then
+    return '  '
+  end
+  return row.collapsed and '▸ ' or '▾ '
+end
 
-local function diff_cmd(session, pair, format_flag)
-  local args = { 'diff', '-z', '-M', format_flag }
+local function diff_cmd(session, pair, ...)
+  local args = { 'diff', '-z', '-M', ... }
   vim.list_extend(args, repo.diff_args(pair.left, pair.right))
   if session.follow_pathspec then
     table.insert(args, '--')
     vim.list_extend(args, session.follow_pathspec)
   end
   return args
-end
-
---- raw entries annotated with their numstat +/- counts.
-local function merge_counts(raw, numstat)
-  local by_path = {}
-  for _, e in ipairs(numstat) do
-    by_path[e.path] = e
-  end
-  for _, e in ipairs(raw) do
-    local n = by_path[e.path]
-    e.added = n and n.added or nil
-    e.removed = n and n.removed or nil
-    e.score = nil
-  end
-  return raw
 end
 
 -- An unmerged path's plain `git diff` (worktree vs index) reports it twice
@@ -70,48 +60,51 @@ local function drop_unmerged_duplicates(entries)
   return deduped
 end
 
---- raw + numstat for `pair`, merged by path, plus untracked files
---- for the unstaged pair (index -> worktree).
-local function build_diff_entries(session, pair, gen, cb)
-  local raw_args = diff_cmd(session, pair, '--raw')
-  table.insert(raw_args, 5, '--no-abbrev')
-  local num_args = diff_cmd(session, pair, '--numstat')
-
-  run.git(raw_args, {
-    cwd = session.root,
-    session = session,
-    gen = gen,
-    on_exit = run.parsed(parse.raw, function(raw, err)
-      if not raw then
+--- Run `fns` (each `fn(done)`, `done(value, err)`) concurrently; `cb(values)`
+--- once all succeeded, else `cb(nil, err)` with the first error.
+local function concurrently(fns, cb)
+  local values, pending, failed = {}, #fns, false
+  for i, fn in ipairs(fns) do
+    fn(function(value, err)
+      if failed then
+        return
+      end
+      if value == nil then
+        failed = true
         cb(nil, err)
         return
       end
-      run.git(num_args, {
-        cwd = session.root,
-        session = session,
-        gen = gen,
-        on_exit = run.parsed(parse.numstat, function(numstat, num_err)
-          if not numstat then
-            cb(nil, num_err)
-            return
-          end
-          local entries = merge_counts(raw, numstat)
-          if pair.left == 'INDEX' and pair.right == 'WORKTREE' then
-            for _, s in ipairs(session.status_entries or {}) do
-              if s.kind == 'untracked' then
-                table.insert(entries, { status = '?', path = s.path, left_id = ZERO })
-              end
-            end
-          end
-          entries = drop_unmerged_duplicates(entries)
-          table.sort(entries, function(a, b)
-            return a.path < b.path
-          end)
-          cb(entries, nil)
-        end),
-      })
-    end),
-  })
+      values[i] = value
+      pending = pending - 1
+      if pending == 0 then
+        cb(values)
+      end
+    end)
+  end
+end
+
+--- raw + numstat for `pair` (one git call: rename detection runs once), plus
+--- untracked files for the unstaged pair (index -> worktree).
+local function build_diff_entries(session, pair, gen, cb)
+  local args = diff_cmd(session, pair, '--raw', '--numstat', '--no-abbrev')
+  run.git(args, { cwd = session.root, session = session, gen = gen, on_exit = run.parsed(parse.diff_files, function(entries, err)
+    if not entries then
+      cb(nil, err)
+      return
+    end
+    if pair.left == 'INDEX' and pair.right == 'WORKTREE' then
+      for _, s in ipairs(session.status_entries or {}) do
+        if s.kind == 'untracked' then
+          table.insert(entries, { status = '?', path = s.path, left_id = ZERO })
+        end
+      end
+    end
+    entries = drop_unmerged_duplicates(entries)
+    table.sort(entries, function(a, b)
+      return a.path < b.path
+    end)
+    cb(entries, nil)
+  end) })
 end
 
 --- Fill the right ids git left at zero (worktree files) for every entry of
@@ -362,18 +355,17 @@ end
 local function row_line(row, width)
   local indent = ('  '):rep(row.depth)
   if row.kind == 'dir' then
-    local more = row.collapsed and COLLAPSED or ''
-    local avail = width and math.max(1, width - #indent - 1 - vim.fn.strdisplaywidth(more))
+    local head = indent .. chevron(row)
+    local avail = width and math.max(1, width - vim.fn.strdisplaywidth(head) - 1)
     local name = avail and hl.truncate_path(row.name, avail) or row.name
-    local text = indent .. name .. '/'
-    return text .. more, { { #indent, #text, 'DiffyDirectory' }, { #text, #text + #more, 'Comment' } }, nil, name ~= row.name
+    local text = head .. name .. '/'
+    return text, { { #indent, #text, 'DiffyDirectory' } }, nil, name ~= row.name
   end
   if row.kind == 'section' or row.kind == 'viewed' then
-    local full = indent .. ('%s (%d)'):format(row.label, row.count)
-    local more = row.collapsed and COLLAPSED or ''
-    local text = width and hl.truncate(full, math.max(1, width - vim.fn.strdisplaywidth(more))) or full
+    local full = indent .. chevron(row) .. ('%s (%d)'):format(row.label, row.count)
+    local text = width and hl.truncate(full, math.max(1, width)) or full
     local group = row.kind == 'viewed' and 'Comment' or 'DiffyLabel'
-    return text .. more, { { #indent, #text, group }, { #text, #text + #more, 'Comment' } }, nil, text ~= full
+    return text, { { #indent, #text, group } }, nil, text ~= full
   end
   local e = row.entry
   local counts = ''
@@ -517,22 +509,26 @@ local function stage_at_cursor(session, verb, to)
     paths = section_paths(session, row)
     session.tree_keep = { section = row.pair, lnum = lnum }
   end
-  if verb == 'add' then
-    -- `git add` fails on a path with nothing to stage and missing from the
-    -- worktree (a staged deletion or rename source)
-    local unstaged = {}
-    for _, r in ipairs(session.tree_all) do
-      if r.kind == 'file' and r.pair == selection.UNSTAGED then
-        for _, p in ipairs(row_paths(r)) do
-          unstaged[p] = true
+  -- `git add` fails on a path with nothing to stage and missing from the
+  -- worktree (a staged deletion or rename source). A conflicted path is
+  -- left alone: adding it skips the marker check of `s` on its row,
+  -- resetting it drops its conflict stages.
+  local ok, conflicted = {}, {}
+  for _, r in ipairs(session.tree_all) do
+    if r.kind == 'file' then
+      for _, p in ipairs(row_paths(r)) do
+        if r.entry.status == 'U' then
+          conflicted[p] = true
+        elseif verb ~= 'add' or r.pair == selection.UNSTAGED then
+          ok[p] = true
         end
       end
     end
-    paths = vim.tbl_filter(function(p)
-      return unstaged[p]
-    end, paths or {})
   end
-  if not paths or #paths == 0 then
+  paths = vim.tbl_filter(function(p)
+    return ok[p] and not conflicted[p]
+  end, paths or {})
+  if #paths == 0 then
     session.tree_keep = nil
     return
   end
@@ -640,9 +636,8 @@ function M.open_row(session, row, opts)
     require('diffy.conflict').enter(session, e.path, opts)
     return
   end
-  if session.conflict_active then
-    require('diffy.conflict').leave(session)
-  end
+  -- also drops a conflict view still being built for another row
+  require('diffy.conflict').leave(session)
   local diffpair = require('diffy.diffpair')
   local pair = row.pair or session.pair
 
@@ -782,13 +777,8 @@ local function hover(session)
   end
   local full = row and row.full
   local pos = full and vim.fn.screenpos(win, stack.lnum(session, 'tree', lnum), 1)
-  local fwin = session.wins.tree_hover
   if not (pos and pos.row > 0) then
-    session_mod.unregister_window(session, 'tree_hover')
-    session.bufs.tree_hover = nil
-    if fwin and vim.api.nvim_win_is_valid(fwin) then
-      pcall(vim.api.nvim_win_close, fwin, true)
-    end
+    session_mod.close_overlay(session, 'tree_hover')
     return
   end
   local cfg = {
@@ -803,23 +793,8 @@ local function hover(session)
     focusable = false,
     zindex = 60,
   }
-  local hbuf = session.bufs.tree_hover
-  if not (fwin and vim.api.nvim_win_is_valid(fwin) and hbuf and vim.api.nvim_buf_is_valid(hbuf)) then
-    hbuf = session_mod.scratch_buf(session, 'tree_hover')
-    session_mod.register_buffer(session, 'tree_hover', hbuf)
-    fwin = vim.api.nvim_open_win(hbuf, false, cfg)
-    session_mod.register_window(session, 'tree_hover', fwin, { transient = true })
-    session_mod.unbind(fwin)
-    vim.wo[fwin].diff = false
-    vim.wo[fwin].wrap = false
-    -- it covers the cursor row
-    vim.wo[fwin].winhighlight = 'NormalFloat:CursorLine'
-  else
-    vim.api.nvim_win_set_config(fwin, cfg)
-  end
-  vim.bo[hbuf].modifiable = true
-  vim.api.nvim_buf_set_lines(hbuf, 0, -1, false, { full.text })
-  vim.bo[hbuf].modifiable = false
+  -- it covers the cursor row
+  local hbuf = session_mod.overlay(session, 'tree_hover', cfg, { full.text }, 'NormalFloat:CursorLine')
   local ns = session_mod.namespace(session, 'tree_hover')
   vim.api.nvim_buf_clear_namespace(hbuf, ns, 0, -1)
   local spans = vim.list_extend({}, full.spans)
@@ -834,8 +809,8 @@ local function hover(session)
 end
 
 --- `session.tree_rows`: the rows of `tree_all` not under a collapsed
---- header, each given its buffer line (`lnum`, nil when hidden). An empty
---- section doesn't show as collapsed.
+--- header, each given its buffer line (`lnum`, nil when hidden). A header
+--- with nothing under it (an empty section) isn't foldable.
 local function visible_rows(session)
   local all, collapsed = session.tree_all, session.tree_collapsed or {}
   local rows, hide_below = {}, nil
@@ -851,7 +826,8 @@ local function visible_rows(session)
       else
         folded = row.key and collapsed[row.key]
       end
-      row.collapsed = folded and all[i + 1] and all[i + 1].depth > row.depth or nil
+      row.foldable = row.key and all[i + 1] and all[i + 1].depth > row.depth or nil
+      row.collapsed = folded and row.foldable or nil
       hide_below = row.collapsed and row.depth or nil
     end
   end
@@ -909,32 +885,22 @@ end
 --- Unstaged and Staged for the working tree alone, one list otherwise.
 --- `cb(lists | nil, err)`.
 local function build_lists(session, gen, cb)
-  local function filled(lists)
-    fill_ids(session, lists, gen, function()
-      cb(lists)
-    end)
+  local split = session.pair.split
+  local sides = split and { selection.UNSTAGED, selection.STAGED } or { session.pair }
+  local fns = {}
+  for i, pair in ipairs(sides) do
+    fns[i] = function(done)
+      build_diff_entries(session, pair, gen, done)
+    end
   end
-  if not session.pair.split then
-    build_diff_entries(session, session.pair, gen, function(entries, err)
-      if not entries then
-        cb(nil, err)
-        return
-      end
-      filled({ entries })
-    end)
-    return
-  end
-  build_diff_entries(session, selection.UNSTAGED, gen, function(unstaged, err)
-    if not unstaged then
+  concurrently(fns, function(lists, err)
+    if not lists then
       cb(nil, err)
       return
     end
-    build_diff_entries(session, selection.STAGED, gen, function(staged, staged_err)
-      if not staged then
-        cb(nil, staged_err)
-        return
-      end
-      filled({ unstaged, staged, split = true })
+    lists.split = split
+    fill_ids(session, lists, gen, function()
+      cb(lists)
     end)
   end)
 end
@@ -1294,6 +1260,7 @@ function M.setup(session)
     end, { buffer = buf, desc = 'toggle viewed' })
   end
   require('diffy.layout').map_panel_keys(session, buf)
+  require('diffy.review.ui').map_last(session, buf)
   vim.api.nvim_create_autocmd({ 'WinResized', 'VimResized' }, {
     group = session.augroup,
     callback = function()

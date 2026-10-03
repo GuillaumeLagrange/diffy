@@ -4,11 +4,10 @@ local session_mod = require('diffy.session')
 
 local M = {}
 
---- Opens a small centered float showing `lines` and waits for one keypress
---- among `keys` (`{ [lhs] = value }`); `<Esc>`/`q` decline with nil. Calls
---- `cb(value)` exactly once, then closes the float and drops its
---- buffer-local keymaps.
-local function ask(session, lines, keys, cb)
+--- A small centered float showing `lines`, focused. Returns its window,
+--- `set_lines(lines)`, `map(lhs, fn)` (a key on its buffer) and
+--- `finish(value)`, which closes it and calls `cb(value)` exactly once.
+local function open(session, lines, cb)
   local width = 20
   for _, l in ipairs(lines) do
     width = math.max(width, vim.fn.strdisplaywidth(l) + 2)
@@ -16,9 +15,13 @@ local function ask(session, lines, keys, cb)
   width = math.min(width, vim.o.columns - 4)
 
   local buf = session_mod.scratch_buf(session, 'prompt')
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
   session_mod.register_buffer(session, 'prompt', buf)
+  local function set_lines(text)
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, text)
+    vim.bo[buf].modifiable = false
+  end
+  set_lines(lines)
 
   local win = vim.api.nvim_open_win(
     buf,
@@ -43,11 +46,20 @@ local function ask(session, lines, keys, cb)
     end
     cb(value)
   end
+  local function map(lhs, fn)
+    session_mod.map(session, 'n', lhs, fn, { buffer = buf, desc = 'prompt: ' .. lhs })
+  end
+  return win, set_lines, map, finish
+end
 
+--- Waits for one keypress among `keys` (`{ [lhs] = value }`); `<Esc>`/`q`
+--- decline with nil.
+local function ask(session, lines, keys, cb)
+  local _, _, map, finish = open(session, lines, cb)
   local function key(lhs, value)
-    session_mod.map(session, 'n', lhs, function()
+    map(lhs, function()
       finish(value)
-    end, { buffer = buf, desc = 'prompt: ' .. lhs })
+    end)
   end
   for lhs, value in pairs(keys) do
     key(lhs, value)
@@ -95,53 +107,15 @@ function M.checklist(session, title, rows, cb)
     return out
   end
   local text = lines()
-  local width = 20
-  for _, l in ipairs(text) do
-    width = math.max(width, vim.fn.strdisplaywidth(l) + 2)
-  end
-  width = math.min(width, vim.o.columns - 4)
-
-  local buf = session_mod.scratch_buf(session, 'prompt')
-  session_mod.register_buffer(session, 'prompt', buf)
-  local function render()
-    vim.bo[buf].modifiable = true
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines())
-    vim.bo[buf].modifiable = false
-  end
-  render()
-  local win = vim.api.nvim_open_win(
-    buf,
-    false,
-    require('diffy.layout').centered(width, #text, { style = 'minimal', border = 'rounded', zindex = 250 })
-  )
-  session_mod.unbind(win)
+  local win, set_lines, map, finish = open(session, text, cb)
   vim.wo[win].cursorline = true
-  vim.api.nvim_set_current_win(win)
   vim.api.nvim_win_set_cursor(win, { math.min(2, #text), 0 })
 
-  local done = false
-  local function finish(value)
-    if done then
-      return
-    end
-    done = true
-    session_mod.unmap_buffer(session, buf)
-    if vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
-    if vim.api.nvim_buf_is_valid(buf) then
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end
-    cb(value)
-  end
-  local function map(lhs, fn)
-    session_mod.map(session, 'n', lhs, fn, { buffer = buf, desc = 'checklist: ' .. lhs })
-  end
   map('x', function()
     local r = rows[vim.api.nvim_win_get_cursor(win)[1] - 1]
     if r and r.value ~= nil then
       excluded[r.value] = not excluded[r.value] or nil
-      render()
+      set_lines(lines())
     end
   end)
   for _, lhs in ipairs({ '<CR>', 'y' }) do

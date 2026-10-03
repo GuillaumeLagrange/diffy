@@ -45,7 +45,13 @@ local function wrap(text, width, out)
         table.insert(out, line)
         line = ''
       end
-      local head = vim.fn.strcharpart(word, 0, width)
+      -- `width` characters of wide text overflow `width` cells
+      local n = width
+      local head = vim.fn.strcharpart(word, 0, n)
+      while n > 1 and vim.fn.strdisplaywidth(head) > width do
+        n = n - 1
+        head = vim.fn.strcharpart(word, 0, n)
+      end
       table.insert(out, head)
       word = word:sub(#head + 1)
     end
@@ -92,10 +98,10 @@ local function pr_content(session, width)
   end
   local syncing = require('diffy.review.github').sync_status(session) == 'syncing'
   local read = l.offline and 'Offline: from the last read' or (l.read_at and ('Read %s'):format(ago(l.read_at)) or nil)
-  local state = syncing and ('Syncing…' .. (read and ('  ' .. read) or '')) or read
-  if state then
-    table.insert(lines, state)
-    table.insert(spans, { #lines - 1, 0, #state, 'DiffyThreadTime' })
+  local status = syncing and ('Syncing…' .. (read and ('  ' .. read) or '')) or read
+  if status then
+    table.insert(lines, status)
+    table.insert(spans, { #lines - 1, 0, #status, 'DiffyThreadTime' })
   end
   if l.sync_error then
     local msg = 'Sync failed: ' .. l.sync_error
@@ -195,12 +201,13 @@ local function config(session, lines_fn)
     room = math.min(MAX_WIDTH, vim.o.columns - 2)
     col = nil
   end
-  local lines, spans = lines_fn(math.max(10, math.min(MAX_WIDTH, room)))
+  room = math.max(10, math.min(MAX_WIDTH, room))
+  local lines, spans = lines_fn(room)
   local width = 1
   for _, l in ipairs(lines) do
     width = math.max(width, vim.fn.strdisplaywidth(l))
   end
-  width = math.min(width, math.max(10, math.min(MAX_WIDTH, room)))
+  width = math.min(width, room)
   local height = math.max(1, math.min(#lines, vim.o.lines - 2 - vim.o.cmdheight - 2))
   local srow = vim.fn.screenpos(log, vim.api.nvim_win_get_cursor(log)[1], 1).row
   local row = srow > 0 and srow - 1 or pos[1]
@@ -224,12 +231,7 @@ end
 function M.close(session)
   local st = state(session)
   st.row = nil
-  local win = session.wins.commitmsg
-  session_mod.unregister_window(session, 'commitmsg')
-  session.bufs.commitmsg = nil
-  if valid(win) then
-    pcall(vim.api.nvim_win_close, win, true)
-  end
+  session_mod.close_overlay(session, 'commitmsg')
 end
 
 local function draw(session, msg)
@@ -237,32 +239,13 @@ local function draw(session, msg)
   local cfg, lines, spans = config(session, function(w)
     return content(session, msg, w)
   end)
-  local win = session.wins.commitmsg
-  local buf = session.bufs.commitmsg
-  if not (valid(win) and buf and vim.api.nvim_buf_is_valid(buf)) then
-    buf = session_mod.scratch_buf(session, 'commitmsg')
-    session_mod.register_buffer(session, 'commitmsg', buf)
-  end
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
+  local buf = session_mod.overlay(session, 'commitmsg', cfg, lines, require('diffy.highlight').CARD_HL)
   local ns = session_mod.namespace(session, 'commitmsg')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for _, sp in ipairs(spans) do
     local line = #sp == 4 and sp[1] or 0
     local s = #sp == 4 and { sp[2], sp[3], sp[4] } or sp
     vim.api.nvim_buf_set_extmark(buf, ns, line, s[1], { end_col = math.min(s[2], #lines[line + 1]), hl_group = s[3] })
-  end
-  if valid(win) then
-    vim.api.nvim_win_set_config(win, cfg)
-  else
-    win = vim.api.nvim_open_win(buf, false, cfg)
-    session_mod.register_window(session, 'commitmsg', win, { transient = true })
-    -- opened from the log, never a diff window, but never bound either way
-    session_mod.unbind(win)
-    vim.wo[win].diff = false
-    vim.wo[win].winhighlight = require('diffy.highlight').CARD_HL
-    vim.wo[win].wrap = false
   end
   st.shown = msg
   run.ready({ session = session.id, event = 'commitmsg' })

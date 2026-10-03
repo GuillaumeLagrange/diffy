@@ -34,7 +34,7 @@ function M.load(path)
   local ok, data = pcall(function()
     return vim.json.decode(table.concat(vim.fn.readfile(path), '\n'), { luanil = { object = true, array = true } })
   end)
-  if not ok then
+  if not ok or type(data) ~= 'table' then
     return nil
   end
   return data

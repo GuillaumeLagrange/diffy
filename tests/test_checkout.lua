@@ -184,6 +184,18 @@ T['`X` to leave a checkout when git status fails shows the git error, staying ch
   ui.wait_ready(child)
 end
 
+T['quitting nvim during a checkout returns to the original branch'] = function()
+  checkout_c2()
+  MiniTest.expect.equality(head(), repo.sha.C2)
+
+  child.stop()
+
+  MiniTest.expect.equality(on_branch(), 'feat')
+  MiniTest.expect.equality(vim.fn.filereadable(state_file()), 0)
+  child.restart({ '-u', 'tests/minimal_init.lua' })
+  snapshot = leak.snapshot(child)
+end
+
 T['nvim killed during a checkout: the next :Diffy warns, and :Diffy restore returns to the branch'] = function()
   checkout_c2()
   MiniTest.expect.equality(vim.fn.filereadable(state_file()), 1)

@@ -175,6 +175,11 @@ T['HTML line breaks, lists and entities become markdown lines and characters'] =
   eq(res.lines, { 'one', 'two', '<tag> &lt; ✓ ©', '', '- a', '- _b_' })
 end
 
+T['out-of-range numeric entities stay as written; inline HTML code keeps its backticks'] = function()
+  local res = body({ '&#99999999999; &#0; ok', 'x <code>a`b</code> y' })
+  eq(res.lines, { '&#99999999999; &#0; ok', 'x ``a`b`` y' })
+end
+
 T['details nest as folds; one without a summary is titled Details, an open one starts open'] = function()
   local res = body({
     '<details>',

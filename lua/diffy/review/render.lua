@@ -32,7 +32,7 @@ local function decode(s)
     s:gsub('&(#?)([xX]?)(%w+);', function(hash, x, name)
       if hash == '#' then
         local n = tonumber(name, x ~= '' and 16 or 10)
-        return n and vim.fn.nr2char(n) or nil
+        return n and n > 0 and n <= 0x10FFFF and vim.fn.nr2char(n) or nil
       end
       return ENTITIES[name]
     end)
@@ -66,7 +66,12 @@ local function tokenize(s, tokens)
     return OPEN .. #tokens .. CLOSE
   end
   s = s:gsub('<code>(.-)</code>', function(c)
-    return '`' .. decode(c) .. '`'
+    c = decode(c)
+    local ticks = '`'
+    for run in c:gmatch('`+') do
+      ticks = #run >= #ticks and ('`'):rep(#run + 1) or ticks
+    end
+    return ticks .. c .. ticks
   end)
   s = s:gsub('(`+)(.-)%1', function(ticks, c)
     return token({ text = ticks .. c .. ticks })
@@ -319,7 +324,6 @@ function M.body(body)
   local out = {} -- rendered line objects
   local res = { links = {}, marks = {}, images = {}, folds = {}, code = {}, labels = {} }
   local fence, stack, pending_title = nil, {}, false
-  local tables = {}
   local function emit(line, verbatim)
     line.verbatim = verbatim
     table.insert(out, line)
@@ -505,7 +509,10 @@ function M.add(buf, res, row, col)
 end
 
 function M.reset(buf)
-  by_buf[buf] = nil
+  local s = by_buf[buf]
+  if s then
+    s.links, s.folds, s.images = {}, {}, {}
+  end
 end
 
 --- The images of `buf` (`{row, col, end_col, url}`, 0-based).

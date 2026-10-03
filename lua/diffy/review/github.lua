@@ -10,6 +10,7 @@ local parse = require('diffy.git.parse')
 local drafts = require('diffy.review.drafts')
 local track = require('diffy.review.track')
 local prompt = require('diffy.prompt')
+local selection = require('diffy.selection')
 
 local M = {}
 
@@ -77,11 +78,11 @@ function M.transport(query, variables, cb)
 end
 
 --- `gh pr view <branch>`: the PR gh finds for the branch (its upstream,
---- forks included). `cb(pr, err)`; `pr = { number, url, state, baseRefName,
---- headRefOid }`, both nil when the branch has no PR. Tests replace this
---- field along with `M.transport`.
+--- forks included). `cb(pr, err)`; `pr = { number, title, url, state,
+--- baseRefName, headRefOid }`, both nil when the branch has no PR. Tests
+--- replace this field along with `M.transport`.
 function M.pr_view(root, branch, cb)
-  local cmd = { 'gh', 'pr', 'view', branch, '--json', 'number,url,state,baseRefName,headRefOid' }
+  local cmd = { 'gh', 'pr', 'view', branch, '--json', 'number,title,url,state,baseRefName,headRefOid' }
   local ok, err = pcall(run.run, cmd, {
     cwd = root,
     notify_on_error = false,
@@ -200,9 +201,23 @@ local function chain(steps, cb)
   go(true)
 end
 
+--- `fn(item, next)` on each of `list` in turn, then `done()`.
+local function each(list, fn, done)
+  local i = 0
+  local function step()
+    i = i + 1
+    if i > #list then
+      done()
+      return
+    end
+    fn(list[i], step)
+  end
+  step()
+end
+
 --- Everything the layer reads about PR `number` of `owner/name`.
 --- `cb(read, err)`, `read = { pr = meta, nodes = raw reviewThreads nodes }`.
-function M.fetch(owner, name, number, cb)
+local function fetch(owner, name, number, cb)
   local vars = { o = owner, r = name, n = number }
   M.transport(READ_QUERY, vim.tbl_extend('force', vars, { k = M.page_size }), function(data, err)
     local pr = data and data.repository and data.repository.pullRequest
@@ -406,7 +421,7 @@ function M.visible_in(session, thread)
   end
   for _, e in ipairs(session.entries) do
     if e.kind == 'commit' and not e.merge then
-      if track.place(session, thread, { left = e.sha .. '^', right = e.sha }) then
+      if track.place(session, thread, { left = selection.parent(e), right = e.sha }) then
         table.insert(out, e.sha:sub(1, 7))
       end
     end
@@ -462,24 +477,26 @@ local function measure(session, cb)
   local function git(args, on_exit)
     run.git(args, { cwd = session.root, session = session, notify_on_error = false, on_exit = on_exit })
   end
-  local commits = {}
+  local reach, commits = {}, {}
   for _, rv in ipairs(pr.reviews or {}) do
-    if rv.commit and not vim.tbl_contains(commits, rv.commit) then
+    if rv.commit and reach[rv.commit] == nil then
+      reach[rv.commit] = false
       table.insert(commits, rv.commit)
     end
   end
-  local reach = {}
-  local i = 0
-  local function next_reach()
-    i = i + 1
-    if i > #commits then
+  -- independent reads: all at once, `cb` after the last
+  local left = #commits + 1
+  local function settle()
+    left = left - 1
+    if left == 0 then
       l.reach = reach
       cb()
-      return
     end
-    git({ 'merge-base', '--is-ancestor', commits[i], session.branch }, function(res)
-      reach[commits[i]] = res.code == 0
-      next_reach()
+  end
+  for _, sha in ipairs(commits) do
+    git({ 'merge-base', '--is-ancestor', sha, session.branch }, function(res)
+      reach[sha] = res.code == 0
+      settle()
     end)
   end
   git({ 'rev-list', '--left-right', '--count', pr.head_sha .. '...' .. session.branch }, function(res)
@@ -499,7 +516,7 @@ local function measure(session, cb)
         l.standing = nil
       end
     end
-    next_reach()
+    settle()
   end)
 end
 
@@ -523,10 +540,39 @@ local function redraw_row(session)
   end
 end
 
+--- ms between two frames of the loading PR row's spinner
+local SPIN_INTERVAL = 100
+
+--- Show the loading PR row (`l.loading`) until the read finishes: the PR
+--- exists, its read hasn't come back yet.
+local function start_loading(session, info)
+  local l = session.layer
+  l.loading = { number = info.number, title = info.title, frame = 0 }
+  l.spin_timer = l.spin_timer or vim.uv.new_timer()
+  l.spin_timer:start(SPIN_INTERVAL, SPIN_INTERVAL, vim.schedule_wrap(function()
+    if l.loading and not session.closed then
+      l.loading.frame = l.loading.frame + 1
+      redraw_row(session)
+    end
+  end))
+  if not session.closed and session.entries then
+    require('diffy.panels.log').apply_layer(session)
+  end
+end
+
 local function finish_read(session)
   local l = session.layer
   l.reading = false
-  redraw_row(session)
+  if l.loading then
+    l.loading = nil
+    l.spin_timer:stop()
+  end
+  -- an attach already replaced the loading row; without one it goes here
+  if not l.attached and session.entries and session.entries[1] and session.entries[1].loading then
+    require('diffy.panels.log').apply_layer(session)
+  else
+    redraw_row(session)
+  end
   l.read_at = vim.uv.now()
   if l.queued then
     l.queued = false
@@ -548,6 +594,24 @@ local function redraw(session, cb)
     require('diffy.review.ui').decorate(session)
     cb()
   end)
+end
+
+--- GitHub ids of your mirrored drafts, and of those you deleted that GitHub
+--- still has: the store shows them, not the read.
+local function mirrored_ids(session)
+  local data = drafts.load(session)
+  local out = {}
+  for _, t in ipairs(data.threads) do
+    for _, c in ipairs(t.comments) do
+      if c.gh and c.state ~= 'published' then
+        out[c.gh.id] = true
+      end
+    end
+  end
+  for _, d in ipairs(data.mirror.deleted) do
+    out[d.id] = true
+  end
+  return out
 end
 
 --- Attach (or refresh) the layer from `cache`: the PR row, markers and the
@@ -577,7 +641,7 @@ local function attach(session, cache, offline, cb)
         l.repo = repo_of(cache.pr)
         local threads = {}
         local pending_id = cache.pr.pending and cache.pr.pending.id
-        local mine = M.mirrored_ids(session)
+        local mine = mirrored_ids(session)
         for _, n in ipairs(cache.nodes or {}) do
           local t = n.comments.nodes[1] and build_thread(n, exists, pending_id, mine)
           if t then
@@ -670,7 +734,10 @@ function M.read(session, cb)
       detach(session, true, done)
       return
     end
-    M.fetch(where.owner, where.name, where.number, function(read, rerr)
+    if not l.attached then
+      start_loading(session, info)
+    end
+    fetch(where.owner, where.name, where.number, function(read, rerr)
       if session.closed then
         return
       end
@@ -738,7 +805,7 @@ end
 --- Teardown: stop the timers.
 function M.stop(session)
   local l = session.layer or {}
-  for _, timer in pairs({ read = l.timer, sync = l.sync_timer }) do
+  for _, timer in pairs({ read = l.timer, sync = l.sync_timer, spin = l.spin_timer }) do
     if not timer:is_closing() then
       timer:stop()
       timer:close()
@@ -802,20 +869,6 @@ local function emptied(data)
   return r ~= nil and r.comments ~= nil and r.comments.totalCount == 0
 end
 
---- `fn(item, next)` on each of `list` in turn, then `done()`.
-local function each(list, fn, done)
-  local i = 0
-  local function step()
-    i = i + 1
-    if i > #list then
-      done()
-      return
-    end
-    fn(list[i], step)
-  end
-  step()
-end
-
 local function first_line(body)
   return vim.split(body or '', '\n', { plain = true })[1]
 end
@@ -848,24 +901,6 @@ end
 local function repo_vars(session)
   local r = session.layer.repo
   return { o = r.owner, r = r.name, n = r.number }
-end
-
---- GitHub ids of your mirrored drafts, and of those you deleted that GitHub
---- still has: the store shows them, not the read.
-function M.mirrored_ids(session)
-  local data = drafts.load(session)
-  local out = {}
-  for _, t in ipairs(data.threads) do
-    for _, c in ipairs(t.comments) do
-      if c.gh and c.state ~= 'published' then
-        out[c.gh.id] = true
-      end
-    end
-  end
-  for _, d in ipairs(data.mirror.deleted) do
-    out[d.id] = true
-  end
-  return out
 end
 
 --- The github.com version of `c` (stored at index `j` of `t`), next to it.
@@ -1118,22 +1153,23 @@ local function sync_state(session)
   return syncs[p]
 end
 
-local git_cb = function(session, args, cb)
-  run.git(args, { cwd = session.root, session = session, notify_on_error = false, on_exit = cb })
+-- No `session` for `run.git`: a sync outlives its session, or its branch's
+-- sync slot stays taken and nothing mirrors again in this nvim.
+local function git_cb(root, args, cb)
+  run.git(args, { cwd = root, notify_on_error = false, on_exit = cb })
 end
 
-local function raw_diff(root, extra_args, x, y, cb)
-  local args = { 'diff', '-M' }
-  vim.list_extend(args, extra_args)
-  table.insert(args, x)
-  table.insert(args, y)
-  run.git(args, {
-    cwd = root,
-    notify_on_error = false,
-    on_exit = function(res)
-      cb(res.code == 0 and (res.stdout or '') or '')
-    end,
-  })
+--- `git diff -M <context> x y`, run once per sync (`ctx.raw`).
+local function raw_diff(ctx, context, x, y, cb)
+  local key = ('%s %s %s'):format(context, x, y)
+  if ctx.raw[key] then
+    cb(ctx.raw[key])
+    return
+  end
+  git_cb(ctx.session.root, { 'diff', '-M', context, x, y }, function(res)
+    ctx.raw[key] = res.code == 0 and (res.stdout or '') or ''
+    cb(ctx.raw[key])
+  end)
 end
 
 --- The raw lines of one file's section of a multi-file unified diff (from
@@ -1165,7 +1201,7 @@ local function mb_files(ctx, c, cb)
     cb(ctx.diffs[c])
     return
   end
-  raw_diff(ctx.session.root, { '-U0' }, ctx.mb, c, function(raw)
+  raw_diff(ctx, '-U0', ctx.mb, c, function(raw)
     ctx.diffs[c] = model.parse_diff_files(raw)
     cb(ctx.diffs[c])
   end)
@@ -1177,7 +1213,7 @@ local function head_path(ctx, path, cb)
     cb(ctx.renames[path] or path)
     return
   end
-  git_cb(ctx.session, { 'diff', '-z', '-M', '--name-status', ctx.mb, ctx.head }, function(res)
+  git_cb(ctx.session.root, { 'diff', '-z', '-M', '--name-status', ctx.mb, ctx.head }, function(res)
     ctx.renames = {}
     if res.code == 0 then
       for _, rec in ipairs(parse.name_status(res.stdout or '')) do
@@ -1213,9 +1249,18 @@ local function place_root(ctx, t, cb)
     -- the full view's left side is the merge-base itself
     c = c == ctx.mb and ctx.head or (c:match('^(.+)%^$') or c)
   end
-  local root = ctx.session.root
-  git_cb(ctx.session, { 'merge-base', '--is-ancestor', c, ctx.head }, function(res)
-    if res.code == 1 then
+  local function pushed(on_known)
+    if ctx.pushed[c] ~= nil then
+      on_known(ctx.pushed[c])
+      return
+    end
+    git_cb(ctx.session.root, { 'merge-base', '--is-ancestor', c, ctx.head }, function(res)
+      ctx.pushed[c] = res.code ~= 1
+      on_known(ctx.pushed[c])
+    end)
+  end
+  pushed(function(is_pushed)
+    if not is_pushed then
       cb(nil, 'unpushed')
       return
     end
@@ -1233,7 +1278,7 @@ local function place_root(ctx, t, cb)
             return
           end
           if s == e then
-            raw_diff(root, { '-U3' }, ctx.mb, c, function(raw)
+            raw_diff(ctx, '-U3', ctx.mb, c, function(raw)
               local section = slice_file_section(raw, a.path)
               local pos = section and model.diff_position(section, e, a.side)
               if pos then
@@ -1259,7 +1304,7 @@ local function place_root(ctx, t, cb)
             at_head(s, e)
             return
           end
-          raw_diff(root, { '-U0' }, c, ctx.head, function(traw)
+          raw_diff(ctx, '-U0', c, ctx.head, function(traw)
             local _, th = model.diff_file_hunks(model.parse_diff_files(traw), a.path)
             at_head(model.map_range(th, s, e))
           end)
@@ -1267,7 +1312,7 @@ local function place_root(ctx, t, cb)
       end)
     end
     if old and not a.base_relative then
-      raw_diff(root, { '-U0' }, a.commit, ctx.mb, function(traw)
+      raw_diff(ctx, '-U0', a.commit, ctx.mb, function(traw)
         local mb_name, th = model.diff_file_hunks(model.parse_diff_files(traw), a.path)
         local s, e = model.map_range(th, a.start_line, a.end_line)
         if not s then
@@ -1298,6 +1343,27 @@ local function forget_review(session, id)
       return false
     end
     data.mirror.review = nil
+  end)
+end
+
+--- Take stored comment `c` out of the pending review. `cb(err)`: nil once
+--- it's gone from GitHub.
+local function unmirror(session, c, cb)
+  M.transport(MUTATIONS.delete, { id = c.gh.id }, function(data, err)
+    if not (data or is_not_found(err)) then
+      cb(err)
+      return
+    end
+    write(session, function(d)
+      local _, sc = find_comment(d.threads, c.id)
+      if sc then
+        sc.gh = nil
+      end
+      if emptied(data) then
+        d.mirror.review = nil
+      end
+    end)
+    cb(nil)
   end)
 end
 
@@ -1469,9 +1535,7 @@ local function sync_deleted(ctx, nx)
         next()
       end)
     end)
-  end, function()
-    nx(true)
-  end)
+  end, nx)
 end
 
 --- Drafts sent to the agent leave the pending review: each comment has one
@@ -1486,23 +1550,8 @@ local function sync_sent(ctx, nx)
     end
   end
   each(list, function(c, next)
-    M.transport(MUTATIONS.delete, { id = c.gh.id }, function(data, err)
-      if data or is_not_found(err) then
-        write(ctx.session, function(d)
-          local _, sc = find_comment(d.threads, c.id)
-          if sc then
-            sc.gh = nil
-          end
-          if emptied(data) then
-            d.mirror.review = nil
-          end
-        end)
-      end
-      next()
-    end)
-  end, function()
-    nx(true)
-  end)
+    unmirror(ctx.session, c, next)
+  end, nx)
 end
 
 --- Drafts edited since they were mirrored: re-read first; changed on
@@ -1558,13 +1607,13 @@ local function sync_edits(ctx, nx)
           store_gh({ id = x.id, body = it.body, updated_at = x.updatedAt })
         elseif is_not_found(uerr) then
           store_gh(nil)
+        else
+          fail(ctx.notes, ("couldn't update a mirrored draft: %s"):format(tostring(uerr)))
         end
         next()
       end)
     end)
-  end, function()
-    nx(true)
-  end)
+  end, nx)
 end
 
 --- Drafts not mirrored yet: new threads where GitHub can take them, replies
@@ -1608,9 +1657,7 @@ local function sync_new(ctx, nx)
       end
       send(ctx, it, target, next)
     end)
-  end, function()
-    nx(true)
-  end)
+  end, nx)
 end
 
 --- Apply staged changes to published comments and threads, re-reading each
@@ -1627,11 +1674,7 @@ local function apply_staged(session, list, notes, cb)
       end
       local r, ri
       if item.comment_id then
-        for j, c in ipairs(t.comments) do
-          if c.id == item.comment_id then
-            r, ri = c, j
-          end
-        end
+        r, ri = select(2, find_comment({ t }, item.comment_id))
         if not r then
           return false
         end
@@ -1666,12 +1709,7 @@ local function apply_staged(session, list, notes, cb)
     M.transport(Q.comment, { id = item.comment_id }, function(data, err)
       local node = data and data.node
       local record = drafts.find(drafts.load(session).threads, item.thread_id)
-      local r
-      for _, c in ipairs(record and record.comments or {}) do
-        if c.id == item.comment_id then
-          r = c
-        end
-      end
+      local r = record and select(2, find_comment({ record }, item.comment_id))
       if not r then
         next()
         return
@@ -1721,7 +1759,7 @@ local function apply_staged(session, list, notes, cb)
           end
         end)
         if not res then
-          table.insert(notes, ("couldn't apply a staged change, staged for the next sync: %s"):format(tostring(merr)))
+          fail(notes, ("couldn't apply a staged change, staged for the next sync: %s"):format(tostring(merr)))
         end
         next()
       end)
@@ -1742,9 +1780,7 @@ local function sync_retry(ctx, nx)
       table.insert(resolves, { kind = t.resolve_staged, thread_id = t.id })
     end
   end
-  apply_staged(ctx.session, vim.list_extend(changes, resolves), ctx.notes, function()
-    nx(true)
-  end)
+  apply_staged(ctx.session, vim.list_extend(changes, resolves), ctx.notes, nx)
 end
 
 local function run_sync(session, done)
@@ -1755,25 +1791,16 @@ local function run_sync(session, done)
     mb = session.review.merge_base,
     head = l.cache.pr.head_sha,
     diffs = {},
+    raw = {},
+    pushed = {},
     notes = {},
   }
-  chain({
-    function(nx)
-      sync_deleted(ctx, nx)
-    end,
-    function(nx)
-      sync_sent(ctx, nx)
-    end,
-    function(nx)
-      sync_edits(ctx, nx)
-    end,
-    function(nx)
-      sync_new(ctx, nx)
-    end,
-    function(nx)
-      sync_retry(ctx, nx)
-    end,
-  }, function()
+  local steps = vim.tbl_map(function(step)
+    return function(nx)
+      step(ctx, nx)
+    end
+  end, { sync_deleted, sync_sent, sync_edits, sync_new, sync_retry })
+  chain(steps, function()
     local function finish()
       for _, n in ipairs(ctx.notes) do
         warn(n)
@@ -2000,26 +2027,15 @@ local function execute(session, plan, excluded, event, body, cb)
       table.insert(resolves, staged)
     end
   end
-  local review_id = drafts.load(session).mirror.review
   each(kept_drafts, function(c, next)
-    M.transport(MUTATIONS.delete, { id = c.gh.id }, function(data, err)
-      if data or is_not_found(err) then
-        write(session, function(d)
-          local _, sc = find_comment(d.threads, c.id)
-          if sc then
-            sc.gh = nil
-          end
-          if emptied(data) then
-            d.mirror.review = nil
-          end
-        end)
-      else
+    unmirror(session, c, function(err)
+      if err then
         table.insert(notes, ("couldn't leave a draft out: %s"):format(tostring(err)))
       end
       next()
     end)
   end, function()
-    review_id = drafts.load(session).mirror.review
+    local review_id = drafts.load(session).mirror.review
     local function staged_changes()
       apply_staged(session, changes, notes, function()
         apply_staged(session, resolves, notes, function()

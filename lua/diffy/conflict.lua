@@ -41,11 +41,7 @@ end
 --- `result` spans the full width.
 local function enter_layout(session)
   local ours_win = session.wins.left
-  local right_win = session.wins.right
-  session_mod.unregister_window(session, 'right')
-  if right_win and vim.api.nvim_win_is_valid(right_win) then
-    pcall(vim.api.nvim_win_close, right_win, true)
-  end
+  session_mod.close_window(session, 'right')
   session.wins.left = nil
 
   open_pane(session, 'result', ours_win, 'below')
@@ -61,15 +57,12 @@ end
 --- surviving "ours" window (renamed back to "left") - the normal
 --- 2-window diff area, ready for `diffpair.show`.
 function M.leave(session)
+  session.conflict_seq = (session.conflict_seq or 0) + 1
   if not session.conflict_active then
     return
   end
   for _, key in ipairs({ 'base', 'theirs', 'result' }) do
-    local win = session.wins[key]
-    session_mod.unregister_window(session, key)
-    if win and vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
+    session_mod.close_window(session, key)
   end
   if session.real_bufs then
     local real = session.real_bufs.result
@@ -223,12 +216,17 @@ end
 --- the layout on first entry; a later call while already active just
 --- swaps the four panes' content.
 function M.enter(session, path, opts)
+  -- a later enter/leave supersedes this one: its result must not land after
+  session.conflict_seq = (session.conflict_seq or 0) + 1
+  local seq = session.conflict_seq
   run.git({ 'ls-files', '-u', '-z', '--', path }, {
     cwd = session.root,
     session = session,
     on_exit = function(res)
-      local unmerged = parse.ls_files_unmerged(res.stdout or '')
-      local stages = unmerged[path] or {}
+      if session.conflict_seq ~= seq then
+        return
+      end
+      local stages = parse.ls_files_unmerged(res.stdout or '')[path] or {}
       if not session.conflict_active then
         enter_layout(session)
       end
@@ -360,10 +358,10 @@ local function setup_conflicts_tree(session)
     local abspath = session.root .. '/' .. p
     if session.prev_tab and vim.api.nvim_tabpage_is_valid(session.prev_tab) then
       vim.api.nvim_set_current_tabpage(session.prev_tab)
+      vim.cmd('edit ' .. vim.fn.fnameescape(abspath))
     else
-      vim.cmd('tabnew')
+      vim.cmd('tabedit ' .. vim.fn.fnameescape(abspath))
     end
-    vim.cmd('edit ' .. vim.fn.fnameescape(abspath))
   end, { buffer = buf, desc = 'open real file' })
   require('diffy.layout').map_panel_keys(session, buf)
 end

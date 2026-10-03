@@ -80,9 +80,9 @@ local VERDICTS = {
   { event = 'REQUEST_CHANGES', arg = 'request_changes', key = 'r', label = 'request changes', title = 'Request changes' },
 }
 
---- The VERDICTS entries GitHub offers in session `s`.
-local function offered_verdicts(s, github)
-  local events = github.verdicts(s)
+--- The VERDICTS entries `backend` offers in session `s`.
+local function offered_verdicts(s, backend)
+  local events = backend.verdicts(s)
   return vim.tbl_filter(function(v)
     return vim.tbl_contains(events, v.event)
   end, VERDICTS)
@@ -176,7 +176,7 @@ function M.dispatch.review(args)
   local ui = require('diffy.review.ui')
   local review = ui.ensure(s)
   if not review then
-    vim.notify('diffy: review is only available in :Diffy and :Diffy branch', vim.log.levels.WARN)
+    vim.notify('diffy: review is only available in :Diffy, :Diffy branch and :Diffy pr', vim.log.levels.WARN)
     return
   end
   local sub = args[1]
@@ -289,7 +289,8 @@ function M.build(s, done)
   local selection = require('diffy.selection')
   local github = require('diffy.review.github')
 
-  local function build()
+  -- `head_sha`: HEAD when the caller has just read it
+  local function build(head_sha)
     local range = s.range
     if range.kind == 'branch' and not range.base and not range.pr_base and github.enabled(s) then
       local cache = github.load_cache(s.gitdir, s.branch)
@@ -310,38 +311,53 @@ function M.build(s, done)
           vim.notify('diffy: nothing to show for this selection', vim.log.levels.WARN)
           return
         end
-        repo.head_sha(s.root, function(head_sha)
+        -- HEAD and the status in parallel, joined
+        local pending, status_entries = head_sha and 1 or 2, nil
+        local function joined()
+          pending = pending - 1
+          if pending > 0 then
+            return
+          end
+          s.status_entries = status_entries or {}
+          s.pair = selection.resolve(s.entries, s.sel.top, s.sel.bottom)
+          if not s.setup_done then
+            log_panel.setup(s)
+            tree_panel.setup(s)
+            require('diffy.navigation').setup(s)
+            require('diffy.diffpair').track_edits(s)
+            require('diffy.diffpair').keep_bound_cursor_visible(s)
+            s.setup_done = true
+          end
+          local function finish()
+            require('diffy.layout').relayout(s)
+            log_panel.render(s)
+            tree_panel.render(s, function()
+              run.ready({ session = s.id, event = 'render' })
+              if done then
+                done()
+              end
+              -- the first render doesn't wait on GitHub
+              github.start(s)
+            end)
+          end
+          local review = require('diffy.review.ui').ensure(s)
+          -- what the agent resolved in review.md since the last build
+          if review and review.backend.sync then
+            review.backend.sync(s)
+          end
+          require('diffy.review.track').prepare(s, finish, { fresh = true })
+        end
+        if head_sha then
           s.head_sha = head_sha
-          repo.status(s.root, function(status_entries)
-            s.status_entries = status_entries or {}
-            s.pair = selection.resolve(s.entries, s.sel.top, s.sel.bottom)
-            if not s.setup_done then
-              log_panel.setup(s)
-              tree_panel.setup(s)
-              require('diffy.navigation').setup(s)
-              require('diffy.diffpair').track_edits(s)
-              require('diffy.diffpair').keep_bound_cursor_visible(s)
-              s.setup_done = true
-            end
-            local function finish()
-              require('diffy.layout').relayout(s)
-              log_panel.render(s)
-              tree_panel.render(s, function()
-                run.ready({ session = s.id, event = 'render' })
-                if done then
-                  done()
-                end
-                -- the first render doesn't wait on GitHub
-                github.start(s)
-              end)
-            end
-            local review = require('diffy.review.ui').ensure(s)
-            -- what the agent resolved in review.md since the last build
-            if review and review.backend.sync then
-              review.backend.sync(s)
-            end
-            require('diffy.review.track').prepare(s, finish, { fresh = true })
+        else
+          repo.head_sha(s.root, function(sha)
+            s.head_sha = sha
+            joined()
           end, s)
+        end
+        repo.status(s.root, function(entries)
+          status_entries = entries
+          joined()
         end, s)
       end)
     end, s)
@@ -355,7 +371,7 @@ function M.build(s, done)
     s.head_sha = head_sha
     -- what the session's stores are keyed by; read once, since checkout mode detaches HEAD
     s.branch = require('diffy.review.local').branch(s)
-    build()
+    build(head_sha)
   end, s)
 end
 
@@ -482,16 +498,6 @@ function M.dispatch.conflicts()
   require('diffy.conflict').start()
 end
 
---- Bare `:Diffy`. Ranges (`A..B`) are routed by `M.command` before this, so
---- any argument here is unrecognized.
-function M.open(args)
-  if args and args[1] then
-    vim.notify(('diffy: unrecognized argument `%s`'):format(args[1]), vim.log.levels.WARN)
-    return
-  end
-  M.start({ kind = 'default' })
-end
-
 --- Entry point for the `:Diffy` command; `fargs` is the user command's
 --- `opts.fargs`.
 function M.command(fargs)
@@ -502,9 +508,11 @@ function M.command(fargs)
   end
   if sub and sub:find('..', 1, true) then
     M.start({ kind = 'range', expr = sub })
-    return
+  elseif sub then
+    vim.notify(('diffy: unrecognized argument `%s`'):format(sub), vim.log.levels.WARN)
+  else
+    M.start({ kind = 'default' })
   end
-  M.open(fargs)
 end
 
 local THREAD_STATES = { 'open', 'resolved', 'outdated', 'detached' }
@@ -544,14 +552,9 @@ local function candidates(words, arg_lead)
       if backend and type(backend.verdicts) ~= 'function' then
         return {}
       end
-      local events = backend and backend.verdicts(s) or {}
-      local out = {}
-      for _, v in ipairs(VERDICTS) do
-        if not backend or vim.tbl_contains(events, v.event) then
-          table.insert(out, v.arg)
-        end
-      end
-      return out
+      return vim.tbl_map(function(v)
+        return v.arg
+      end, backend and offered_verdicts(s, backend) or VERDICTS)
     end
   elseif sub == 'threads' then
     local key = arg_lead:match('^(%a+)=')

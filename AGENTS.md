@@ -23,12 +23,12 @@ lua/diffy/
   init.lua              setup/config, :Diffy dispatch + completion, M.start (open a session) / M.build (render pipeline),
                         M.debug_state (plain-data snapshot of sessions + recent commands, for bug reports),
                         :Diffy feedback (modal -> `User DiffyFeedback`)
-  session.lua           one session per tab: registry, augroup, namespaces, keymap tracking, teardown
+  session.lua           one session per tab: registry, augroup, namespaces, keymap tracking, overlay floats, teardown
   layout.lua            views (tree, log, threads) and where they're shown: the left column, floats
   git/run.lua           every git/gh subprocess (vim.system), error notify, DiffyReady, M.recent (last 50)
-  git/parse.lua         pure parsers for git's -z formats (log, name-status, raw, numstat, status v2, ls-files -u)
+  git/parse.lua         pure parsers for git's -z formats (log, name-status, raw+numstat, status v2, ls-files -u)
   git/repo.lua          root, merge-base, base resolution, status, default range, diff args
-  selection.lua         log selection -> (left rev, right rev); the real-file rule
+  selection.lua         log selection -> (left rev, right rev), a commit's parent rev; the real-file rule
   panels/stack.lua      the tree and the log sharing one column window/buffer: row ranges, rule, gap, peek
                         floats over the edges, per-row key dispatch, `]]`/`[[`
   panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), the GitHub layer's
@@ -69,7 +69,8 @@ Conventions the code relies on:
   `delete`, so jumplist/tag stack entries pointing at them survive); every buffer-local
   map through `session.map` (desc prefixed `diffy: `, removed on teardown or when a real file leaves a diffy
   window); every namespace through `session.namespace`. Window options are only set inside the session tab.
-  `teardown` is idempotent and runs from every close path.
+  A non-focusable float laid over other windows (peeks, the tree's hover, the commit message) goes through
+  `session.overlay`, which unbinds it from the diff. `teardown` is idempotent and runs from every close path.
 - **Views.** The file tree, the commit log and the threads list are views (`layout.lua`): a buffer at
   `session.bufs[name]`, shown at `session.wins[name]` in whichever host holds it, the left column
   (`session.column`, from `config.column`) or a float over the diff area. A view module exports `view`
@@ -113,10 +114,12 @@ Conventions the code relies on:
 - **The background sync.** Every change through `drafts.update` (except the sync's own, `{ sync = true }`)
   schedules `github.mirror` `github.sync_delay` ms later in the nvim that made it; every successful read
   runs `github.reconcile` (the read against the store) then a sync, and so does a rebuild. One sync at a
-  time per branch store in an nvim (`syncs[path]`), held during a submit or a clear. A mirrored draft is a
-  `draft` with `gh = { id, body, updated_at }`; the read's copy of it is hidden (`mirrored_ids`), so the
-  store is what shows. Deleting a mirrored draft leaves a tombstone in `mirror.deleted` for the sync. A
-  published comment is stored only with a staged change (`staged_body`/`staged_delete`, `edited_at`);
+  time per branch store in an nvim (`syncs[path]`), held during a submit or a clear. The sync's git calls
+  don't pass `opts.session`: a sync started by a session that closes still finishes and releases
+  `syncs[path]`. A mirrored draft is a `draft` with `gh = { id, body, updated_at }`; the read's copy of it
+  is hidden (`mirrored_ids`), so the store is what shows. Deleting a mirrored draft leaves a tombstone in
+  `mirror.deleted` for the sync. A published comment is stored only with a staged change
+  (`staged_body`/`staged_delete`, `edited_at`);
   `drafts.apply` lays it over the live comment. GitHub ids of threads: `github = true` stored threads are
   published GitHub threads (their id is GitHub's), `gh_thread` the GitHub thread a draft thread became,
   valid while its first comment is mirrored.

@@ -131,4 +131,18 @@ T['diff_position for a single-hunk and a multi-hunk file (position = 1-based dif
   r:destroy()
 end
 
+T['diff_position skips "No newline at end of file" markers when counting lines'] = function()
+  local diff_lines = {
+    '@@ -1,2 +1,3 @@',
+    ' a',
+    '-b',
+    '\\ No newline at end of file',
+    '+b',
+    '+c',
+  }
+  MiniTest.expect.equality(model.diff_position(diff_lines, 2), 4)
+  MiniTest.expect.equality(model.diff_position(diff_lines, 3), 5)
+  MiniTest.expect.equality(model.diff_position(diff_lines, 2, 'old'), 2)
+end
+
 return T

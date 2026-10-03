@@ -384,7 +384,7 @@ function M.thread_float(child)
       local cfg = vim.api.nvim_win_get_config(w)
       local buf = vim.api.nvim_win_get_buf(w)
       if cfg.relative ~= '' and vim.api.nvim_buf_get_name(buf):find('/thread/', 1, true) then
-        local pre, post, below = {}, {}, {}
+        local pre, post, above, below = {}, {}, {}, {}
         for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })) do
           local row, d = m[2] + 1, m[4]
           if d.virt_text_pos == 'inline' then
@@ -393,11 +393,14 @@ function M.thread_float(child)
             post[row] = join(d.virt_text)
           end
           if d.virt_lines then
-            below[row] = vim.tbl_map(join, d.virt_lines)
+            (d.virt_lines_above and above or below)[row] = vim.tbl_map(join, d.virt_lines)
           end
         end
         local text = {}
         for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+          for _, v in ipairs(above[i] or {}) do
+            text[#text + 1] = vim.trim(v)
+          end
           text[#text + 1] = vim.trim((pre[i] or '') .. l .. (post[i] and '  ' .. post[i] or ''))
           for _, v in ipairs(below[i] or {}) do
             text[#text + 1] = vim.trim(v)

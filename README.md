@@ -126,9 +126,10 @@ syncing, when GitHub was last read, why the last sync failed if it did; then the
 reviewer's state (`alice ✗ changes
 requested`, `bob ✓ approved`), every review with its
 commit (`not in this log` or `no longer in the branch` for a commit the log doesn't list) and the
-conversation. Each submitted review on a commit the log lists also shows as a dim row right above that
-commit: `── alice ✗ 4 threads`. `J`/`K`, `a` and ranges skip both kinds of rows; `<CR>` on a review row
-selects everything above it, what changed since that review. `<CR>` on the PR row selects the whole PR:
+conversation. A commit the log lists that has submitted reviews gets one dim row right above it: one
+review shows its author and state (`── alice ✗ 4 threads`), several are summed up with their states and
+the threads they started (`── 3 reviews ✗○ 4 threads`). `J`/`K`, `a` and ranges skip both kinds of rows;
+`<CR>` on a review row selects everything above it, what changed since those reviews. `<CR>` on the PR row selects the whole PR:
 everything in `:Diffy branch`; in `:Diffy`, the session becomes `:Diffy branch` on the PR's base (leaving
 checkout mode first).
 
@@ -166,11 +167,12 @@ headers stay when a section is empty; with no changes at all the tree says `(no 
 | `S` / `U` | stage / unstage everything |
 | `m` | mark the file viewed, or unmark it; on a folder, section or `Viewed` header, mark every file under it, or unmark them all when they all are viewed |
 
-A collapsed folder shows as its header followed by `…` and stays collapsed as you change the selection;
-jumping to a file inside it from the diff expands it.
+Folder and section headers start with `▾` when expanded and `▸` when collapsed. A collapsed folder stays
+collapsed as you change the selection; jumping to a file inside it from the diff expands it.
 
 On a section header, collapsed or not, `-`, `s` and `u` apply to every file of that section. After staging, the cursor
-follows the file into the section it moved to. Staging works only with `Working tree` selected alone. You
+follows the file into the section it moved to. A conflicted file is left alone by the header keys, `u` and `-` in
+Staged: `s` (or `-` in Unstaged) on its own row marks it resolved, as in the conflict view. Staging works only with `Working tree` selected alone. You
 can also stage hunk by hunk: for an Unstaged file the left side is the index, so `do`/`dp` or editing it and
 `:w` stages; for a Staged file the right side is the index.
 
@@ -271,15 +273,17 @@ the file has comments, and put your own back otherwise.
 | `gP` | PR description and conversation (when the branch has an open PR) |
 
 Threads open as a framed card over the other diff window; on an added or deleted file, where there is only
-one, right under the commented lines (above them when there's more room there), so they stay visible;
-there, the open thread's own summary is blanked while it's open, since it'd show past its right edge. A
-card is at most 100 columns wide and centred over the window's text; it follows the diff when it scrolls
-under it and is fitted again when the editor or the diff windows are resized. The
+one, right under the commented lines (above them when there's more room there), so they stay visible,
+with the frame's left edge on the thread's bar in the status column (a new comment's box on the first
+lane); there, the open thread's own summary is blanked while it's open, since it'd show past its right
+edge. A card is at most 100 columns wide, centred over the other window's text; it follows the diff when
+it scrolls under it and is fitted again when the editor or the diff windows are resized. The
 comment boxes are placed the same way; the `gP` card is centred on the editor and refitted too. Each comment gets a header strip: avatar, author (on
 GitHub; "You" in a local review), age, and its state when it isn't published yet: `draft` (only in
 diffy), `pending` (in your unsubmitted GitHub review), `local only: <why>` (a draft GitHub can't take yet),
 `sent` (exported to the agent), and with a PR `conflict`/`github.com` (both sides of a sync conflict),
-`edit staged`, `deletion staged`, `edited on github.com`/`your edit` (see GitHub review). The first header
+`edit staged`, `deletion staged`, `edited on github.com`/`your edit` (see GitHub review). A rule in the
+frame's colour separates consecutive comments, in the thread float and the `:Diffy threads` preview. The first header
 also says `outdated`, `✓ resolved`, `resolve staged`. Summaries carry the same states, shortened (`conflict`,
 `local only`, `edit staged`, …). Bodies render as markdown; suggestion blocks are labelled, empty
 ones as "remove these lines". A preview taller than half the window is cut, with a hint to press `K`.
@@ -377,7 +381,8 @@ tick counts once, so a thread you reopen with `x` stays open.
 When the session's branch has an open pull request on GitHub, a layer loads over `:Diffy` and
 `:Diffy branch` (not ranges, `:Diffy file` or `:Diffy conflicts`): the PR row and review rows in the log
 (see The panels), the published threads, `gP`, and GitHub as a place to submit. The session doesn't wait
-for it: it renders first, and the layer attaches when `gh` answers. The PR is the one
+for it: it renders first, and the layer attaches when `gh` answers. As soon as `gh pr view` finds the PR,
+its row shows with a spinner (`#42 Retry failed uploads ⠹`) until the PR's read comes back. The PR is the one
 `gh pr view <branch>` finds (it follows the branch's upstream, forks included); every read and write goes
 to that PR's repository. Merged or closed PRs don't attach, and an attached layer goes when a read finds
 the PR merged or closed: its row, its threads and what was read, not your drafts. `github = false` in

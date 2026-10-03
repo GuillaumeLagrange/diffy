@@ -9,6 +9,7 @@
 -- (called while rendering) only does lookups. Cached on `review._track`.
 local model = require('diffy.review.model')
 local run = require('diffy.git.run')
+local selection = require('diffy.selection')
 
 local M = {}
 
@@ -16,20 +17,8 @@ local SEP = '\30'
 
 local function cache(session)
   local review = session.review
-  review._track = review._track or { diffs = {}, blobs = {}, exists = {}, live = {} }
+  review._track = review._track or { diffs = {}, blobs = {}, exists = {}, live = {}, worktree = {} }
   return review._track
-end
-
---- A pair rev as a target: 'worktree', 'index', or a commit-ish.
-function M.target(session, rev)
-  if rev == 'WORKTREE' then
-    return 'worktree'
-  elseif rev == 'INDEX' then
-    return 'index'
-  elseif rev == 'HEAD' then
-    return session.head_sha
-  end
-  return rev
 end
 
 local function merge_base(session)
@@ -50,7 +39,8 @@ local function commit_of(rev)
   return (rev:gsub('[~^]%d*$', ''))
 end
 
-local function split_blob(text)
+--- A blob's lines (`git show` output, its final newline not a line).
+function M.split_blob(text)
   local lines = vim.split(text or '', '\n', { plain = true })
   if lines[#lines] == '' then
     table.remove(lines)
@@ -58,7 +48,8 @@ local function split_blob(text)
   return lines
 end
 
-local function loaded_buf(session, path)
+--- The loaded buffer of worktree file `path`, or nil.
+function M.loaded_buf(session, path)
   local abspath = session.root .. '/' .. path
   -- Not bufnr(): it treats the name as a file pattern (`[id]` matches `d`).
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -70,16 +61,31 @@ local function loaded_buf(session, path)
 end
 
 --- `path`'s lines in the worktree (its buffer when loaded) or the index.
+--- Worktree lines are cached per changedtick, or per mtime and size on
+--- disk: placement runs for every thread on every edit.
 local function movable_lines(session, rev, path)
+  local c = cache(session)
   if rev == 'index' then
-    return cache(session).blobs[':0:' .. path]
+    return c.blobs[':0:' .. path]
   end
-  local buf = loaded_buf(session, path)
+  local buf = M.loaded_buf(session, path)
+  local sig
   if buf then
-    return vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    sig = 'b' .. buf .. ':' .. vim.api.nvim_buf_get_changedtick(buf)
+  else
+    local st = vim.uv.fs_stat(session.root .. '/' .. path)
+    if not st or st.type ~= 'file' then
+      return false
+    end
+    sig = ('f%d.%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
   end
-  local abspath = session.root .. '/' .. path
-  return vim.fn.filereadable(abspath) == 1 and vim.fn.readfile(abspath) or false
+  local hit = c.worktree[path]
+  if not (hit and hit.sig == sig) then
+    local lines = buf and vim.api.nvim_buf_get_lines(buf, 0, -1, false) or vim.fn.readfile(session.root .. '/' .. path)
+    hit = { sig = sig, lines = lines }
+    c.worktree[path] = hit
+  end
+  return hit.lines
 end
 
 --- Hunks from `source`'s blob to the loaded buffer, cached per changedtick.
@@ -130,7 +136,7 @@ function M.map(session, thread, target)
   end
   if target == 'worktree' then
     local path = files and model.diff_file_hunks(files, a.path) or a.path
-    local buf, blob = loaded_buf(session, path), c.blobs[source .. ':' .. a.path]
+    local buf, blob = M.loaded_buf(session, path), c.blobs[source .. ':' .. a.path]
     if buf and blob then
       local hit = model.track(a, nil, live_hunks(c, source, a.path, buf, blob))
       if hit then
@@ -155,7 +161,7 @@ local function place_in(session, thread, pair, path)
     return nil
   end
   local win = a.side == 'old' and 'left' or 'right'
-  local hit = M.map(session, thread, M.target(session, pair[win]))
+  local hit = M.map(session, thread, model.rev_to_commit(pair[win], session.head_sha))
   if hit and (not path or hit.path == path) then
     return { win = win, start_line = hit.start_line, end_line = hit.end_line }
   end
@@ -221,7 +227,7 @@ local function git(session, args, cb)
 end
 
 --- Run `jobs` (`fun(done)`) at once, `cb()` after the last.
-local function join(jobs, cb)
+function M.join(jobs, cb)
   local left = #jobs
   if left == 0 then
     cb()
@@ -240,7 +246,7 @@ end
 local function blob_job(session, c, key, object)
   return function(done)
     git(session, { 'show', object }, function(res)
-      c.blobs[key] = res.code == 0 and split_blob(res.stdout) or false
+      c.blobs[key] = res.code == 0 and M.split_blob(res.stdout) or false
       done()
     end)
   end
@@ -287,14 +293,14 @@ local function first_pass(session, threads, cb)
       )
     end)
   end
-  join(jobs, cb)
+  M.join(jobs, cb)
 end
 
 --- Worktree and index comments whose excerpt HEAD has become HEAD comments
---- at those lines, persisted.
+--- at those lines, persisted in one write.
 local function settle_on_head(session, threads)
   local c = cache(session)
-  local drafts = require('diffy.review.drafts')
+  local settled = {}
   for _, t in ipairs(threads) do
     local a = t.anchor
     local source = M.source(session, t)
@@ -303,10 +309,25 @@ local function settle_on_head(session, threads)
       local s, e = model.relocate(a, head)
       if s then
         a.commit, a.start_line, a.end_line = session.head_sha, s, e
-        drafts.put(session, t, nil, { quiet = true })
+        table.insert(settled, t)
       end
     end
   end
+  if #settled == 0 then
+    return
+  end
+  local drafts = require('diffy.review.drafts')
+  drafts.change(session, function(stored)
+    local changed = false
+    for _, t in ipairs(settled) do
+      local st = drafts.find(stored, t.id)
+      if st then
+        st.anchor = vim.deepcopy(t.anchor)
+        changed = true
+      end
+    end
+    return changed
+  end, { quiet = true })
 end
 
 --- Every revision a view of the session can put on `side`.
@@ -315,12 +336,12 @@ local function targets(session, side)
   table.insert(out, side == 'old' and old_now(session) or 'worktree')
   for _, e in ipairs(session.entries or {}) do
     if e.kind == 'commit' then
-      table.insert(out, side == 'old' and (e.sha .. '^') or e.sha)
+      table.insert(out, side == 'old' and selection.parent(e) or e.sha)
     end
   end
   local pair = session.file_pair or session.pair
   if pair and not pair.split then
-    table.insert(out, M.target(session, side == 'old' and pair.left or pair.right))
+    table.insert(out, model.rev_to_commit(side == 'old' and pair.left or pair.right, session.head_sha))
   end
   return out
 end
@@ -385,7 +406,7 @@ function M.prepare(session, cb, opts)
         end
       end
     end
-    join(jobs, function()
+    M.join(jobs, function()
       if not session.closed then
         cb()
       end

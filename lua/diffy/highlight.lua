@@ -139,16 +139,15 @@ function M.truncate(s, width)
   if width <= 0 then
     return ''
   end
-  local out, w = {}, 0
-  for _, ch in ipairs(vim.fn.split(s, '\\zs')) do
-    local cw = vim.fn.strdisplaywidth(ch)
-    if w + cw > width - 1 then
-      break
+  local w = 0
+  for at, ch in s:gmatch('()([%z\1-\127\194-\244][\128-\191]*)') do
+    -- nvim_strwidth is much cheaper but counts a tab as one cell
+    w = w + (ch == '\t' and vim.fn.strdisplaywidth(ch) or vim.api.nvim_strwidth(ch))
+    if w > width - 1 then
+      return s:sub(1, at - 1) .. '…'
     end
-    table.insert(out, ch)
-    w = w + cw
   end
-  return table.concat(out) .. '…'
+  return s
 end
 
 -- what a cut name keeps at least before the directories give way to '…/'

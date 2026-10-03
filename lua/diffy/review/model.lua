@@ -376,10 +376,12 @@ function M.diff_position(diff_lines, line, side)
   local pos, ol, nl = nil, nil, nil
   local context
   for _, l in ipairs(diff_lines) do
-    local old_start, new_start = l:match('^@@ %-(%d+),?%d* %+(%d+)')
+    local old_start, _, new_start = hunk_header(l)
     if new_start then
       pos = pos and (pos + 1) or 0
       ol, nl = tonumber(old_start) - 1, tonumber(new_start) - 1
+    elseif pos and l:sub(1, 1) == '\\' then
+      pos = pos + 1 -- `\ No newline at end of file`: a diff line, but on neither side
     elseif pos then
       pos = pos + 1
       local kind = l:sub(1, 1)

@@ -1203,11 +1203,12 @@ T['review submit writes review.md for worktree, index and commit views, marks se
   MiniTest.expect.equality(text:find('commit comment', 1, true) ~= nil, true)
   MiniTest.expect.equality(text:find('```diff', 1, true) ~= nil, true)
   MiniTest.expect.equality(text:find('<details>', 1, true) ~= nil, true)
-  MiniTest.expect.equality(text:find('commit worktree', 1, true) ~= nil, true)
-  MiniTest.expect.equality(text:find('commit index', 1, true) ~= nil, true)
+  MiniTest.expect.equality(text:find('Written on worktree at f.txt:3 (new side).', 1, true) ~= nil, true)
+  MiniTest.expect.equality(text:find('Written on index at f.txt:3 (new side).', 1, true) ~= nil, true)
   -- worktree/index/sha, like the per-comment `commit` field, not a 7-char
   -- truncation ("worktre")
   local head7 = ui.git(repo.dir, { 'rev-parse', '--short=7', 'HEAD' })
+  MiniTest.expect.equality(text:find('Written on ' .. head7 .. ' at f.txt:15 (new side).', 1, true) ~= nil, true)
   MiniTest.expect.equality(text:find('range: ' .. head7 .. '..worktree', 1, true) ~= nil, true)
 
   local reg = child.fn.getreg('+')
@@ -1229,6 +1230,33 @@ T['review submit writes review.md for worktree, index and commit views, marks se
   local only = table.concat(vim.fn.readfile(review_md), '\n')
   MiniTest.expect.equality(only:find('ship it after that', 1, true) ~= nil, true)
   MiniTest.expect.equality(only:find('later comment', 1, true), nil)
+
+  child.cmd('Diffy close')
+end
+
+T['review.md puts each comment where it is in the worktree now and says where it was written; an outdated one only the latter'] = function()
+  repo:commit('second', { ['f.txt'] = Repo.edit(15, 'second: 15') })
+  vim.fn.writefile(Repo.edit(25, 'uncommitted 25')(vim.fn.readfile(repo.dir .. '/f.txt')), repo.dir .. '/f.txt')
+  local second = ui.git(repo.dir, { 'rev-parse', '--short=7', 'HEAD' })
+  open_default()
+  local w = ui.wins(child)
+  ui.select_log_row(child, 'second')
+  write_comment(w.right, 15, 'on fifteen')
+  write_comment(w.right, 20, 'on twenty')
+
+  ui.select_log_row(child, 1)
+  local buf = child.api.nvim_win_get_buf(w.right)
+  child.api.nvim_buf_set_lines(buf, 19, 20, false, { 'twenty, edited' })
+  child.api.nvim_buf_set_lines(buf, 0, 0, false, { 'added a', 'added b' })
+  send_review('')
+
+  local text = table.concat(vim.fn.readfile(review_file('review.md')), '\n')
+  local now = text:match('\n## c%w+ \226\128\148 f%.txt:17\n%- %[ %] resolved\n```[^\n]*\n(.-)\n```')
+  MiniTest.expect.equality(now and now:find('17  second: 15', 1, true) ~= nil, true)
+  MiniTest.expect.equality(text:find('Written on ' .. second .. ' at f.txt:15 (new side).', 1, true) ~= nil, true)
+  local outdated = '\n## c%w+ \226\128\148 written on ' .. second .. ' at f%.txt:20 %(new side%), outdated\n'
+  MiniTest.expect.equality(text:find(outdated) ~= nil, true)
+  MiniTest.expect.equality(text:find('f.txt:22', 1, true), nil)
 
   child.cmd('Diffy close')
 end

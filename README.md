@@ -314,10 +314,12 @@ share them: a comment written, edited or deleted in one shows in the others righ
 Available in `:Diffy` and `:Diffy branch`.
 
 `:Diffy review submit` opens a box for an overall message (may be left empty); `<C-s>` writes
-`.git/diffy/<branch>/review.md` with that message and every comment not yet sent (location, side, commit,
-the code with context, the diff hunk, the comment), marks them sent and copies the prompt to the `+`
-register: paste it to your agent. A message alone is sent too. `:Diffy review clear` deletes your comments
-on the branch.
+`.git/diffy/<branch>/review.md` with that message and every comment not yet sent, marks them sent and
+copies the prompt to the `+` register: paste it to your agent. Each comment says where it is now (its
+lines tracked to the worktree, the index for an index comment, with the code around them) and where it
+was written (the commit and the diff hunk), then the comment. An outdated, detached or old-side comment
+has no location now: it gets its commit, lines and code where it was written. A message alone is sent
+too. `:Diffy review clear` deletes your comments on the branch.
 
 Each comment's section starts with a `- [ ] resolved` box, and the prompt asks the agent to tick it once
 the comment is handled. diffy reads the ticks when it opens the review, on `R`, and before the next submit

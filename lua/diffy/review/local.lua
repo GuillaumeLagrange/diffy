@@ -208,12 +208,20 @@ local function join(jobs, done)
   end
 end
 
-local function unsent_comments(_session, threads)
+--- Every comment not sent yet, with where its thread is now: tracked to the
+--- worktree (to the index for an index comment). Old-side, outdated and
+--- detached comments have no location now.
+local function unsent_comments(session, threads)
   local pending = {}
   for _, thread in ipairs(threads) do
+    track.status(session, thread)
+    local now
+    if thread.anchor.side == 'new' and not thread.outdated then
+      now = track.now(session, thread)
+    end
     for _, comment in ipairs(thread.comments) do
       if comment.state ~= 'sent' then
-        table.insert(pending, { thread = thread, comment = comment })
+        table.insert(pending, { thread = thread, comment = comment, now = now })
       end
     end
   end
@@ -268,25 +276,44 @@ local function fetch_sources(session, pending, done)
   end)
 end
 
---- Append one comment's `review.md` section to `out`, its lines relocated
---- against `lines` for a worktree or index comment.
-local function render_comment(out, item, lines, hunks)
-  local thread, comment = item.thread, item.comment
-  local a = thread.anchor
-  local s, e = model.relocate(a, lines)
-  if not s then
-    s, e = a.start_line, a.end_line
+--- Why a comment has no location now.
+local function why_not_now(thread)
+  if thread._detached then
+    return 'detached'
+  elseif thread.anchor.side == 'old' then
+    return 'old side'
   end
-  local side_label = a.side == 'old' and 'old side' or 'new side'
-  table.insert(
-    out,
-    ('## %s \226\128\148 %s:%s (%s) \194\183 commit %s'):format(comment.id, a.path, range_text(s, e), side_label, short_commit(a.commit))
+  return 'outdated'
+end
+
+--- Append one comment's `review.md` section to `out`: where it is now (the
+--- code the agent edits) and where it was written, its commit and hunk.
+local function render_comment(out, item, lines, hunks)
+  local thread, comment, now = item.thread, item.comment, item.now
+  local a = thread.anchor
+  local origin = ('%s at %s:%s (%s side)'):format(
+    short_commit(a.commit),
+    a.path,
+    range_text(a.start_line, a.end_line),
+    a.side == 'old' and 'old' or 'new'
   )
+  local s, e = a.start_line, a.end_line
+  if now then
+    s, e = now.start_line, now.end_line
+    table.insert(out, ('## %s \226\128\148 %s:%s'):format(comment.id, now.path, range_text(s, e)))
+  else
+    table.insert(out, ('## %s \226\128\148 written on %s, %s'):format(comment.id, origin, why_not_now(thread)))
+  end
   table.insert(out, RESOLVED_BOX)
-  table.insert(out, '```' .. (vim.filetype.match({ filename = a.path }) or ''))
+  table.insert(out, '```' .. (vim.filetype.match({ filename = now and now.path or a.path }) or ''))
   vim.list_extend(out, numbered_excerpt(lines, s, e))
   table.insert(out, '```')
+  table.insert(out, '')
 
+  if now then
+    table.insert(out, ('Written on %s.'):format(origin))
+    table.insert(out, '')
+  end
   local hunk = model.find_hunk(hunks, a.side, a.start_line, a.end_line)
   table.insert(out, '<details><summary>diff hunk</summary>')
   table.insert(out, '')

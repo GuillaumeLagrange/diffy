@@ -202,15 +202,28 @@ end
 
 local MARK = '▌'
 
+-- the PR row's `M.sync_status` (github.lua), as an icon after the status
+local SYNC_ICON = {
+  syncing = { '↻', 'DiffySyncState' },
+  offline = { '⊘', 'DiffySyncState' },
+  ['sync failed'] = { '⚠', 'DiffySyncFailed' },
+}
+
 --- One log row fitted to `width` cells: `text` plus highlight spans.
 local function entry_line(entry, selected, width)
   local head = (selected and MARK or ' ') .. ' '
   if entry.kind == 'pr' then
     -- the title gives way: the status after it matters more
-    local status = entry.status .. (entry.sync and (' · ' .. entry.sync) or '')
+    local icon = entry.sync and SYNC_ICON[entry.sync]
+    local status = entry.status .. (icon and (' ' .. icon[1]) or '')
     local title = hl.truncate(entry.title, math.max(1, width - 2 - #entry.number - 1 - vim.fn.strdisplaywidth(status)))
     local text = '  ' .. entry.number .. ' ' .. title .. status
-    return text, { { 2, 2 + #entry.number, 'DiffySha' }, { 3 + #entry.number, #text, 'DiffyLabel' } }
+    local label_end = icon and #text - #icon[1] or #text
+    local spans = { { 2, 2 + #entry.number, 'DiffySha' }, { 3 + #entry.number, label_end, 'DiffyLabel' } }
+    if icon then
+      table.insert(spans, { label_end, #text, icon[2] })
+    end
+    return text, spans
   elseif entry.kind == 'marker' then
     local text = '  ' .. hl.truncate(entry.label, width - 2)
     return text, { { 2, #text, 'DiffyThreadTime' } }

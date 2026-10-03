@@ -350,14 +350,23 @@ local function pr_float()
   end)()]])
 end
 
---- The PR row's status after the (cut) title: '' when in sync and online,
---- nil when there's no PR row.
+--- The PR row's status after the (cut) title, sync icon included: '' when
+--- in sync and online, nil when there's no PR row.
 local function pr_status()
   local r = log_rows()[1]
   if not r:match('^  #2 P') then
     return nil
   end
-  return r:match(' (· .*)$') or ''
+  local status = r:match(' (· .*)$')
+  if status then
+    return status
+  end
+  for _, icon in ipairs({ '↻', '⊘', '⚠' }) do
+    if vim.endswith(r, ' ' .. icon) then
+      return icon
+    end
+  end
+  return ''
 end
 
 local function fixture_only()
@@ -403,7 +412,7 @@ T['offline, the layer comes back from the last read: its threads and an offline 
 
   fake('state.offline = true')
   open_pr()
-  MiniTest.expect.equality(pr_status(), '· offline')
+  MiniTest.expect.equality(pr_status(), '⊘')
   open_file('f.txt')
   -- B1, tracked to head line 13
   MiniTest.expect.equality(lines_with_signs('right')[13], true)

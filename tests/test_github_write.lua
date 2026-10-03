@@ -474,26 +474,35 @@ T['a sync answer arriving after the session closed is kept, and leaves nothing w
   eq(stored('late answer').gh.id, remote_comment('late answer').id)
 end
 
-T['the PR row says syncing while a draft waits, sync failed when GitHub refuses it, nothing once mirrored'] = function()
+--- The sync icon ending the PR row, or nil.
+local function row_icon()
+  for _, icon in ipairs({ '↻', '⊘', '⚠' }) do
+    if vim.endswith(pr_row(), ' ' .. icon) then
+      return icon
+    end
+  end
+end
+
+T['the PR row shows ↻ while a draft waits, ⚠ when GitHub refuses it, nothing once mirrored'] = function()
   fake_only()
   setup_empty()
   child.lua('require("diffy.review.github").sync_delay = 60000')
   child.lua([[_G.__fake_state.fail = { addPullRequestReview = 'boom' }]])
   open_pr()
   open_file('f.txt')
-  eq(pr_row():find('sync', 1, true), nil)
+  eq(row_icon(), nil)
 
   compose_draft(wins().right, 30, 'row state')
-  eq(pr_row():find('· syncing', 1, true) ~= nil, true)
+  eq(row_icon(), '↻')
 
   read_github(function()
-    return pr_row():find('· sync failed', 1, true) ~= nil
-  end, 'sync failed on the row')
+    return row_icon() == '⚠'
+  end, '⚠ on the row')
   eq(remote_comment('row state'), nil)
 
   child.lua('_G.__fake_state.fail = nil')
   read_github(function()
-    return remote_comment('row state') ~= nil and pr_row():find('sync', 1, true) == nil
+    return remote_comment('row state') ~= nil and row_icon() == nil
   end, 'mirrored, the row quiet again')
   child.cmd('Diffy close')
 end

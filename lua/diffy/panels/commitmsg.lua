@@ -90,7 +90,9 @@ local function pr_content(session, width)
     table.insert(lines, title)
     table.insert(spans, { #lines - 1, 0, #title, 'DiffyLabel' })
   end
-  local state = l.offline and 'Offline: from the last read' or (l.read_at and ('Read %s'):format(ago(l.read_at)) or nil)
+  local syncing = require('diffy.review.github').sync_status(session) == 'syncing'
+  local read = l.offline and 'Offline: from the last read' or (l.read_at and ('Read %s'):format(ago(l.read_at)) or nil)
+  local state = syncing and ('Syncing…' .. (read and ('  ' .. read) or '')) or read
   if state then
     table.insert(lines, state)
     table.insert(spans, { #lines - 1, 0, #state, 'DiffyThreadTime' })
@@ -98,7 +100,7 @@ local function pr_content(session, width)
   if l.sync_error then
     local msg = 'Sync failed: ' .. l.sync_error
     table.insert(lines, msg)
-    table.insert(spans, { #lines - 1, 0, #msg, 'DiagnosticWarn' })
+    table.insert(spans, { #lines - 1, 0, #msg, 'DiffySyncFailed' })
   end
   table.insert(lines, '')
   local body = vim.trim((pr.body or ''):gsub('\r', ''))

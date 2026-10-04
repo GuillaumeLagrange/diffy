@@ -130,7 +130,7 @@ local function open_side(session, name, spec)
   vim.w[win].diffy_path = spec and spec.path or nil
   vim.wo[win].winbar = (spec and spec.path) and (short(spec.rev) .. '  ' .. spec.path) or '(no file)'
   -- Statuslines show the buffer name, a `fugitive://…/.git//<sha>/<path>` URI
-  -- for blob sides: readable replacement, see README "Statusline". Rev first:
+  -- for blob sides: readable replacement, see `:help diffy-statusline`. Rev first:
   -- a narrow window truncates the left end.
   if spec and spec.path and not is_real then
     vim.b[buf].diffy_title = short(spec.rev) .. ': ' .. spec.path

@@ -1,0 +1,1071 @@
+*diffy.txt*  Diff viewer and code review over git
+
+==============================================================================
+                                                                       *diffy*
+Features:
+
+- Look at your uncommitted work, a branch or any range in a tab of its own:
+  the changed files and the commits in a column on the left, a side-by-side
+  diff in native diff mode on the right. See |diffy-sessions|.
+
+- Choose what the diff shows by selecting commits: one, a contiguous range,
+  the working tree, or the whole branch from its merge-base, as github.com
+  shows a pull request. See |diffy-log|.
+
+- Stage and unstage files and hunks, and edit the real file (with LSP) on
+  the right side. See |diffy-staging| and |diffy-diff|.
+
+- Mark files viewed. A mark holds as long as the file's change stays the
+  same, through commits, amends and rebases. See |diffy-viewed|.
+
+- Comment on lines and ranges, then hand the comments to an LLM agent as
+  a markdown file (|diffy-review-local|) or submit them as a GitHub pull
+  request review (|diffy-github|). Comments follow their lines across
+  commits, rebases and your edits. See |diffy-review|.
+
+- Read a pull request's threads, reviews and conversation next to the code;
+  reply, resolve, edit. Your pending GitHub review follows your drafts as
+  you write them.
+
+- Resolve merge conflicts in a 4-window view. See |diffy-conflicts|.
+
+
+Contents:
+
+- Sessions and their tab ............................... |diffy-sessions|
+- Commands ............................................. |diffy-commands|
+- Setup and options ...................................... |diffy.config|
+- The panel column ....................................... |diffy-column|
+- Commits ................................................... |diffy-log|
+- Files .................................................... |diffy-tree|
+- Viewed files ........................................... |diffy-viewed|
+- The diff ................................................. |diffy-diff|
+- Conflicts ........................................... |diffy-conflicts|
+- Review ................................................. |diffy-review|
+- Local review, for an LLM agent ................... |diffy-review-local|
+- GitHub review .......................................... |diffy-github|
+- Highlight groups ................................... |diffy-highlights|
+- Events and functions ................................... |diffy-events|
+
+# Requirements ~
+
+- Neovim 0.12 or later, git 2.36 or later.
+
+- vim-fugitive (https://github.com/tpope/vim-fugitive), for the blob and
+  index buffers.
+
+- `gh` (https://cli.github.com), authenticated: the GitHub layer
+  (|diffy-github|), and the base branch of |:Diffy-branch| when
+  `origin/HEAD` isn't set.
+
+- Optional, for avatars and badges: a terminal with the kitty graphics
+  protocol (kitty, ghostty, WezTerm; also inside zellij 0.45 or later, not
+  tmux), `curl` and ImageMagick. See |diffy-avatars|.
+
+# Setup ~
+
+Put the repository on 'runtimepath', with a plugin manager or by hand: >lua
+
+  vim.opt.rtp:prepend('/path/to/diffy')
+<
+By hand, also run `:helptags /path/to/diffy/doc` once for this help.
+
+|diffy.setup()| is optional: call it only to change |diffy.config|.
+
+diffy maps no global key. Every key in this help is buffer-local to the
+session's windows and goes with the session. Map the commands yourself: >lua
+
+  vim.keymap.set('n', '<leader>dv', '<Cmd>Diffy<CR>')
+  vim.keymap.set('n', '<leader>db', '<Cmd>Diffy branch<CR>')
+  vim.keymap.set('n', '<leader>dp', '<Cmd>Diffy pr<CR>')
+<
+------------------------------------------------------------------------------
+                                                              *diffy-sessions*
+A session lives in its own tab:
+
+- On the left, a column of views (|diffy-column|): by default the changed
+  files on top and the commits at the bottom, in one window. `column` in
+  |diffy.config| picks which views the column holds; a view that isn't in
+  it (the review threads, by default) opens in a float over the diff.
+
+- On the right, two windows in native diff mode (|diffy-diff|).
+
+Closing the tab in any way (|:tabclose|, |:q| in a diffy window,
+|:Diffy-close|, quitting Nvim) ends the session and cleans everything up.
+
+|CTRL-W_o| (|:only|) in a diff window ends the session too, but keeps that
+window: a plain window showing its file, out of diff mode, with diffy's
+winbar and keys gone. `:tab split` of a diff window opens such a plain
+window, and the file's diffy keys do what they do elsewhere outside the
+session's tab.
+
+Each command opens a new tab, so several sessions can be open at once.
+
+------------------------------------------------------------------------------
+                                                              *diffy-commands*
+                                                                      *:Diffy*
+:Diffy [{subcommand} {args}]
+
+<Tab> completes subcommands and their arguments: the review subcommands and
+events the current session offers, |:Diffy-threads| filters, paths for
+`file`, branches for `branch`, `clear` for `viewed`.
+
+# Opening a session ~
+
+:Diffy
+  The working tree and the commits `@{u}..HEAD` (the last 20 without an
+  upstream). `Working tree` is selected.
+
+                                                               *:Diffy-branch*
+:Diffy branch [{base}]
+  The working tree and the commits since the merge-base with {base}, all
+  selected, the working tree included.
+
+  Without {base}: the pull request base the GitHub layer read last time,
+  else `origin/HEAD` (local, no network), else the `origin` default branch
+  from `gh repo view`. A base name is taken through the base branch's
+  upstream (usually `origin/main`: the remote's tip as of your last fetch,
+  not a local `main` that may be behind), else the local branch, else the
+  one remote-tracking branch of that name. When the GitHub layer then finds
+  the pull request on another base, the session is rebuilt once on it,
+  keeping the selected commits when they're still listed. An explicit
+  {base} is used as given.
+
+  It opens on the file you last looked at on the branch (kept in
+  `.git/diffy/<branch>/last_file.json`) if the view still has it and it
+  isn't viewed; otherwise on the first unviewed file.
+
+                                                                *:Diffy-range*
+:Diffy {A}..{B}
+:Diffy {A}...{B}
+  The commits of the range, all selected.
+
+                                                                   *:Diffy-pr*
+:Diffy pr
+  |:Diffy-branch| on the base of the current branch's open pull request.
+  Warns when there's none.
+
+                                                                 *:Diffy-file*
+:Diffy file [{path}]
+  The commits touching {path} (default: the current buffer's file), across
+  renames. The newest is selected.
+
+                                                            *:Diffy-conflicts*
+:Diffy conflicts
+  The conflicted files, in the conflict view (|diffy-conflicts|), the first
+  one open.
+
+# In a session ~
+
+                                                                *:Diffy-panel*
+:Diffy panel
+  Hide or show the panel column.
+
+                                                               *:Diffy-viewed*
+:Diffy viewed [clear]
+  Mark the file shown viewed, or unmark it. `clear` drops all its marks.
+  See |diffy-viewed|.
+
+                                                              *:Diffy-threads*
+:Diffy threads [file] [author={name}] [state={state}] [review={id}]
+  The threads view (|diffy-threads-view|): every review thread, grouped.
+  `file`: only those of the file in the diff. {state} is one of `open`,
+  `resolved`, `outdated`, `detached`.
+
+                                                               *:Diffy-review*
+:Diffy review submit [{event}]
+  Send your comments to the agent (|diffy-review-local|), or to GitHub when
+  the branch has an open pull request (|diffy-github-submit|). {event} is
+  one of `comment`, `approve`, `request_changes`, and means GitHub.
+
+:Diffy review clear
+  Drop your comments. With an open pull request, also your staged changes
+  and your pending review on GitHub (asks first).
+
+                                                              *:Diffy-restore*
+:Diffy restore
+  Go back to your branch after an interrupted checkout mode: Nvim died
+  while it was on (|diffy-checkout|).
+
+                                                             *:Diffy-feedback*
+:Diffy feedback
+  Describe what bothers you in the current session; `<C-s>` sends it, `q`
+  cancels. See |DiffyFeedback|.
+
+                                                                *:Diffy-close*
+:Diffy close
+  Close the session.
+
+------------------------------------------------------------------------------
+                                                               *diffy.setup()*
+                       `require('diffy').setup`({config})
+
+Merge {config} into |diffy.config|. Optional; a list (`column`) is replaced,
+not merged.
+
+------------------------------------------------------------------------------
+                                                                *diffy.config*
+Defaults ~
+>lua
+  require('diffy').setup({
+    -- Width of the panel column
+    panel_width = 40,
+
+    -- Views in the panel column, top to bottom
+    column = { 'tree', 'log' },
+
+    -- Buffer-local keys. Use `''` (empty string) to disable one.
+    keymaps = {
+      -- In every diffy window: hide the panel column, or show it and go
+      -- to the file tree
+      toggle_panel = '<leader>e',
+
+      -- In the diff windows: mark the file shown viewed, or unmark it
+      toggle_viewed = '<leader>dm',
+
+      -- In the file tree: the same for the file, folder or section under
+      -- the cursor
+      tree_toggle_viewed = 'm',
+
+      -- In the diff windows and the file tree: undo the last mark or
+      -- unmark, one more per press
+      undo_viewed = '<leader>du',
+    },
+
+    -- Copied to the `+` register by a local review submit
+    review_prompt = 'Read %s and address each review comment. Reply per '
+      .. 'comment id with what you changed, and tick its "- [ ] resolved" '
+      .. 'box in that file once it is handled.',
+
+    -- GitHub avatars and badges in comments
+    avatars = true,
+
+    -- The GitHub layer; `false` turns it off
+    github = { read_interval = 300 },
+  })
+<
+# Column ~
+
+`column` lists the views stacked in the left column, top to bottom:
+`'tree'` (the files, |diffy-tree|), `'log'` (the commits, |diffy-log|) and
+`'threads'` (the review threads, |diffy-threads-view|). The tree and the
+log share one window when they're next to each other. A view left out
+opens in a float over the diff when asked for. For example, the threads
+always in view, between the files and the commits: >lua
+
+  require('diffy').setup({ column = { 'tree', 'threads', 'log' } })
+<
+# Review prompt ~
+
+`review_prompt` is what `:Diffy review submit` copies to the `+` register
+for a local review; `%s` is the absolute path of the written `review.md`.
+See |diffy-review-local|.
+
+# Avatars ~
+
+`avatars` draws GitHub avatars in comment headers and summaries, and image
+badges in comment bodies, when the terminal can. See |diffy-avatars|.
+
+# GitHub ~
+
+`github` is the GitHub layer over |:Diffy| and |:Diffy-branch|
+(|diffy-github|); `false` turns it off. `github.read_interval` is the
+number of seconds between reads while the session's tab is current; 0
+reads only on demand.
+
+------------------------------------------------------------------------------
+                                                                *diffy-column*
+The panel column holds the files (|diffy-tree|) and the commits
+(|diffy-log|) in one window: the files from the top, then a `── Commits ──`
+rule and the commits at the bottom, with blank rows between them while both
+fit. Once they don't, the window scrolls as a whole, and what's past its
+edges shows over them: `↑ 12 files, 3 commits` / `↓ 31 commits`, or, when
+none of the selected commits is in view, the rule and the selected rows
+pinned over the edge they went past (`… n more selected` beyond two).
+
+Each part keeps its keys: `<CR>` on a file opens it, on a commit selects
+it. A key only one part has works from the other too, so `J`/`K` and `a`
+select commits from the files.
+
+With `column = { 'tree', 'threads', 'log' }` (or anything else between
+them), each view gets its own window again, and either one left out of
+`column` opens in a float.
+
+Keys, in the column ~
+
+  `]]`            From the files, to the newest selected commit.
+  `[[`            From the commits, to the file shown in the diff.
+  `<leader>dc`    The threads view (|diffy-threads-view|).
+  `<leader>dl`    Back into the thread you were last in (|diffy-review|).
+  `gX`            Open the pull request on github.com.
+  `R`             Refresh everything (|diffy-diff|).
+  `<leader>e`     Hide the column, or show it and go to the files
+                  (`keymaps.toggle_panel`).
+
+------------------------------------------------------------------------------
+                                                                   *diffy-log*
+The commits view lists the session's commits, newest first, under a
+`Working tree` entry when the session shows it.
+
+The diff always shows one contiguous selection: the left side is the parent
+of the oldest selected entry, the right side the newest one.
+
+- `Working tree` means HEAD to the worktree, index included. Selected
+  alone, the tree splits it into its unstaged and staged parts
+  (|diffy-staging|). With commits, it's one tree from the oldest commit's
+  parent to the worktree. `J`/`K` and `]r`/`[r` treat it like a commit.
+
+- Merge commits are dimmed and skipped.
+
+- In branch views, a selection reaching the oldest commit compares against
+  the merge-base, like github.com, so changes merged in from the base
+  branch don't show up.
+
+Keys, in the commits view ~
+
+  `<CR>`          Select the entry under the cursor.
+  `v`/`V` + motion, `<CR>`
+                  Select a range.
+  `a`             Select everything.
+  `J` / `K`       Select the next / previous entry.
+  `X`             Toggle checkout mode (|diffy-checkout|).
+  `<Esc>`         Close the commit message float; with none shown, whatever
+                  `<Esc>` is mapped to outside diffy.
+
+On the pull request rows (|diffy-pr-row|):
+
+  `<CR>` on a review row
+                  Select everything above it.
+  `<CR>` on the pull request row
+                  Select the whole pull request (`:Diffy` switches to
+                  `:Diffy branch`).
+
+                                                        *diffy-commit-message*
+Resting the cursor on a commit shows its full message in a float beside the
+log: short sha, author, date, then the message wrapped to fit. It closes on
+a non-commit row, when you leave the log, or on `<Esc>` (until you move to
+another row).
+
+                                                              *diffy-push-row*
+Going to a thread written on a commit a rebase or force-push took out of
+the branch (from the threads view, `<leader>dl`) adds a row for that commit
+at the top of the log, `⟲ <sha> <subject>`, and selects it: the branch as it
+was at that push, from where it forked off the base, as github.com anchors
+comments. Its threads are there to read, reply to and resolve; new comments
+are refused (write them on the branch). The row is never part of a range,
+and goes as soon as you select anything else or the session rebuilds (`R`,
+`:w`). A commit the repository doesn't have (never fetched, or
+garbage-collected) gets a warning instead.
+
+                                                                *diffy-pr-row*
+With an open pull request (|diffy-github|), the log's first row is the pull
+request: >
+
+  #42 Retry failed uploads · 2 unpushed
+<
+After the number and title come:
+
+- the sync conflicts waiting for you (`1 conflict`, |diffy-sync-conflicts|);
+
+- where your branch stands against the pull request head on GitHub: nothing
+  when in sync, `N unpushed`, `behind N`, `diverged`, or `GitHub has newer
+  commits` when the head isn't a local commit (diffy never fetches);
+
+- the sync's state as an icon, only when there's one: `↻` (a read or a sync
+  running, or a draft about to be mirrored), `⊘` (offline: the last read
+  failed) or `⚠` (the last sync couldn't write something; it retries with
+  the next one).
+
+Resting the cursor on it says the same in words (syncing, when GitHub was
+last read, why the last sync failed if it did), then shows the pull
+request's description, each reviewer's state (`alice ✗ changes requested`,
+`bob ✓ approved`), every review with its commit (`not in this log` or `no
+longer in the branch` for a commit the log doesn't list) and the
+conversation.
+
+`<CR>` on the pull request row selects the whole pull request: everything
+in |:Diffy-branch|. In |:Diffy|, the session becomes |:Diffy-branch| on the
+pull request's base (leaving checkout mode first).
+
+                                                           *diffy-review-rows*
+A commit the log lists that has submitted reviews gets one dim row right
+above it. One review shows its author and state (`── alice ✗ 4 threads`),
+several are summed up with their states and the threads they started
+(`── 3 reviews ✗○ 4 threads`). `<CR>` on a review row selects everything
+above it: what changed since those reviews.
+
+`J`/`K`, `a` and ranges skip the pull request and review rows.
+
+                                                              *diffy-checkout*
+Checkout mode ~
+
+`X` turns checkout mode on: the selected commit is checked out (detached;
+your branch itself when it is the branch head), so the right side becomes
+real files with LSP. Moving the selection (`<CR>`, `J`/`K`, `]r`/`[r`,
+threads) checks out the new commit; a range or the working tree puts your
+branch back until you select a single commit again. The log's winbar shows
+`⎇ checkout <sha>` while it is on.
+
+`X` again or closing the session checks your branch out again. Entering
+refuses when you have tracked changes; if you edit a file while in the
+mode, moving the selection warns and keeps the current checkout. If Nvim
+dies in between, the next |:Diffy| offers |:Diffy-restore|.
+
+------------------------------------------------------------------------------
+                                                                  *diffy-tree*
+The files view lists the selection's changed files: status letter, path
+relative to its folder, `+added -removed`. The file shown in the diff is
+highlighted.
+
+A path too long for the panel shortens its folders to their first letter,
+outermost first (`l/d/panels/name.lua`), then cuts the end of the name
+(`l/d/p/a_long_na…`); only when that leaves almost nothing of the name do
+the folders become `…/`. With the cursor on a cut row, the whole row is
+drawn over it, past the panel's edge.
+
+Folder and section headers start with `▾` when expanded and `▸` when
+collapsed. A collapsed folder stays collapsed as you change the selection;
+jumping to a file inside it from the diff expands it.
+
+Keys, in the files view ~
+
+  `<CR>`          Open the file and move to the diff. On a folder or
+                  section header, collapse / expand it.
+  `o`             Open the file, stay in the tree. On a header, collapse /
+                  expand it.
+  `]f` / `[f`     Next / previous file, skipping collapsed folders and
+                  viewed files.
+  `]r` / `[r`     Next / previous commit.
+  `gf`            Open the real file in the previous tab.
+  `-`             Move the file to the other section (stage in Unstaged,
+                  unstage in Staged).
+  `s` / `u`       Stage / unstage the file, whichever section it's in (a
+                  rename stages both paths).
+  `S` / `U`       Stage / unstage everything.
+  `m`             Mark the file viewed, or unmark it. On a folder, section
+                  or `Viewed` header, mark every file under it, or unmark
+                  them all when they all are viewed
+                  (`keymaps.tree_toggle_viewed`, |diffy-viewed|).
+  `<leader>du`    Undo the last mark or unmark (`keymaps.undo_viewed`).
+
+                                                               *diffy-staging*
+Staging ~
+
+With `Working tree` selected alone, the files come in two sections:
+`Unstaged (n)` (index to worktree, plus untracked files) then `Staged (n)`
+(HEAD to index). A file with both kinds of changes is listed in each, and
+opens that section's diff: the real file on the right for Unstaged, the
+index on the right for Staged. Both headers stay when a section is empty;
+with no changes at all the tree says `(no changes)`.
+
+- On a section header, collapsed or not, `-`, `s` and `u` apply to every
+  file of that section.
+
+- After staging, the cursor follows the file into the section it moved to.
+
+- A conflicted file is left alone by the header keys, and by `u` and `-` in
+  Staged: `s` (or `-` in Unstaged) on its own row marks it resolved, as in
+  the conflict view.
+
+- Staging works only with `Working tree` selected alone.
+
+Stage hunk by hunk in the diff: for an Unstaged file the left side is the
+index, so |do|/|dp| or editing it and `:w` stages; for a Staged file the
+right side is the index.
+
+------------------------------------------------------------------------------
+                                                                *diffy-viewed*
+Marking a file viewed (`m` in the tree, `<leader>dm` in the diff,
+|:Diffy-viewed|) moves it to a folded `Viewed (n)` group at the top of its
+section (or of the tree, without sections), drawn grayed out
+(`DiffyViewed`), folders and files included. The group unfolds while it
+holds the file shown and folds back once that file leaves it, unless you
+unfolded it yourself.
+
+- `]f`/`[f` skip viewed files, and so does the file opened first after a
+  refresh.
+
+- Marking the file shown opens the next unviewed one; with none left, the
+  keys stay where they are and say so.
+
+- `<leader>du`, in the tree or the diff, undoes the last mark or unmark of
+  the session (a whole folder at once if that's what it was) and goes back
+  to the file you were looking at when you marked it; press again to undo
+  the one before.
+
+A mark records the file's change as the view shows it: the blob on the left
+and the blob on the right. The file stays viewed while the view shows that
+same pair: committing, staging, amending or rebasing on a base that didn't
+touch it keep it; an edit to it, a base that changed it, a symlink
+retargeted or a submodule moved bring it back. A file that comes back
+carries `●` until you open it (the file you're looking at never gets one).
+
+Marks are per view: a file marked on one commit isn't hidden in the
+whole-branch view, and the other way round; each view keeps its own marks
+(the last 5 per path). A rename (`R`) keeps the marks of its old path.
+`:Diffy viewed clear` drops every mark of the file shown.
+
+Marks are stored in `.git/diffy/<branch>/viewed.json`, shared live by every
+session on the branch, in any Nvim.
+
+------------------------------------------------------------------------------
+                                                                  *diffy-diff*
+The right side is the real file (LSP, editable) when it shows the worktree,
+or HEAD for a file with no uncommitted changes. Otherwise both sides are
+read-only fugitive blobs. Comment bars and summaries follow your edits as
+you make them; `:w` on either side rebuilds like `R`, so the tree's counts
+and sections stay current (without reading GitHub again).
+
+An added or deleted file takes the whole diff area on its own, coloured as
+added or deleted.
+
+Jumping to another file from the right side (go-to-definition, `gf`, `:e`,
+a picker) loads that file's pair if it's part of the diff; otherwise diff
+mode turns off until you come back (|CTRL-O|, |CTRL-T| or the tree). A jump
+from the left side opens in the right window, so |CTRL-O|/|CTRL-T| there
+bring the pair back. |CTRL-O| never goes back past the start of the
+session.
+
+Keys, in either diff window ~
+
+  `]f` / `[f`     Next / previous file, skipping viewed files.
+  `<leader>dm`    Mark the file shown viewed (and open the next unviewed
+                  one), or unmark it (`keymaps.toggle_viewed`).
+  `<leader>du`    Undo the last mark or unmark, back to the file shown when
+                  it was marked (`keymaps.undo_viewed`).
+  `]r` / `[r`     Next / previous commit.
+  `R`             Refresh everything: git state, panels, window sizes; and
+                  read the pull request again (|diffy-github|).
+  `<leader>e`     Hide the panel column, the cursor staying where it is; or
+                  show it and go to the files (`keymaps.toggle_panel`).
+
+The review keys are in |diffy-review-keys|.
+
+                                                                 *diffy-count*
+The `]`/`[` keys (`]f`, `]r`, `]t`, `]x`, here and in the panels) take a
+count: `3]f` moves three files down, `2[r` two commits back, stopping at the
+first/last one.
+
+                                            *diffy-statusline* *b:diffy_title*
+A blob side's buffer name is a `fugitive://…/.git//<sha>/<path>` URI, which
+is what a statusline shows. diffy sets `b:diffy_title`
+(`a1b2c3d: src/foo.lua`) on those buffers. With lualine: >lua
+
+  lualine_c = {
+    {
+      'filename',
+      path = 1,
+      fmt = function(name) return vim.b.diffy_title or name end,
+    },
+  },
+<
+------------------------------------------------------------------------------
+                                                             *diffy-conflicts*
+|:Diffy-conflicts|, or opening a `U` file, shows ours, base and theirs on top
+and the result (the real file) below. Works for merge, rebase, cherry-pick
+and stash pop.
+
+Keys ~
+
+  `gho` / `ghb` / `ght`
+                  In the result: take ours / base / theirs for the conflict
+                  under the cursor.
+  `]x` / `[x`     In the result: next / previous conflict marker.
+  `s`             In the tree: mark resolved (`git add`); asks first if
+                  markers remain.
+
+------------------------------------------------------------------------------
+                                                                *diffy-review*
+Each comment thread draws a bar over its lines in the gutter, between the
+line numbers and the text, and a one-line summary under its last line
+(avatar on GitHub, author, reply count, first line of the comment).
+
+- The bar ends on its summary, turning right across the bars still going
+  on. Overlapping ranges get bars side by side, the enclosing one on the
+  left.
+
+- A bar's colour comes from its thread's id, so it stays the same across
+  files and sessions; the summary's `●` and the thread float's frame take it
+  too.
+
+- The open thread's bar is heavy and its summary bold in its colour; the
+  other summaries under the cursor take their colour. A resolved thread's
+  bar and summary are dimmed, the summary marked `✓`.
+
+- The other side gets matching blank lines so the diff stays aligned.
+  Several summaries under one line are listed top to bottom by the line
+  they end on, then oldest first.
+
+- The bars take over the diff windows' 'statuscolumn' (fold, sign and
+  number columns, then the bars) while the file has comments, and put your
+  own back otherwise.
+
+Moving onto a commented line opens its leftmost thread; `<Tab>`/`<S-Tab>`
+cycle through the others covering that line, left to right. `]t`/`[t` walk
+every thread of the side by the line its range starts on, then the larger
+range first (the one drawn further left), then oldest first. `<Esc>` closes
+the card, and it stays closed until the cursor leaves the line (or `<Tab>`,
+`<CR>`, `]t` ask for it).
+
+                                                           *diffy-review-keys*
+Keys, in a diff window ~
+
+  `gc`            Comment on the line (visual mode: on the range). `<C-s>`
+                  or `:w` saves, `q` cancels.
+  `<CR>`          Enter the thread float. `K` stays LSP hover /
+                  'keywordprg', commented line or not.
+  `]t` / `[t`     Next / previous thread: by first line, larger range
+                  first, oldest first.
+  `<Tab>` / `<S-Tab>`
+                  Next / previous thread covering the cursor line, left to
+                  right, wrapping (also in the thread float).
+  `<Esc>`         Close the thread card; no preview on this line until the
+                  cursor leaves it. With no card open, whatever `<Esc>` is
+                  mapped to outside diffy (e.g. |:nohlsearch|).
+  `<leader>dl`    Back into the thread you were last in (a thread float you
+                  entered, or the comment you last wrote), on the comment
+                  you left it on. Also in the panels and the threads view.
+  `<leader>ds`    Hide / show the summaries, keeping the bars (hovering
+                  still previews).
+  `<leader>dr`    Hide / show resolved threads.
+  `<leader>dt`    Hide / show comments inline altogether.
+  `<leader>dc`    The threads view: every thread, the file in the diff
+                  first (|:Diffy-threads|).
+  `gP`            The pull request's description and conversation (with
+                  an open pull request).
+  `gX`            Open the pull request on github.com (also in the column
+                  and the `gP` card).
+
+                                                          *diffy-thread-float*
+Thread cards ~
+
+Threads open as a framed card over the other diff window. On an added or
+deleted file, where there is only one window, the card opens right under
+the commented lines (above them when there's more room there), so they stay
+visible, with the frame's left edge on the thread's bar in the status
+column (a new comment's box on the first lane); there, the open thread's
+own summary is blanked while it's open, since it'd show past its right
+edge.
+
+A card is at most 100 columns wide, centred over the other window's text;
+it follows the diff when it scrolls under it and is fitted again when the
+editor or the diff windows are resized. The comment boxes are placed the
+same way; the `gP` card is centred on the editor and refitted too.
+
+Each comment gets a header strip: avatar, author (on GitHub; "You" in a
+local review), age, and its state when it isn't published yet:
+
+- `draft`: only in diffy.
+- `pending`: in your unsubmitted GitHub review.
+- `local only: <why>`: a draft GitHub can't take yet
+  (|diffy-github-mirror|).
+- `sent`: exported to the agent.
+- `conflict` / `github.com`: both sides of a sync conflict
+  (|diffy-sync-conflicts|).
+- `edit staged`, `deletion staged`, `edited on github.com` / `your edit`:
+  see |diffy-staged-changes|.
+
+The first header also says `outdated`, `✓ resolved`, `resolve staged`.
+Summaries carry the same states, shortened (`conflict`, `local only`,
+`edit staged`, …). A rule in the frame's colour separates consecutive
+comments, in the thread float and the threads view's preview. A preview
+taller than half the window is cut, with a hint to press `<CR>`.
+
+In the thread float, the footer lists the keys that apply:
+
+  `r`             Reply.
+  `e`             Edit the comment under the cursor (a draft, or with a
+                  pull request your published comment).
+  `dd`            Delete it.
+  `x`             Resolve / unresolve.
+  `]t` / `[t`     Switch thread.
+  `q`             Close.
+
+Entering a thread puts the cursor on its latest comment. A reply or an edit
+is written in a box under the thread, which stays in view (a reply starts
+in insert mode, an edit in normal mode at the end of the draft); saving
+goes back to the diff, cancelling goes back into the thread. Leaving a
+comment box or the thread for the diff puts the cursor back where it was.
+In the compose float, `<C-g>s` inserts a GitHub suggestion block with the
+commented lines.
+
+`gP` shows the pull request's description and its conversation the same
+way.
+
+                                                        *diffy-comment-bodies*
+Comment bodies ~
+
+Bodies render as markdown; suggestion blocks are labelled, empty ones as
+"remove these lines".
+
+Bodies full of HTML, as bots like greptile write them, are shown as their
+markdown equivalent: HTML comments dropped, `<h2>` as `## `,
+`<b>`/`<em>`/`<code>` as `**`/`_`/`` ` ``, `<br>`/`<li>` as line breaks and
+items, entities (`&nbsp;`, `&amp;`, …) and backslash escapes decoded (an
+escape that would start a list or emphasis stays). Code fences are shown as
+written. Tables are padded so their columns line up; long lines wrap at
+words. This is display only: bodies are stored and sent as written.
+
+- Links show their text only, underlined (`DiffyThreadLink`); a bare URL
+  shows as its host (and last path part when short). The URLs stay behind
+  the line: in a card, `<CR>` or `gx` opens the link under the cursor (`gx`
+  falls back to the line's only link, else asks which one). With the mouse,
+  `<C-LeftMouse>` or a double click on a link (or a badge, or an image
+  marker) opens it, from any card, focused or not. HTML buttons (an `<a>`
+  around an image, like "Open in CodSpeed") are one linked marker.
+
+- `<details>` blocks are folds titled `▸ <summary>`, closed unless the HTML
+  says `open`: `<CR>`, `za` (or any fold key) in the thread float or the
+  `gP` card opens them, as does `<C-LeftMouse>`/a double click on the
+  title.
+
+- Images show as `[alt]`, opened by `gx`. Badges (SVG images, e.g.
+  greptile's `P1`/`P2`, `Retrigger`, `Fix in Codex`) are drawn over their
+  marker when the terminal can draw avatars (|diffy-avatars|; ImageMagick
+  needs an SVG delegate, librsvg or its own MSVG) and they fit it;
+  otherwise `[P0]`/`[P1]` are red, `[P2]` yellow, `[P3]` blue. A heading's
+  `Confidence Score: N/5` is green from 4, yellow at 3, red below.
+
+                                                               *diffy-avatars*
+Avatars and badges need a terminal with the kitty graphics protocol, `curl`
+and ImageMagick. They're downloaded once and cached in
+`stdpath('cache')/diffy/avatars` and `/images`; without them the headers,
+summaries and badges are text only. `avatars = false` in |diffy.config|
+turns them off.
+
+                                                          *diffy-threads-view*
+The threads view ~
+
+The threads view (|:Diffy-threads|, `<leader>dc`) lists the review's
+threads grouped by where they stand:
+
+- Open.
+- Outdated: its lines changed in the worktree, not resolved.
+- Detached: nothing left to place it from (its commit is gone, or a
+  worktree comment's text is).
+- Resolved, and Resolved, outdated.
+
+Within a group, under a header per file, the file in the diff comes first
+(in bold). Group headers carry the count; the resolved groups start folded,
+and the cursor starts on the first thread of the file in the diff. Each row
+gives the line, who started the thread ("you" for yours), how many replies
+and who wrote the last one when it's someone else, its states (`draft`,
+`pending`, `conflict`, …), and the first line. A thread the selected range
+doesn't show has its line dimmed.
+
+It opens in a float over the diff with a preview beside it (on a wide
+enough screen): which commits show the thread (GitHub), for an outdated or
+detached thread the commit it was written on (`a commit no longer in the
+branch` once a rebase or force-push replaced it), the code as it was
+written (its lines numbered and marked, up to 3 lines of context above, the
+middle of a long range cut; GitHub's diff hunk for a published thread),
+then the thread. With `'threads'` in `column` it sits in the left column
+instead, compact and without the preview, and |:Diffy-threads| moves the
+cursor into it.
+
+Keys, in the threads view ~
+
+  `<CR>`          Go to the thread (below). On a group header: fold /
+                  unfold; on a file header: its first thread.
+  `<Tab>`         Fold / unfold the group under the cursor.
+  `x`             Resolve / unresolve the thread under the cursor (with a
+                  pull request, staged until you submit).
+  `m`             Only threads you started / everyone's (GitHub).
+  `<C-f>` / `<C-b>`
+                  Scroll the preview.
+  `q` / `<Esc>`   Close the float; leaving it for another window closes it
+                  too.
+
+`<CR>` on a thread opens its file, the cursor on its first line, the thread
+hovered there (that one, when several share the line; `<CR>` enters it):
+
+- An outdated thread opens in the view it was written in: its commit alone
+  when that commit changes the file, else everything up to that commit. A
+  commit no longer in the branch opens as the push it was
+  (|diffy-push-row|).
+
+- Otherwise, when the selected range doesn't show the thread, the selection
+  switches to one that does first (the whole range, else the newest commit
+  showing it).
+
+- Resolved or hidden threads are shown again.
+
+                                                             *diffy-placement*
+Where threads show ~
+
+Every thread is placed the same way, local or GitHub: from where it was
+written (a commit, the merge-base for an old-side GitHub comment) it's
+tracked to whatever each view shows, through git's diff between the two,
+and to the worktree through the buffer itself as you type. It shows in
+every view both ends of its range reach through unchanged lines, renames
+included, and is hidden in the others.
+
+A thread is outdated as soon as its first or last line changes in the
+worktree (in checkout mode, the checked-out commit), and back if you undo;
+a comment on the old side, once it can't be tracked back to the merge-base
+(HEAD without one).
+
+A comment written on the worktree or the index is found by its text within
+±20 lines; once HEAD has that text (you committed it), it becomes a comment
+on HEAD at those lines and is tracked like any other. When its text is
+gone, it's detached.
+
+                                                               *diffy-storage*
+Your comments are kept per branch in `.git/diffy/<branch>/threads.json`,
+whichever review you wrote them in, next to what the GitHub layer read last
+(the pull request, its published threads and reviews), replaced by each
+read. Sessions on the same branch, in one Nvim or several, share them: a
+comment written, edited or deleted in one shows in the others right away
+(`local.json` and `pr-<number>.json` from older versions are merged into it
+the first time).
+
+------------------------------------------------------------------------------
+                                                          *diffy-review-local*
+Local review, for an LLM agent ~
+
+Available in |:Diffy| and |:Diffy-branch|.
+
+`:Diffy review submit` opens a box for an overall message (may be left
+empty); `<C-s>` writes `.git/diffy/<branch>/review.md` with that message and
+every comment not yet sent, marks them sent and copies `review_prompt`
+(|diffy.config|) to the `+` register: paste it to your agent.
+
+Each comment says where it is now (its lines tracked to the worktree, the
+index for an index comment, with the code around them) and where it was
+written (the commit and the diff hunk), then the comment. An outdated,
+detached or old-side comment has no location now: it gets its commit,
+lines and code where it was written. A message alone is sent too.
+
+Each comment's section starts with a `- [ ] resolved` box, and the prompt
+asks the agent to tick it once the comment is handled. diffy reads the
+ticks when it opens the review, on `R`, and before the next submit replaces
+the file: those threads become resolved (`✓` inline, in the Resolved group
+of the threads view). A tick counts once, so a thread you reopen with `x`
+stays open.
+
+`:Diffy review clear` deletes your comments on the branch.
+
+------------------------------------------------------------------------------
+                                                                *diffy-github*
+GitHub review ~
+
+When the session's branch has an open pull request on GitHub, a layer loads
+over |:Diffy| and |:Diffy-branch| (not ranges, |:Diffy-file| or
+|:Diffy-conflicts|): the pull request and review rows in the log
+(|diffy-pr-row|), the published threads, `gP`, and GitHub as a place to
+submit.
+
+The session doesn't wait for it: it renders first, and the layer attaches
+when `gh` answers. As soon as `gh pr view` finds the pull request, its row
+shows with a spinner (`#42 Retry failed uploads ⠹`) until the read comes
+back. The pull request is the one `gh pr view <branch>` finds (it follows
+the branch's upstream, forks included); every read and write goes to that
+pull request's repository. Merged or closed pull requests don't attach, and
+an attached layer goes when a read finds the pull request merged or closed:
+its row, its threads and what was read, not your drafts. `github = false`
+in |diffy.config| turns the layer off.
+
+                                                        *diffy-github-reading*
+Reading ~
+
+- GitHub is read when the session opens, on `R`, on |FocusGained|, and every
+  `github.read_interval` seconds (5 minutes) while the session's tab is
+  current; entering the tab reads when the last read is older than that.
+  One read at a time, one more queued behind it. A read fetches everything,
+  page after page. `:w` and other rebuilds don't read: they place the
+  threads from the last read again.
+
+- Offline (or without `gh`), the layer comes back from the last read, the
+  pull request row saying `offline`; with nothing read before, there's no
+  layer and no warning.
+
+- Threads are placed like every thread (|diffy-placement|), as github.com's
+  "Changes" view does: in the full view and in each commit's view, at the
+  line they track to, hidden where their lines changed. Outdated threads
+  are in the threads view with the others; `<CR>` there opens the commit
+  they were written on, also one a force-push replaced (as the push it
+  was, |diffy-push-row|), and the preview shows their code as written.
+
+                                                         *diffy-github-mirror*
+Your pending review follows your drafts ~
+
+About 2 seconds after you write, edit or delete a draft, diffy mirrors it
+into your pending review on GitHub, which only you see: the review is
+created with the first draft, a draft lands on the commit you wrote it on
+(a removed line as a left-side comment), a reply in its thread.
+
+- Offline, the next successful read does it; a change an Nvim closed on
+  before mirroring goes with the next sync of any session.
+
+- Deleting your last pending comment deletes the review on GitHub; the next
+  draft makes a new one.
+
+- A pending review diffy didn't create (github.com, another machine) is
+  adopted: its comments become your drafts.
+
+- Nothing anyone else sees changes before a GitHub submit.
+
+A draft GitHub can't take stays in diffy, marked `local only: worktree`
+(written on the working tree or the index), `unpushed` (its commit isn't on
+GitHub) or `outside the diff` (beyond the changes and their 3 lines of
+context). It's mirrored once that changes, e.g. after you commit and push.
+
+                                                        *diffy-sync-conflicts*
+Sync conflicts ~
+
+Before changing a mirrored comment, diffy reads it again; it never
+overwrites a change made on github.com:
+
+- A pending comment changed on both sides: both versions show in the
+  thread, the web one marked `github.com`, and the pull request row counts
+  the conflict; `dd` the version you drop (or `e` either). Edited on one
+  side and deleted on the other: the edit wins.
+
+- A staged edit (|diffy-staged-changes|) of a comment edited on github.com:
+  the live comment (`edited on github.com`) then `your edit`; `dd` on your
+  edit drops it, `dd` on the live one stages its deletion, `e` on your edit
+  keeps it over the web one.
+
+- A staged edit of a comment deleted on github.com becomes a draft reply in
+  its thread; a staged deletion of a comment edited there is cancelled.
+  A draft reply, or a staged edit, whose thread was deleted is dropped.
+  Each comes with a notification holding your text.
+
+                                                        *diffy-staged-changes*
+Staged changes ~
+
+Changes to what's already published are kept in diffy until a GitHub
+submit:
+
+- `x` on a published thread stages resolving or unresolving it (`x` again
+  cancels).
+- `e` on your published comment stages an edit, `dd` its deletion (`dd`
+  again cancels).
+
+                                                         *diffy-github-submit*
+Submitting ~
+
+`:Diffy review submit` opens a box for the review message; `<C-s>` then
+asks where it goes: `a` the agent (as without a pull request,
+|diffy-review-local|: your drafts, marked sent and taken out of your
+pending review) or `g` GitHub, which then asks `c` comment, `a` approve or
+`r` request changes (`q` goes back to the message). An argument picks the
+event and means GitHub, skipping both questions; on your own pull request,
+where GitHub only allows a comment, there's no second question. Each
+comment goes to one place.
+
+Before a GitHub submit, a float lists everything going out: new threads,
+replies, staged edits, deletions and resolves, each `[x]`. `x` leaves one
+out (a draft left out stays a draft and goes into a new pending review
+afterwards), `<CR>` sends, `q` cancels. It also lists the drafts that stay
+behind and unpushed commits. Sync conflicts must be settled first.
+
+Then: the drafts left out leave the pending review, the review is
+submitted (with no comment going, the message alone: approving without
+comments), then the staged edits and deletions, then the staged resolves.
+A staged change that fails stays staged and the next sync retries it.
+
+`:Diffy review clear` asks, then drops your drafts and staged changes and
+deletes your pending review on GitHub, adopted comments included.
+
+------------------------------------------------------------------------------
+                                                            *diffy-highlights*
+All highlight groups are defined with `default = true`, so a colorscheme or
+your config can override any of them with |nvim_set_hl()|.
+
+Files and commits ~
+
+- `DiffyAdded`, `DiffyChanged`, `DiffyRemoved`, `DiffyConflict` - status
+  letters and counts. Default: `Added`, `Changed`, `Removed`,
+  `DiagnosticError`.
+- `DiffyFileAdded`, `DiffyFileDeleted` - an added / deleted file shown on
+  its own. Default: `DiffAdd`, `DiffDelete`.
+- `DiffyDirectory` - tree folders. Default: `Directory`.
+- `DiffySha`, `DiffyLabel`, `DiffyMerge` - log rows. Default: `Identifier`,
+  `Title`, `Comment`.
+- `DiffySelection` - selected commits. Default: `Visual`.
+- `DiffyCurrentFile`, `DiffyCurrentFileName` - the file shown in the diff.
+  Default: `Visual`, bold.
+- `DiffyViewed` - the Viewed group, its folders and files. Default:
+  `Comment`.
+- `DiffyViewedChanged` - the `●` of a viewed file that changed since.
+  Default: `DiagnosticWarn`.
+- `DiffyPanelRule` - the rule between the files and the commits. Default:
+  `WinSeparator`.
+- `DiffyPeek` - what's scrolled off the column, drawn over its edges.
+  Default: `CursorLine`.
+- `DiffySyncState`, `DiffySyncFailed` - the pull request row's `↻` and `⊘`
+  / its `⚠`. Default: `Comment`, `DiagnosticWarn`.
+
+Review ~
+
+- `DiffyThreadSummary` - comment summaries. Default: `Comment`.
+- `DiffyThreadCurrent` - the weight of the open thread's summary. Default:
+  bold.
+- `DiffyThreadSummaryResolved` - summaries and bars of resolved threads
+  (their `✓` uses `DiffyThreadResolved`). Default: `NonText`.
+- `DiffyThreadLane1` … `DiffyThreadLane6` - comment bars and summary dots,
+  a colour per thread. Default: `DiagnosticError`, `DiagnosticWarn`,
+  `DiagnosticInfo`, `DiagnosticHint`, `DiagnosticOk`, `Constant`.
+- `DiffyThreadRange` - line numbers of the commented lines in threads view
+  previews. Default: `PmenuSel`.
+- `DiffyThread` - comment cards. Default: the background of `CursorLine`.
+- `DiffyThreadHeader` - comment header strips. Default: the background of
+  `Pmenu`.
+- `DiffyThreadBorder` - card frames. Default: `WinSeparator`'s colour on
+  the card background.
+- `DiffyThreadBorder1` … `DiffyThreadBorder6` - an open thread's frame, in
+  its lane's colour. Default: the lane's colour on the card background.
+- `DiffyThreadAuthor` - author names. Default: bold.
+- `DiffyThreadAuthor1` … `DiffyThreadAuthor5` - a colour per login.
+  Default: `Identifier`, `DiagnosticHint`, `Constant`, `Title`, `Function`.
+- `DiffyThreadTime` - comment age. Default: `Comment`.
+- `DiffyThreadDraft`, `DiffyThreadPending`, `DiffyThreadSent` - comment
+  states. Default: `DiagnosticWarn`, `DiagnosticInfo`, `Comment`.
+- `DiffyThreadConflict`, `DiffyThreadStaged` - sync conflicts / staged
+  changes. Default: `DiagnosticError`, `DiagnosticHint`.
+- `DiffyThreadResolved`, `DiffyThreadOutdated` - thread states. Default:
+  `DiagnosticOk`, `DiagnosticWarn`.
+- `DiffyThreadCodeBar`, `DiffyThreadSuggestion` - code block bar /
+  suggestion bar and label. Default: `Comment`, `Added`.
+- `DiffyThreadLink` - link text in cards. Default: `Underlined`.
+- `DiffyThreadKey`, `DiffyThreadHint` - footer keys / their labels.
+  Default: `Special`, `Comment`.
+
+------------------------------------------------------------------------------
+                                                                *diffy-events*
+                                                               *DiffyFeedback*
+`User DiffyFeedback`
+
+Fired by |:Diffy-feedback| with `data.text`, the text you wrote, right after
+the box closes, so the handler sees the session as it was. diffy doesn't
+store the feedback; with no such autocommand the command only warns. For
+example, to record it like an error: >lua
+
+  vim.api.nvim_create_autocmd('User', {
+    pattern = 'DiffyFeedback',
+    callback = function(ev)
+      local state = require('diffy').debug_state()
+      my_reporter.record('diffy feedback: ' .. ev.data.text, state)
+    end,
+  })
+<
+------------------------------------------------------------------------------
+                                                         *diffy.debug_state()*
+                          `require('diffy').debug_state`()
+
+Plain-data snapshot of every open session and the last 50 git and `gh`
+commands, for bug reports.
+
+Return ~
+`(table)` With fields:
+  - <sessions> `(table)` - one table per session: its repository root,
+    range, selection, the file shown, its windows and buffers, checkout and
+    conflict state, review backend and thread count. Fields of a session
+    still being built may be nil.
+  - <commands> `(table)` - the recent commands, oldest first: the command,
+    its directory, exit code, duration, the stderr of a failure, and
+    whether its result was dropped as stale.
+
+
+ vim:tw=78:ts=8:noet:ft=help:norl:

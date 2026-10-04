@@ -1,9 +1,10 @@
 # diffy — agent guide
 
-`README.md` is the user-facing reference: every feature, command, key and option. Keep it in sync with the
-code in the same change. This file is for whoever works on diffy: how the code is organised, how to test
-it, and the nvim/git/GitHub behaviour we measured the hard way. `diff-plugin.md` is the original design
-document, being retired; don't cite it (or this file) from code or tests.
+`doc/diffy.txt` (`:help diffy`) is the user-facing reference: every feature, command, key and option. Keep
+it in sync with the code in the same change; `README.md` is only a short intro pointing at it. This file
+is for whoever works on diffy: how the code is organised, how to test it, and the nvim/git/GitHub
+behaviour we measured the hard way. `diff-plugin.md` is the original design document, being retired;
+don't cite it (or this file) from code or tests.
 
 ## Working here
 
@@ -13,7 +14,10 @@ document, being retired; don't cite it (or this file) from code or tests.
 - Run tests from the repo root: `make test` (~10 s, offline, test files in parallel, `JOBS=N` to cap),
   `make test FILE=tests/test_x.lua`, `make test-gh` (live GitHub, opt-in).
 - Comments state the non-obvious why, invariants and gotchas; no narration of how the code came to be.
-- A change that affects behaviour updates `README.md`.
+- A change that affects behaviour updates `doc/diffy.txt`, and `README.md` only when it touches what the
+  README shows. The help file follows mini.nvim's layout: `tw=78`, tags right-aligned to column 78,
+  `# Section ~` headings, `>lua`/`<` code blocks. `|word|` is a link, so never write `a|b` in prose;
+  every link must resolve to a tag (`:helptags doc` fails on a duplicate tag). `doc/tags` is gitignored.
 
 ## Code map
 

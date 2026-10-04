@@ -108,6 +108,8 @@ its own window again, and either one left out of `column` opens in a float.
 |---|---|
 | `]]` | from the files, to the newest selected commit |
 | `[[` | from the commits, to the file shown in the diff |
+| `<leader>dc` | the threads view, as from a diff window (see Review) |
+| `gX` | the PR on github.com, as from a diff window (see Review) |
 
 **Commits** (bottom). The diff always shows one contiguous selection: left is the parent of the oldest
 selected entry, right is the newest one. `Working tree` means HEAD → worktree, index included; selected
@@ -115,6 +117,14 @@ alone, the tree splits it into its unstaged and staged parts (see Files). With c
 the oldest commit's parent to the worktree. `J`/`K` and `]r`/`[r` treat it like a commit.
 Merge commits are dimmed and skipped. In branch views, a selection reaching the oldest commit
 compares against the merge-base, like github.com, so changes merged in from the base branch don't show up.
+
+Going to a thread written on a commit a rebase or force-push took out of the branch (from the threads
+view, `<leader>dl`) adds a row for that commit at the top of the log, `⟲ <sha> <subject>`, and selects
+it: the branch as it was at that push, from where it forked off the base, as github.com anchors
+comments. Its threads are there to read, reply to and resolve; new comments are refused (write them on
+the branch). The row is never part of a range, and goes as soon as you select anything else or the
+session rebuilds (`R`, `:w`). A commit the repo doesn't have (never fetched, or garbage-collected)
+gets a warning instead.
 
 Resting the cursor on a commit shows its full message in a float beside the log: short sha, author, date,
 then the message wrapped to fit. It closes on a non-commit row, when you leave the log, or on `<Esc>`
@@ -281,6 +291,7 @@ the file has comments, and put your own back otherwise.
 | `<leader>dt` | hide / show comments inline altogether |
 | `<leader>dc` | the threads view: every thread, the file in the diff first (`:Diffy threads`) |
 | `gP` | PR description and conversation (when the branch has an open PR) |
+| `gX` | open the PR on github.com (also in the column and the `gP` card) |
 
 Threads open as a framed card over the other diff window; on an added or deleted file, where there is only
 one, right under the commented lines (above them when there's more room there), so they stay visible,
@@ -344,7 +355,7 @@ instead, compact and without the preview, and `:Diffy threads` moves the cursor 
 
 | Key (in the threads view) | |
 |---|---|
-| `<CR>` | go to the thread: its file, the cursor on its first line, the thread hovered there (that one, when several share the line; `<CR>` enters it). An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). A thread written on a commit no longer in the branch that no view shows stays in the threads view with a warning: the preview has its code as written. Resolved or hidden threads are shown again. On a group header: fold / unfold; on a file header: its first thread |
+| `<CR>` | go to the thread: its file, the cursor on its first line, the thread hovered there (that one, when several share the line; `<CR>` enters it). An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit; a commit no longer in the branch opens as the push it was (see The panels). Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). Resolved or hidden threads are shown again. On a group header: fold / unfold; on a file header: its first thread |
 | `<Tab>` | fold / unfold the group under the cursor |
 | `x` | resolve / unresolve the thread under the cursor (with a PR, staged until you submit) |
 | `m` | only threads you started / everyone's (GitHub) |
@@ -408,8 +419,8 @@ the PR merged or closed: its row, its threads and what was read, not your drafts
   with nothing read before, there's no layer and no warning.
 - Threads are placed like every thread (see above), as github.com's "Changes" view does: in the full view
   and in each commit's view, at the line they track to, hidden where their lines changed. Outdated threads
-  are in the threads view with the others; `<CR>` there opens the commit they were written on, and the
-  preview shows their code as written, also for commits a force-push replaced.
+  are in the threads view with the others; `<CR>` there opens the commit they were written on, also one a
+  force-push replaced (as the push it was), and the preview shows their code as written.
 - **Your pending review follows your drafts.** About 2 seconds after you write, edit or delete a draft,
   diffy mirrors it into your pending review on GitHub, which only you see: the review is created with the
   first draft, a draft lands on the commit you wrote it on (a removed line as a left-side comment), a

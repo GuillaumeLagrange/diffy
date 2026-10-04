@@ -1349,6 +1349,8 @@ function M.setup(session)
   end
   require('diffy.layout').map_panel_keys(session, buf)
   require('diffy.review.ui').map_last(session, buf)
+  require('diffy.review.ui').map_threads(session, buf)
+  require('diffy.review.ui').map_open_pr(session, buf)
   vim.api.nvim_create_autocmd({ 'WinResized', 'VimResized' }, {
     group = session.augroup,
     callback = function()

@@ -628,10 +628,12 @@ function M.arm_ready_raw(child, event)
 end
 
 --- Block (up to `timeout` ms, default 5000) until the listener armed by
---- `M.arm_ready` fires, then remove it.
+--- `M.arm_ready` fires, then remove it. Fails the case on timeout: a wait
+--- on an event that never comes would otherwise only slow the case down.
 function M.wait_ready(child, timeout)
-  child.lua(('vim.wait(%d, function() return _G.__diffy_ready end)'):format(timeout or 5000))
+  local fired = child.lua(('return vim.wait(%d, function() return _G.__diffy_ready end)'):format(timeout or 5000))
   child.lua('pcall(vim.api.nvim_del_autocmd, _G.__diffy_ready_au)')
+  assert(fired, 'DiffyReady never fired')
 end
 
 --- `M.wait_ready` through raw `child.api` calls, for right after a keystroke
@@ -639,10 +641,11 @@ end
 --- a handler spawning git synchronously), where
 --- `child.lua`'s guard would throw.
 function M.wait_ready_raw(child, timeout)
-  vim.wait(timeout or 5000, function()
+  local fired = vim.wait(timeout or 5000, function()
     return child.api.nvim_exec_lua('return _G.__diffy_ready', {}) == true
   end, 10)
   child.api.nvim_exec_lua('pcall(vim.api.nvim_del_autocmd, _G.__diffy_ready_au)', {})
+  assert(fired, 'DiffyReady never fired')
 end
 
 return M

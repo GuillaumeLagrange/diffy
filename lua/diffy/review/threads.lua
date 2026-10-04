@@ -516,19 +516,7 @@ local function setup(session, buf)
     if row and row.kind == 'group' then
       toggle_group(session, row.key)
     elseif row then
-      local sha = ui.nowhere(session, row.entry.thread)
-      if sha then
-        local preview = session.wins.threads_preview and vim.api.nvim_win_is_valid(session.wins.threads_preview)
-        vim.notify(
-          ('diffy: written on %s, a commit no longer in the branch, and no view shows it%s'):format(
-            sha:sub(1, 7),
-            preview and ': the preview has its code as written' or ''
-          ),
-          vim.log.levels.WARN
-        )
-      else
-        jump(session, row.entry.thread)
-      end
+      jump(session, row.entry.thread)
     end
   end, { buffer = buf, desc = 'go to thread / fold group' })
   map(session, 'n', '<Tab>', function()

@@ -73,7 +73,15 @@ T[':tabclose before DiffyReady tears down cleanly, and the pending async render 
   -- release it and let the rest of the real async chain run to where it used to crash
   child.lua('vim.wait(2000, function() return _G.__release_root ~= nil end)')
   child.lua('_G.__release_root()')
-  child.lua("vim.wait(1500, function() return vim.v.errmsg ~= '' end)")
+  -- the result dropped as the session is gone is the end of the chain; a regression runs on, up to the timeout
+  child.lua([[vim.wait(1500, function()
+    for _, e in ipairs(require('diffy.git.run').recent) do
+      if e.cmd[2] == 'rev-parse' and e.cmd[3] == '--show-toplevel' and e.dropped then
+        return true
+      end
+    end
+    return vim.v.errmsg ~= ''
+  end)]])
 
   MiniTest.expect.equality(child.lua_get('vim.v.errmsg'), '')
   expect_no_session()

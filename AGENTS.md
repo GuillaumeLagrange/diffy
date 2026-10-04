@@ -32,7 +32,7 @@ lua/diffy/
   panels/stack.lua      the tree and the log sharing one column window/buffer: row ranges, rule, gap, peek
                         floats over the edges, per-row key dispatch, `]]`/`[[`
   panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), the GitHub layer's
-                        PR row and review markers, selection keys
+                        PR row and review markers, the throwaway push row (a rewritten commit's threads), selection keys
   panels/commitmsg.lua  float beside the column while the log cursor rests on a commit (its message) or the PR row
   panels/tree.lua       files view: tree rows (Unstaged/Staged sections for the working tree, Viewed groups), right blob
                         ids for worktree files, staging and viewed keys, file navigation
@@ -153,7 +153,10 @@ Rules for every test:
    checks instead of content, near-duplicates of the same path, error-wording pins.
 6. Boundaries and transitions over happy-path repeats. Regression tests come from real bugs.
 7. Deterministic: wait on `DiffyReady` or `vim.wait` on an observable condition; no network outside
-   `make test-gh`. Git, fugitive and nvim are never mocked; the only fake is the `gh` transport.
+   `make test-gh`. `ui.wait_ready` fails the case when its event never fires: wait only for an event the
+   action fires (a no-op key fires nothing). Proving something *doesn't* happen: wait for the end of the
+   chain that would do it (a dropped result in `run.recent`, every started command exited), not a timeout.
+   Git, fugitive and nvim are never mocked; the only fake is the `gh` transport.
    Test files run concurrently (one nvim each): anything outside `vim.fn.tempname()`, like the fixed
    `/tmp/diffy-*-fixture` screenshot dirs, needs a path no other file uses.
 8. The leak check (`tests/helpers/leak.lua`, `post_case` of every UI file) fails a case that leaves a diffy
@@ -260,6 +263,8 @@ with the real config and `--listen`, screenshotted with `grim`:
   window's view (`line('w0')` inside `win_execute`, which diffchar.vim does on every `WinScrolled`); then
   the window scrolls to its cursor, out of alignment. `diffpair.keep_bound_cursor_visible` clamps it on
   `CursorMoved`, which runs before `WinScrolled`. Vim does the same.
+- A buffer-local map that is a prefix of a global one waits 'timeoutlen' (1 s) for more keys unless it's
+  `nowait`: fugitive maps `y<C-G>` globally, nvim `gcc`, `gr*`.
 - `nvim_set_current_win`/`nvim_win_set_buf` don't fire `WinEnter`/`BufEnter`. `BufWinEnter` runs with the
   affected window current and only when the buffer actually changes.
 - Autocmd callbacks don't nest: buffer swaps and option changes made inside a `BufWinEnter` callback fire

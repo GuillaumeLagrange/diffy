@@ -6,6 +6,8 @@
 --   { kind = 'worktree', rev = 'WORKTREE' }
 --   { kind = 'commit', sha, parents, subject, merge, rev = sha }
 --   { kind = 'pr' } / { kind = 'marker', reviews } (the GitHub layer's rows)
+--   { kind = 'push', sha, base, label, rev = sha } (a commit rewritten out of
+--     the branch, shown from `base`, its fork point: see `log.show_push`)
 local M = {}
 
 -- The two sections of a lone working tree selection; file rows carry one of
@@ -36,6 +38,9 @@ function M.resolve(entries, top_idx, bottom_idx)
   assert(top_idx <= bottom_idx, 'selection.resolve: top_idx must be <= bottom_idx')
   local top = entries[top_idx]
   local bottom = entries[bottom_idx]
+  if top.kind == 'push' then
+    return { left = top.base, right = top.rev, top = top, bottom = top, top_idx = top_idx, bottom_idx = bottom_idx }
+  end
 
   local right = top.rev
   local left

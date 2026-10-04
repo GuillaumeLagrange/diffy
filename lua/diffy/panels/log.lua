@@ -487,6 +487,55 @@ function M.select(session, top, bottom, done)
   session.on_select(session, done)
 end
 
+--- Show `entry`, a `push` row (a commit rewritten out of the branch, see
+--- selection.lua), at the top of the log under the PR row, replacing any
+--- other, and select it; `done()` once drawn. It stays until another
+--- selection (`drop_push`) or a rebuild, and is never a range endpoint.
+function M.show_push(session, entry, done)
+  local entries = session.entries
+  local at
+  for i, e in ipairs(entries) do
+    if e.kind == 'push' then
+      at = i
+    end
+  end
+  if at and entries[at].sha == entry.sha then
+    if session.sel and session.sel.top == at and session.sel.bottom == at then
+      done()
+      return
+    end
+  elseif at then
+    entries[at] = entry
+  else
+    at = 1
+    while entries[at] and entries[at].kind == 'pr' do
+      at = at + 1
+    end
+    table.insert(entries, at, entry)
+  end
+  M.select(session, at, at, done)
+end
+
+--- Remove the push row unless it's what `session.sel` holds, keeping the
+--- selection on the same entries. Whether it removed one.
+function M.drop_push(session)
+  local entries, sel = session.entries or {}, session.sel
+  for i, e in ipairs(entries) do
+    if e.kind == 'push' then
+      if sel and sel.top == i and sel.bottom == i then
+        return false
+      end
+      table.remove(entries, i)
+      if sel then
+        sel.top = sel.top > i and sel.top - 1 or sel.top
+        sel.bottom = sel.bottom > i and sel.bottom - 1 or sel.bottom
+      end
+      return true
+    end
+  end
+  return false
+end
+
 --- `J`/`K` (also `]r`/`[r` from the diff windows): collapse the current
 --- selection to a single entry and move it `delta` non-merge entries
 --- (positive toward older commits, negative toward newer), stopping at the
@@ -558,6 +607,8 @@ function M.setup(session)
   end, { buffer = buf, desc = 'previous file' })
   require('diffy.layout').map_panel_keys(session, buf)
   require('diffy.review.ui').map_last(session, buf)
+  require('diffy.review.ui').map_threads(session, buf)
+  require('diffy.review.ui').map_open_pr(session, buf)
   require('diffy.panels.commitmsg').setup(session)
 end
 

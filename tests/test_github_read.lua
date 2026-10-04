@@ -270,6 +270,25 @@ T['gP shows an HTML bot comment as readable text: headings, badges, folded detai
   child.cmd('Diffy close')
 end
 
+T['gX opens the PR on github.com from a diff window and from the column'] = function()
+  if live.enabled then
+    MiniTest.skip('fake PR url only')
+  end
+  child.lua([[
+    _G.__opened = {}
+    vim.ui.open = function(url) table.insert(_G.__opened, url) end
+  ]])
+  open_pr()
+  open_file('f.txt')
+  child.api.nvim_set_current_win(wins().right)
+  child.type_keys('gX')
+  child.api.nvim_set_current_win(wins().log)
+  child.type_keys('gX')
+  local url = 'https://github.com/GuillaumeLagrange/diffy-tests/pull/2'
+  MiniTest.expect.equality(child.lua_get('_G.__opened'), { url, url })
+  child.cmd('Diffy close')
+end
+
 T['<CR> in the threads view opens an outdated thread where it was written: its commit, or everything up to it'] = function()
   if live.enabled then
     MiniTest.skip('placement: recorded-fixture only')
@@ -309,7 +328,7 @@ T['<CR> in the threads view opens an outdated thread where it was written: its c
   child.cmd('Diffy close')
 end
 
-T['an outdated thread written on a commit rewritten out of the branch previews its code as written; <CR> stays put'] = function()
+T['<CR> on a thread written on a commit rewritten out of the branch opens that push, where it can be answered and resolved'] = function()
   if live.enabled then
     MiniTest.skip('placement: recorded-fixture only')
   end
@@ -330,36 +349,110 @@ T['an outdated thread written on a commit rewritten out of the branch previews i
   plumb({ 'update-index', '--cacheinfo', '100644,' .. plumb({ 'hash-object', '-w', '--stdin' }, table.concat(lines, '\n') .. '\n') .. ',f.txt' })
   local old = plumb({ 'commit-tree', plumb({ 'write-tree' }), '-p', p3, '-m', 'earlier push' })
   vim.fn.delete(index)
-  child.lua(([[
-    local pr = _G.__fake_state.reads[2].repository.pullRequest
-    table.insert(pr.reviewThreads.nodes, {
-      id = 'PRRT_OLD', isResolved = false, path = 'f.txt', diffSide = 'RIGHT', originalLine = 70,
-      comments = { nodes = { {
-        id = 'PRRC_OLD', author = { login = 'x' }, body = 'OLD outdated here',
-        createdAt = '2026-09-27T07:00:00Z', originalLine = 70,
-        commit = { oid = %q }, originalCommit = { oid = %q },
-        diffHunk = '@@ -69,2 +69,2 @@\n ' .. %q .. '\n-' .. %q .. '\n+earlier push: 70',
-      } } },
-    })
-  ]]):format(old, old, lines[69], was))
+  local function serve(id, oid)
+    child.lua(([[
+      local pr = _G.__fake_state.reads[2].repository.pullRequest
+      table.insert(pr.reviewThreads.nodes, {
+        id = 'PRRT_' .. %q, isResolved = false, path = 'f.txt', diffSide = 'RIGHT', originalLine = 70,
+        comments = { nodes = { {
+          id = 'PRRC_' .. %q, author = { login = 'x' }, body = %q .. ' outdated here',
+          createdAt = '2026-09-27T07:00:00Z', originalLine = 70,
+          commit = { oid = %q }, originalCommit = { oid = %q },
+          diffHunk = '@@ -69,2 +69,2 @@\n ' .. %q .. '\n-' .. %q .. '\n+earlier push: 70',
+        } } },
+      })
+    ]]):format(id, id, id, oid, oid, lines[69], was))
+  end
+  serve('OLD', old)
+  serve('GONE', ('e'):rep(40)) -- a push this repo never fetched
   child.o.columns = 200
   open_pr()
-  local before = ui.rows_with(child, 'log', 'DiffySelection')
-  child.cmd('Diffy threads')
-  for i, l in ipairs(ui.threads_view(child).rows) do
-    if l:find('OLD outdated here', 1, true) then
-      child.api.nvim_win_set_cursor(wins().threads, { i, 0 })
+  ui.capture_warnings(child)
+  local function from_threads_view(id)
+    child.cmd('Diffy threads')
+    for i, l in ipairs(ui.threads_view(child).rows) do
+      if l:find(id .. ' outdated here', 1, true) then
+        child.api.nvim_win_set_cursor(wins().threads, { i, 0 })
+      end
+    end
+    return ui.threads_view(child)
+  end
+
+  local view = from_threads_view('OLD')
+  local short = old:sub(1, 7)
+  MiniTest.expect.equality(vim.tbl_contains(view.preview, ('Written on %s, a commit no longer in the branch'):format(short)), true)
+  MiniTest.expect.equality(vim.tbl_contains(view.preview, '70 │ earlier push: 70'), true)
+  ui.arm_ready_raw(child, 'thread')
+  child.type_keys('<CR>')
+  ui.wait_ready_raw(child)
+  local float = ui.thread_float(child)
+  MiniTest.expect.equality({ float.over == 'left', table.concat(float.text, '\n'):find('OLD outdated here', 1, true) ~= nil }, { true, true })
+  local right = wins().right
+  MiniTest.expect.equality(child.api.nvim_win_get_cursor(right)[1], 70)
+  MiniTest.expect.equality(child.api.nvim_buf_get_lines(child.api.nvim_win_get_buf(right), 69, 70, false), { 'earlier push: 70' })
+  local selected = ui.rows_with(child, 'log', 'DiffySelection')
+  MiniTest.expect.equality(#selected, 1)
+  MiniTest.expect.equality(selected[1]:find('⟲ ' .. short .. ' earlier push', 1, true) ~= nil, true)
+  -- drawn inline like in any view: its summary under the line, the line marked
+  local inline = vim.tbl_filter(function(d)
+    return d.summary:find('OLD outdated here', 1, true) ~= nil
+  end, ui.threads_visible(child, 'right'))
+  MiniTest.expect.equality(vim.tbl_map(function(d)
+    return d.line
+  end, inline), { 70 })
+
+  -- answered and resolved like any thread
+  child.api.nvim_set_current_win(right)
+  child.type_keys('<CR>')
+  ui.arm_ready_raw(child, 'compose')
+  child.type_keys('r')
+  ui.wait_ready_raw(child)
+  child.type_keys('answered on the earlier push', '<Esc>')
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys('<C-s>')
+  ui.wait_ready_raw(child)
+  child.api.nvim_set_current_win(right)
+  child.type_keys('<CR>', 'x')
+  local function stored()
+    local path = dir .. '/.git/diffy/sandbox/placement/threads.json'
+    local data = vim.fn.filereadable(path) == 1 and vim.json.decode(table.concat(vim.fn.readfile(path), '\n')) or {}
+    for _, t in ipairs(data.threads or {}) do
+      if t.id == 'PRRT_OLD' then
+        return t
+      end
     end
   end
-  local view = ui.threads_view(child)
-  local written = ('Written on %s, a commit no longer in the branch'):format(old:sub(1, 7))
-  MiniTest.expect.equality(vim.tbl_contains(view.preview, written), true)
-  MiniTest.expect.equality(vim.tbl_contains(view.preview, '70 │ earlier push: 70'), true)
-
-  child.type_keys('<CR>')
-  MiniTest.expect.equality(ui.threads_view(child).cursor, view.cursor)
-  MiniTest.expect.equality(ui.rows_with(child, 'log', 'DiffySelection'), before)
+  vim.wait(2000, function()
+    local t = stored()
+    return t and t.resolve_staged
+  end, 10)
+  local t = stored()
+  MiniTest.expect.equality(t and t.resolve_staged, 'resolve')
+  MiniTest.expect.equality(t.comments[#t.comments].body, 'answered on the earlier push')
   child.type_keys('q')
+
+  -- the push row goes with the next selection
+  for i, l in ipairs(ui.layout(child).log) do
+    if l:find('⟲', 1, true) then
+      ui.cursor_to(child, 'log', i)
+    end
+  end
+  ui.arm_ready(child, 'select')
+  child.type_keys('J')
+  ui.wait_ready(child)
+  for _, l in ipairs(ui.layout(child).log) do
+    MiniTest.expect.equality(l:find('⟲', 1, true), nil)
+  end
+
+  -- a push the repo doesn't have: a warning, nothing moves
+  local before = ui.rows_with(child, 'log', 'DiffySelection')
+  from_threads_view('GONE')
+  child.type_keys('<CR>')
+  vim.wait(2000, function()
+    return #ui.warnings(child, 'WARN') > 0
+  end, 10)
+  MiniTest.expect.equality(ui.warnings(child, 'WARN')[1]:find('no longer has', 1, true) ~= nil, true)
+  MiniTest.expect.equality(ui.rows_with(child, 'log', 'DiffySelection'), before)
   child.cmd('Diffy close')
 end
 
@@ -594,7 +687,9 @@ T['J, K, a and visual ranges never select the PR row or a review marker'] = func
   open_pr()
   log_keys(2, '<CR>', 'select')
   MiniTest.expect.equality(selected_rows(), { 'Working tree' })
-  log_keys(2, 'K', 'select')
+  -- already the first selectable entry: K selects nothing, so there is nothing to wait for
+  ui.cursor_to(child, 'log', 2)
+  child.type_keys('K')
   MiniTest.expect.equality(selected_rows(), { 'Working tree' })
   -- the marker above P7 sits between the working tree and P7
   log_keys(2, 'J', 'select')

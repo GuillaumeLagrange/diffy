@@ -1375,6 +1375,10 @@ function M.compose(session, mode)
   if not side then
     return
   end
+  if session.pair and session.pair.top.kind == 'push' then
+    vim.notify('diffy: this commit is no longer in the branch: reply to its threads here, write new ones on the branch', vim.log.levels.WARN)
+    return
+  end
   if not session.current_path or not vim.w[win].diffy_path then
     vim.notify('diffy: no file on this side to comment on', vim.log.levels.WARN)
     return
@@ -2024,14 +2028,56 @@ function M.in_log(session, sha)
   return false
 end
 
---- The commit `thread` was written on when the log doesn't list it (rewritten
---- by a rebase or force-push) and no selection shows the thread, else nil.
-function M.nowhere(session, thread)
-  local sha = model.written_on(thread)
-  if sha and not M.in_log(session, sha) and not selection_for(session, thread) then
+--- The commit an outdated or detached `thread` was written on when the log
+--- doesn't list it (a rebase or force-push rewrote it), else nil.
+local function written_off_branch(session, thread)
+  local sha = (thread.outdated or thread._detached) and model.written_on(thread)
+  if sha and not M.in_log(session, sha) then
     return sha
   end
   return nil
+end
+
+--- Select the throwaway view of `sha`, a commit rewritten out of the branch
+--- (`log.show_push`): the branch as it was then, from its fork point off
+--- the base (`sha`'s own changes without a merge-base), as GitHub anchors
+--- comments. `cb()` once drawn; warns instead when the repo doesn't have
+--- `sha` anymore.
+local function select_push(session, sha, cb)
+  local review = session.review
+  local mb = review.merge_base or (session.entries and session.entries.base)
+  local function git(args, on_exit)
+    run.git(args, { cwd = session.root, session = session, notify_on_error = false, on_exit = on_exit })
+  end
+  git({ 'show', '-s', '--format=%H%x1f%P%x1f%s', sha .. '^{commit}' }, function(res)
+    local full, parents, subject = (res.stdout or ''):match('^(%x+)\31([^\31]*)\31([^\n]*)')
+    if res.code ~= 0 or not full then
+      vim.notify(
+        ('diffy: this thread was written on %s, which this repo no longer has: fetch it to see the thread there'):format(sha:sub(1, 7)),
+        vim.log.levels.WARN
+      )
+      return
+    end
+    local entry = {
+      kind = 'push',
+      sha = full,
+      rev = full,
+      parents = vim.split(parents, ' ', { trimempty = true }),
+      subject = subject,
+      label = ('⟲ %s %s'):format(full:sub(1, 7), subject),
+    }
+    local function show(base)
+      entry.base = base or require('diffy.selection').parent(entry)
+      require('diffy.panels.log').show_push(session, entry, cb)
+    end
+    if not mb then
+      show(nil)
+      return
+    end
+    git({ 'merge-base', mb, full }, function(r)
+      show(r.code == 0 and vim.trim(r.stdout) or nil)
+    end)
+  end)
 end
 
 --- Select `sel` (unless it's the current selection), then jump to `thread`.
@@ -2056,7 +2102,12 @@ end
 function M.goto_thread(session, thread, opts)
   opts = opts or {}
   if not opts.revealed then
-    if thread.outdated then
+    local off_branch = written_off_branch(session, thread)
+    if off_branch then
+      select_push(session, off_branch, function()
+        M.goto_thread(session, thread, vim.tbl_extend('force', opts, { revealed = true }))
+      end)
+    elseif thread.outdated then
       written_selection(session, thread, function(sel)
         reveal(session, thread, sel or selection_for(session, thread), opts)
       end)
@@ -2139,6 +2190,29 @@ function M.map_last(session, buf)
   session_mod.map(session, 'n', '<leader>dl', function()
     M.goto_last(session)
   end, { buffer = buf, desc = 'review: back to the last thread' })
+end
+
+--- `<leader>dc` (the threads view) on `buf`, a diff window's or the column's.
+function M.map_threads(session, buf)
+  session_mod.map(session, 'n', '<leader>dc', function()
+    require('diffy.review.threads').open(session, {})
+  end, { buffer = buf, desc = 'review: every thread' })
+end
+
+--- `gX` (the PR on github.com) on `buf`, a diff window's, the column's or the `gP` card's.
+function M.map_open_pr(session, buf)
+  session_mod.map(session, 'n', 'gX', function()
+    M.open_pr_in_browser(session)
+  end, { buffer = buf, desc = 'review: open the PR in the browser' })
+end
+
+function M.open_pr_in_browser(session)
+  local pr = session.review and session.review.pr
+  if not (pr and pr.url) then
+    vim.notify('diffy: `gX` needs the branch to have an open PR', vim.log.levels.WARN)
+    return
+  end
+  vim.ui.open(pr.url)
 end
 
 --- The thread `]t` (`delta` > 0) or `[t` (< 0) opens from the current
@@ -2245,14 +2319,13 @@ function M.setup_diff_keymaps(session, buf)
   map(session, 'n', '<leader>dr', function()
     M.toggle_resolved(session)
   end, { buffer = buf, desc = 'review: toggle resolved threads' })
-  map(session, 'n', '<leader>dc', function()
-    require('diffy.review.threads').open(session, {})
-  end, { buffer = buf, desc = 'review: every thread' })
   map(session, 'n', 'gP', function()
     M.open_pr_description(session)
   end, { buffer = buf, desc = 'review: PR description' })
   map_walk_keys(session, buf, 'review: ')
   M.map_last(session, buf)
+  M.map_threads(session, buf)
+  M.map_open_pr(session, buf)
   render.map_click(session, buf)
   map(session, 'n', '<Esc>', function()
     return M.dismiss(session)
@@ -2332,6 +2405,7 @@ function M.open_pr_description(session)
   session_mod.map(session, 'n', 'q', function()
     close_win(win)
   end, { buffer = buf, desc = 'close PR description' })
+  M.map_open_pr(session, buf)
 end
 
 --- `:Diffy review submit`'s modal, centered since a review body isn't

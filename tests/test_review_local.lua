@@ -622,7 +622,7 @@ T['on an added file the thread float\'s frame starts on its thread\'s bar'] = fu
 
   child.api.nvim_set_current_win(win)
   arm_ready_raw('thread')
-  child.type_keys('13G')
+  child.type_keys('1G', '13G')
   ui.wait_ready_raw(child)
   MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('outer', 1, true) ~= nil, true)
   local outer = cols()
@@ -1027,6 +1027,25 @@ T['the threads view groups open, outdated, detached, then resolved threads (fold
   child.cmd('Diffy close')
 end
 
+T['<leader>dc opens the threads view from the file tree and from the commit log'] = function()
+  open_default()
+  write_comment(ui.wins(child).right, 5, 'a thread')
+
+  for _, panel in ipairs({ 'tree', 'log' }) do
+    ui.cursor_to(child, panel, 1)
+    arm_ready_raw('threads')
+    child.type_keys('\\dc')
+    ui.wait_ready_raw(child)
+    local view = ui.threads_view(child)
+    MiniTest.expect.equality(view.float, true)
+    MiniTest.expect.equality(ui.thread_groups(view)[1].rows[1]:match('f%.txt:5') ~= nil, true)
+    child.type_keys('q')
+    MiniTest.expect.equality(vim.wait(1000, function() return ui.threads_view(child) == vim.NIL end, 10), true)
+  end
+
+  child.cmd('Diffy close')
+end
+
 T['config.column puts the threads view in the column, compact, kept by :Diffy panel, <CR> going to the thread'] = function()
   child.lua([[require('diffy').setup({ column = { 'tree', 'threads', 'log' } })]])
   open_default()
@@ -1113,9 +1132,9 @@ T['<leader>dl goes back into the last thread you were in, from another file, pas
   vim.fn.writefile(Repo.edit(3, 'changed again')(vim.fn.readfile(repo.dir .. '/f.txt')), repo.dir .. '/f.txt')
   vim.fn.writefile(Repo.edit(4, 'g changed')(vim.fn.readfile(repo.dir .. '/g.txt')), repo.dir .. '/g.txt')
   open_default()
-  ui.open_tree_row(child, 'g.txt', '<CR>', 'render')
+  ui.open_tree_row(child, 'g.txt', '<CR>', 'open_row')
   write_comment(ui.wins(child).right, 4, 'on g')
-  ui.open_tree_row(child, 'f.txt', '<CR>', 'render')
+  ui.open_tree_row(child, 'f.txt', '<CR>', 'open_row')
   local w = ui.wins(child)
   write_comment(w.right, 5, 'come back here')
   -- a reply, so the jump has to land on the comment you left the thread on,
@@ -1130,7 +1149,7 @@ T['<leader>dl goes back into the last thread you were in, from another file, pas
   child.type_keys('q')
 
   -- in g.txt, its thread only previewed by the cursor resting on it
-  ui.open_tree_row(child, 'g.txt', '<CR>', 'render')
+  ui.open_tree_row(child, 'g.txt', '<CR>', 'open_row')
   child.api.nvim_set_current_win(ui.wins(child).right)
   child.type_keys('1G', '4G')
   MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('on g', 1, true) ~= nil, true)

@@ -396,9 +396,14 @@ function M.start(spec)
 
   local s = session.open({ range = spec })
   s.on_select = function(sess, done)
+    local dropped = log_panel.drop_push(sess)
     require('diffy.checkout').before_select(sess, function()
       sess.pair = selection.resolve(sess.entries, sess.sel.top, sess.sel.bottom)
       log_panel.render(sess)
+      -- the push row came or went: the log's height changed
+      if dropped or sess.pair.top.kind == 'push' then
+        require('diffy.layout').fit_column(sess)
+      end
       tree_panel.render(sess, function()
         run.ready({ session = sess.id, event = 'select' })
         if done then

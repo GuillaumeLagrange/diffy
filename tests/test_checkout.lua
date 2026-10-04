@@ -68,7 +68,13 @@ end
 T['`X` on a commit with a dirty tree refuses, leaving HEAD untouched'] = function()
   vim.fn.writefile({ 'dirty, uncommitted' }, repo.dir .. '/f.txt')
 
-  checkout_c2()
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  child.api.nvim_set_current_win(ui.wins(child).log)
+  select('J')
+  select('J')
+  press('X')
 
   MiniTest.expect.equality(ui.git(repo.dir, { 'symbolic-ref', '--short', 'HEAD' }), 'feat')
   MiniTest.expect.equality(ui.git(repo.dir, { 'rev-parse', 'HEAD' }), repo.sha.C3)

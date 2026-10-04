@@ -157,23 +157,25 @@ T['rapid J J J ends up showing the last selection, even if an earlier one\'s git
     end
   ]]):format(delete))
 
-  ui.arm_ready(child, 'select')
   child.type_keys('J')
   child.type_keys('J')
   child.type_keys('J')
-  ui.wait_ready(child)
-
+  -- Rename's render may land before the last J is read: wait for C1's, not the first `select`
+  MiniTest.expect.equality(vim.wait(5000, function()
+    return vim.deep_equal(ui.layout(child).tree, c1_tree)
+  end, 10), true)
   MiniTest.expect.equality(selected(), { 'C1' })
-  MiniTest.expect.equality(ui.layout(child).tree, c1_tree)
 
-  -- release the stale render (raw, then the numstat it triggers)
+  -- release the stale render (raw, then the numstat it triggers) until it issues nothing more
   for _ = 1, 10 do
     child.lua([[
       while #_G.__deferred > 0 do
         table.remove(_G.__deferred, 1)()
       end
     ]])
-    child.lua('vim.wait(300, function() return #_G.__deferred > 0 end)')
+    if not child.lua('return vim.wait(300, function() return #_G.__deferred > 0 end)') then
+      break
+    end
   end
 
   MiniTest.expect.equality(ui.layout(child).tree, c1_tree)

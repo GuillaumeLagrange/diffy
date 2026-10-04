@@ -423,10 +423,16 @@ T['section and unstage keys leave a conflicted file in conflict'] = function()
   child.type_keys('s')
   child.api.nvim_win_set_cursor(w.tree, { line_in('Staged', 'U f.txt'), 0 })
   child.type_keys('u')
+  -- a `git add`/`git reset` the keys would wrongly run has exited once every command diffy started has
   child.lua([[
     vim.wait(1000, function()
-      return vim.system({ 'git', 'ls-files', '-u' }, { text = true }):wait().stdout == ''
-    end, 50)
+      for _, e in ipairs(require('diffy.git.run').recent) do
+        if e.code == nil then
+          return false
+        end
+      end
+      return true
+    end, 10)
   ]])
   MiniTest.expect.equality(ui.git(repo.dir, { 'ls-files', '-u', '--', 'f.txt' }) ~= '', true)
 

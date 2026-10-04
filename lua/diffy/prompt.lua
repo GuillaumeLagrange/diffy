@@ -46,8 +46,9 @@ local function open(session, lines, cb)
     end
     cb(value)
   end
+  -- nowait: fugitive's global `y<C-G>` would hold `y` for 'timeoutlen'
   local function map(lhs, fn)
-    session_mod.map(session, 'n', lhs, fn, { buffer = buf, desc = 'prompt: ' .. lhs })
+    session_mod.map(session, 'n', lhs, fn, { buffer = buf, nowait = true, desc = 'prompt: ' .. lhs })
   end
   return win, set_lines, map, finish
 end

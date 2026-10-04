@@ -202,6 +202,17 @@ function M.snippet(thread, max)
   return rows
 end
 
+--- The commit `thread` was written on: GitHub's `originalCommit`, else the
+--- anchor's commit. nil for worktree and index comments.
+function M.written_on(thread)
+  local raw = thread._raw_comments and thread._raw_comments[1]
+  local sha = (raw and raw.originalCommit and raw.originalCommit.oid) or thread.anchor.commit
+  if sha == 'worktree' or sha == 'index' then
+    return nil
+  end
+  return sha
+end
+
 --- Parse one file's unified diff (`git diff -U*`) into hunks:
 --- `{ old_start, old_count, new_start, new_count, lines (incl. @@ header) }[]`.
 function M.parse_hunks(diff_text)

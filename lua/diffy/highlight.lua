@@ -8,6 +8,8 @@ local LINKS = {
   DiffyRemoved = 'Removed',
   -- a viewed file whose change changed since: the `●` before its name
   DiffyViewedChanged = 'DiagnosticWarn',
+  -- the Viewed group: its header, folders and files
+  DiffyViewed = 'Comment',
   -- the PR row's sync icons: `↻` syncing, `⊘` offline / `⚠` sync failed
   DiffySyncState = 'Comment',
   DiffySyncFailed = 'DiagnosticWarn',

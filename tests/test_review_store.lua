@@ -151,7 +151,7 @@ T["two nvims on the same branch keep each other's drafts, and one's deletion sta
   local right = ui.wins(child).right
   child.api.nvim_set_current_win(right)
   child.fn.win_execute(right, 'call cursor(5, 1)')
-  child.type_keys('K')
+  child.type_keys('<CR>')
   ui.arm_ready_raw(child, 'review')
   child.type_keys('dd')
   ui.wait_ready_raw(child)

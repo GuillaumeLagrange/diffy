@@ -13,9 +13,11 @@ M.config = {
     -- and go to the file tree
     toggle_panel = '<leader>e',
     -- in the diff windows: mark the file shown viewed, or unmark it
-    toggle_viewed = '<leader>m',
+    toggle_viewed = '<leader>dm',
     -- in the file tree: the same for the file, folder or section at the cursor
     tree_toggle_viewed = 'm',
+    -- in the diff windows and the file tree: undo the last mark or unmark, one more per press
+    undo_viewed = '<leader>du',
   },
   -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
@@ -326,6 +328,7 @@ function M.build(s, done)
             require('diffy.navigation').setup(s)
             require('diffy.diffpair').track_edits(s)
             require('diffy.diffpair').keep_bound_cursor_visible(s)
+            tree_panel.restore_last_file(s)
             s.setup_done = true
           end
           local function finish()

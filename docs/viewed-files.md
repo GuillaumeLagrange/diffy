@@ -15,11 +15,11 @@ Every view works the same way, with or without a PR: marks are diffy's own, neve
 
 ## What it looks like
 
-- In the file tree, `m` toggles the file under the cursor. From a diff window, `<leader>m` toggles the file
+- In the file tree, `m` toggles the file under the cursor. From a diff window, `<leader>dm` toggles the file
   shown. Both are configurable. `:Diffy viewed` toggles the file shown; `:Diffy viewed clear` drops its marks.
 - On a folder, a section header or the Viewed group's header, `m` marks every file under it, unless they're
   all viewed already: then it unmarks them all.
-- Viewed files move to a folded `Viewed (n)` group at the bottom of their section (Unstaged, Staged, or the
+- Viewed files move to a folded `Viewed (n)` group at the top of their section (Unstaged, Staged, or the
   whole tree when there are no sections). The group unfolds while it holds the file shown in the diff, and
   folds back once that file leaves it, unless you unfolded it yourself.
 - `]f`/`[f` skip viewed files, and so does the file diffy opens first after a refresh. Marking the file shown
@@ -119,7 +119,7 @@ one the session opened on: checkout mode detaches HEAD, and `local_backend.branc
 - `panels/tree.lua`: `build_diff_entries` gets ids and modes; the hashing batch; a `Viewed` group in
   `group_rows`/`section_rows`, unfolding with the shown file; `m`; `move_file` and the initial file in
   `render` skip viewed rows.
-- `diffpair.lua`: `<leader>m`; recording the seen pair when the shown file opens or changes.
+- `diffpair.lua`: `<leader>dm`; recording the seen pair when the shown file opens or changes.
 - New `viewed.lua`: load/save marks, `is_viewed(entry)`, `changed(entry)`, toggle.
 - `init.lua`: `:Diffy viewed [clear]`, its completion; `keymaps.toggle_viewed` and the tree key in config.
 - `git/run.lua`: `DiffyReady` event `viewed` after a toggle has redrawn the tree.

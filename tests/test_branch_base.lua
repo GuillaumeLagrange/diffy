@@ -65,4 +65,36 @@ T['a branch with no commits past its base shows the working tree'] = function()
   child.cmd('Diffy close')
 end
 
+T[':Diffy branch reopens the file last shown on the branch'] = function()
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch main')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(ui.layout(child).left.path, 'd.txt')
+  ui.open_tree_row(child, 'f.txt', '<CR>', 'open_row')
+  child.cmd('Diffy close')
+
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch main')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(ui.layout(child).right.path, 'f.txt')
+  child.cmd('Diffy close')
+end
+
+T[':Diffy branch opens the first file when the last one shown left the branch diff'] = function()
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch main')
+  ui.wait_ready(child)
+  ui.open_tree_row(child, 'new.txt', '<CR>', 'open_row')
+  child.cmd('Diffy close')
+
+  repo:rm('new.txt'):commit('Drop new.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy branch main')
+  ui.wait_ready(child)
+  local l = ui.layout(child)
+  MiniTest.expect.equality(l.left.path, 'd.txt')
+  MiniTest.expect.equality(child.v.errmsg, '')
+  child.cmd('Diffy close')
+end
+
 return T

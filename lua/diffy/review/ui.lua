@@ -1235,7 +1235,7 @@ local key_hints = highlight.key_hints
 --- visible; with `opts.above` (the thread float), right under that float
 --- instead, so the thread stays in view (its end, or its line
 --- `opts.above_line`). `<C-s>`/`:w` calls `on_save(lines)` and closes; `q`
---- cancels. `opts.on_close()` runs once it's closed, either way.
+--- cancels. `opts.on_close(saved)` runs once it's closed, either way.
 --- `opts.thread`: the thread replied to or edited, whose bar it lines up on.
 --- `opts.prefill` seeds the buffer (editing a draft), which then opens in
 --- normal mode at its end; otherwise in insert mode.
@@ -1280,7 +1280,7 @@ function M.open_compose(session, anchor_win, first, last, on_save, opts)
   end)
 
   local closed = false
-  local function close()
+  local function close(saved)
     if closed then
       return
     end
@@ -1291,7 +1291,7 @@ function M.open_compose(session, anchor_win, first, last, on_save, opts)
     end
     close_win(win)
     if opts.on_close and not session.closed then
-      opts.on_close()
+      opts.on_close(saved == true)
     end
   end
   vim.api.nvim_create_autocmd('WinClosed', {
@@ -1310,14 +1310,16 @@ function M.open_compose(session, anchor_win, first, last, on_save, opts)
     callback = function()
       vim.bo[buf].modified = false
       on_save(vim.api.nvim_buf_get_lines(buf, 0, -1, false))
-      close()
+      close(true)
     end,
   })
 
   session_mod.map(session, { 'n', 'i' }, '<C-s>', function()
     vim.cmd('write')
   end, { buffer = buf, desc = 'save comment' })
-  session_mod.map(session, 'n', 'q', close, { buffer = buf, desc = 'cancel comment' })
+  session_mod.map(session, 'n', 'q', function()
+    close()
+  end, { buffer = buf, desc = 'cancel comment' })
   session_mod.map(session, { 'n', 'i' }, '<C-g>s', function()
     if not opts.suggestion then
       return
@@ -1435,9 +1437,28 @@ local function open_float_of(review, thread)
   return open and open.thread == thread and vim.api.nvim_win_is_valid(open.float) and open.float or nil
 end
 
+--- `on_close` of a box opened from the thread float `above`: a save closes
+--- the thread and goes back to the diff window it was entered from; a
+--- cancel goes back into the thread (`show_opts`).
+local function back_from_box(session, thread, above, show_opts)
+  if not above then
+    return nil
+  end
+  local src = session.review._open.src
+  return function(saved)
+    if not saved then
+      return M.show_thread(session, thread, show_opts)
+    end
+    M.close_thread(session)
+    if vim.api.nvim_win_is_valid(src) then
+      vim.api.nvim_set_current_win(src)
+    end
+  end
+end
+
 --- Reply to an existing `thread`: appends a new comment on save. From the
 --- thread float, the reply box opens under it and the thread stays in
---- view; closing the box (saved or not) goes back into the thread.
+--- view (see `back_from_box` for where closing it goes).
 function M.reply(session, thread)
   local review = session.review
   if type(review.backend.save) ~= 'function' then
@@ -1458,16 +1479,14 @@ function M.reply(session, thread)
     title = backend.capabilities.people and thread.comments[1] and ('Reply to %s'):format(thread.comments[1].author) or 'Reply',
     above = above,
     thread = thread,
-    on_close = above and function()
-      M.show_thread(session, thread, { focus = true })
-    end,
+    on_close = back_from_box(session, thread, above, { focus = true }),
   })
 end
 
 --- Edit `comment` of `thread` (a draft, or your published comment: then
 --- the edit is staged until a GitHub submit), replacing its body on save.
 --- From the thread float, the edit box opens under it with the comment in
---- view, and closing it goes back into the thread, on that comment.
+--- view; cancelling goes back into the thread, on that comment.
 function M.edit_comment(session, thread, comment)
   local review = session.review
   local backend = review.backend
@@ -1495,9 +1514,7 @@ function M.edit_comment(session, thread, comment)
     above = above,
     thread = thread,
     above_line = above_line,
-    on_close = above and function()
-      M.show_thread(session, thread, { focus = true, comment = real })
-    end,
+    on_close = back_from_box(session, thread, above, { focus = true, comment = real }),
   })
 end
 
@@ -1724,9 +1741,9 @@ end
 
 --- Show `thread` alone in the thread float: over the other diff
 --- window, level with the thread, with its code range highlighted in its
---- own window. `opts.focus` moves the cursor into it (`K`), on
---- `opts.comment` if given; otherwise it's a preview and focus stays in the
---- diff.
+--- own window. `opts.focus` moves the cursor into it (`<CR>`), on
+--- `opts.comment` if given, else on the latest comment; otherwise it's a
+--- preview and focus stays in the diff.
 function M.show_thread(session, thread, opts)
   opts = opts or {}
   local review = session.review
@@ -1766,7 +1783,7 @@ function M.show_thread(session, thread, opts)
     local room = cfg.win and vim.fn.getwininfo(cfg.win)[1].height or vim.o.lines
     local cap = math.max(6, math.floor(room / 2))
     if rows > cap then
-      fit_cfg.footer = key_hints({ { 'K', ('%d more lines'):format(rows - cap) } }, cfg.width)
+      fit_cfg.footer = key_hints({ { '<CR>', ('%d more lines'):format(rows - cap) } }, cfg.width)
       rows = cap
     end
   end
@@ -1793,9 +1810,16 @@ function M.show_thread(session, thread, opts)
     local comment = comment_at(heads, vim.api.nvim_win_get_cursor(fwin)[1] - 1)
     M.show_thread(session, thread, { focus = focused, comment = focused and comment or nil })
   end)
-  for _, h in ipairs(heads) do
-    if opts.focus and opts.comment and (h.comment == opts.comment or h.comment._of == opts.comment) then
-      vim.api.nvim_win_set_cursor(fwin, { h.row + 1, 0 })
+  if opts.focus then
+    -- on `opts.comment`, else on the latest comment
+    local target = heads[#heads]
+    for _, h in ipairs(heads) do
+      if opts.comment and (h.comment == opts.comment or h.comment._of == opts.comment) then
+        target = h
+      end
+    end
+    if target then
+      vim.api.nvim_win_set_cursor(fwin, { target.row + 1, 0 })
     end
   end
   if opts.focus then
@@ -1988,6 +2012,26 @@ local function written_selection(session, thread, cb)
       end
     end,
   })
+end
+
+--- Whether the session's log lists commit `sha`.
+function M.in_log(session, sha)
+  for _, e in ipairs(session.entries or {}) do
+    if e.kind == 'commit' and e.sha == sha then
+      return true
+    end
+  end
+  return false
+end
+
+--- The commit `thread` was written on when the log doesn't list it (rewritten
+--- by a rebase or force-push) and no selection shows the thread, else nil.
+function M.nowhere(session, thread)
+  local sha = model.written_on(thread)
+  if sha and not M.in_log(session, sha) and not selection_for(session, thread) then
+    return sha
+  end
+  return nil
 end
 
 --- Select `sel` (unless it's the current selection), then jump to `thread`.
@@ -2189,16 +2233,6 @@ function M.setup_diff_keymaps(session, buf)
   map(session, { 'v', 'x' }, 'gc', function()
     M.compose(session, 'v')
   end, { buffer = buf, nowait = true, desc = 'review: new comment on range' })
-  map(session, 'n', 'K', function()
-    local win = vim.api.nvim_get_current_win()
-    if #M.threads_at(session, win, vim.api.nvim_win_get_cursor(win)[1]) > 0 then
-      return M.open_thread(session)
-    end
-    if #vim.lsp.get_clients({ bufnr = buf, method = 'textDocument/hover' }) > 0 then
-      return vim.lsp.buf.hover()
-    end
-    vim.cmd.normal({ (vim.v.count > 0 and vim.v.count or '') .. 'K', bang = true })
-  end, { buffer = buf, desc = 'review: open thread, else hover' })
   map(session, 'n', '<CR>', function()
     M.open_thread(session)
   end, { buffer = buf, desc = 'review: open thread' })

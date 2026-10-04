@@ -443,6 +443,12 @@ local function preview(session, buf, win)
     table.insert(lines, text)
     table.insert(lines, '')
   end
+  local written = (t.outdated or t._detached) and model.written_on(t)
+  if written then
+    local gone = not ui.in_log(session, written) and ', a commit no longer in the branch' or ''
+    table.insert(lines, ('Written on %s%s'):format(written:sub(1, 7), gone))
+    table.insert(lines, '')
+  end
   for i, l in ipairs(code or {}) do
     lines[#lines + 1] = l
     at[#lines] = code_at[i]
@@ -510,7 +516,19 @@ local function setup(session, buf)
     if row and row.kind == 'group' then
       toggle_group(session, row.key)
     elseif row then
-      jump(session, row.entry.thread)
+      local sha = ui.nowhere(session, row.entry.thread)
+      if sha then
+        local preview = session.wins.threads_preview and vim.api.nvim_win_is_valid(session.wins.threads_preview)
+        vim.notify(
+          ('diffy: written on %s, a commit no longer in the branch, and no view shows it%s'):format(
+            sha:sub(1, 7),
+            preview and ': the preview has its code as written' or ''
+          ),
+          vim.log.levels.WARN
+        )
+      else
+        jump(session, row.entry.thread)
+      end
     end
   end, { buffer = buf, desc = 'go to thread / fold group' })
   map(session, 'n', '<Tab>', function()

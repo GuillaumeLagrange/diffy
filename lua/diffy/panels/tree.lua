@@ -282,7 +282,8 @@ end
 --- Group a flat, path-sorted entry list into display rows, `depth` deep,
 --- file rows tagged with `pair` (a section's pair, or nil), header rows with
 --- a `key` naming them across renders (`section`'s label prefixed). Viewed
---- files go under a `Viewed (n)` header after the others.
+--- files go under a `Viewed (n)` header before the others, away from the log
+--- below the tree.
 local function group_rows(session, entries, depth, pair, rows, section)
   rows = rows or {}
   depth = depth or 0
@@ -290,22 +291,22 @@ local function group_rows(session, entries, depth, pair, rows, section)
   for _, e in ipairs(entries) do
     table.insert(viewed.is_viewed(session, e) and done or shown, e)
   end
+  if #done > 0 then
+    local key = (section or '') .. '#viewed'
+    table.insert(rows, { kind = 'viewed', label = 'Viewed', count = #done, depth = depth, key = key })
+    local first = #rows + 1
+    layout(build_tree(done), '', '', '', depth + 1, rows)
+    tag_rows(rows, first, pair, key)
+    for i = first, #rows do
+      rows[i].viewed = true
+    end
+  end
   local first = #rows + 1
   layout(build_tree(shown), '', '', '', depth, rows)
   tag_rows(rows, first, pair, section or '')
   for i = first, #rows do
     if rows[i].kind == 'file' then
       rows[i].changed = viewed.changed(session, rows[i].entry) or nil
-    end
-  end
-  if #done > 0 then
-    local key = (section or '') .. '#viewed'
-    table.insert(rows, { kind = 'viewed', label = 'Viewed', count = #done, depth = depth, key = key })
-    first = #rows + 1
-    layout(build_tree(done), '', '', '', depth + 1, rows)
-    tag_rows(rows, first, pair, key)
-    for i = first, #rows do
-      rows[i].viewed = rows[i].kind == 'file' or nil
     end
   end
   return rows
@@ -359,12 +360,12 @@ local function row_line(row, width)
     local avail = width and math.max(1, width - vim.fn.strdisplaywidth(head) - 1)
     local name = avail and hl.truncate_path(row.name, avail) or row.name
     local text = head .. name .. '/'
-    return text, { { #indent, #text, 'DiffyDirectory' } }, nil, name ~= row.name
+    return text, { { #indent, #text, row.viewed and 'DiffyViewed' or 'DiffyDirectory' } }, nil, name ~= row.name
   end
   if row.kind == 'section' or row.kind == 'viewed' then
     local full = indent .. chevron(row) .. ('%s (%d)'):format(row.label, row.count)
     local text = width and hl.truncate(full, math.max(1, width)) or full
-    local group = row.kind == 'viewed' and 'Comment' or 'DiffyLabel'
+    local group = row.kind == 'viewed' and 'DiffyViewed' or 'DiffyLabel'
     return text, { { #indent, #text, group } }, nil, text ~= full
   end
   local e = row.entry
@@ -398,6 +399,9 @@ local function row_line(row, width)
   local left = head .. name
   local pad = width and math.max(1, width - vim.fn.strdisplaywidth(left) - #counts) or 1
   local text = counts ~= '' and (left .. (' '):rep(pad) .. counts) or left
+  if row.viewed then
+    return text, { { #indent, #text, 'DiffyViewed' } }, { #head, #left }, name ~= full_name
+  end
   local spans = { { #indent, #indent + #e.status, hl.STATUS[e.status] or 'DiffyChanged' } }
   if dot ~= '' then
     local at = #indent + #e.status + 1
@@ -620,6 +624,36 @@ local function sync_viewed_folds(session)
   return changed
 end
 
+-- `:Diffy branch` sessions reopen the file last shown on their branch. Best effort: any failure
+-- leaves the default pick.
+local function last_file_store(session)
+  if session.range and session.range.kind == 'branch' and session.gitdir and session.branch then
+    return require('diffy.review.store').path(session.gitdir, session.branch, 'last_file.json')
+  end
+end
+
+local function remember_file(session, path)
+  local file = last_file_store(session)
+  if file and session.last_file ~= path then
+    session.last_file = path
+    pcall(require('diffy.review.store').save, file, { path = path })
+  end
+end
+
+--- Before the first render of a branch session: offer the file last shown on the branch, opened if
+--- the selection still has it unviewed.
+function M.restore_last_file(session)
+  local file = last_file_store(session)
+  if not file then
+    return
+  end
+  local ok, data = pcall(require('diffy.review.store').load, file)
+  if ok and type(data) == 'table' and type(data.path) == 'string' then
+    session.restore_path = data.path
+    session.last_file = data.path
+  end
+end
+
 --- Open the diff pair for tree row `row` (a `{kind='file', entry=...}`),
 --- or the 4-window conflict view for an unmerged ('U') row.
 function M.open_row(session, row, opts)
@@ -629,6 +663,7 @@ function M.open_row(session, row, opts)
   local e = row.entry
   if e.status == 'U' then
     session.current_path = e.path
+    remember_file(session, e.path)
     session.file_pair = row.pair or session.pair
     M.mark_current(session)
     -- the conflict layout is built from both diff windows
@@ -654,6 +689,7 @@ function M.open_row(session, row, opts)
   end
 
   session.current_path = e.path
+  remember_file(session, e.path)
   -- the pair of the file shown, which is not `session.pair` in a section
   session.file_pair = pair
   viewed.saw(session, e)
@@ -964,9 +1000,9 @@ function M.render(session, cb)
     M.redraw(session)
     restore_cursor(session)
 
-    -- the file shown before, viewed or collapsed or not, else the first
-    -- unviewed one in sight, else the first one
-    local target, same_path, first, first_shown, first_unviewed, first_unviewed_shown
+    -- the file shown before, viewed or collapsed or not, else the unviewed file last shown on the
+    -- branch, else the first unviewed one in sight, else the first one
+    local target, same_path, restored, first, first_shown, first_unviewed, first_unviewed_shown
     for _, row in ipairs(rows) do
       if row.kind == 'file' then
         first = first or row
@@ -974,6 +1010,9 @@ function M.render(session, cb)
         if not row.viewed then
           first_unviewed = first_unviewed or row
           first_unviewed_shown = first_unviewed_shown or (row.lnum and row)
+          if row.entry.path == session.restore_path then
+            restored = restored or row
+          end
         end
         if row.entry.path == session.current_path then
           same_path = same_path or row
@@ -984,7 +1023,8 @@ function M.render(session, cb)
         end
       end
     end
-    target = target or same_path or first_unviewed_shown or first_unviewed or first_shown or first
+    session.restore_path = nil
+    target = target or same_path or restored or first_unviewed_shown or first_unviewed or first_shown or first
 
     if target then
       session.current_file_line = target.lnum
@@ -1065,9 +1105,21 @@ function M.move_file(session, delta)
   run.ready({ session = session.id, event = 'open_row' })
 end
 
+--- Open `tree_all[index]`, expanding what hides it.
+local function go_to_row(session, index)
+  if reveal(session, index) then
+    M.redraw(session)
+  end
+  local row = session.tree_all[index]
+  session.current_file_line = row.lnum
+  set_tree_cursor(session, row.lnum)
+  M.open_row(session, row)
+end
+
 --- Mark `rows` (file rows) viewed, or unmark them when `on` is false. When
 --- the file shown gets marked, the next unviewed file opens (else the
---- previous one); with none left the pair stays and says so.
+--- previous one); with none left the pair stays and says so. The change is
+--- pushed on `session.viewed_undo` for `undo_viewed`.
 local function set_viewed(session, rows, on)
   local entries = {}
   for _, row in ipairs(rows) do
@@ -1090,6 +1142,13 @@ local function set_viewed(session, rows, on)
     end
   end
   local shown_marked = on and cur and vim.tbl_contains(entries, before[cur].entry)
+  local changed = vim.tbl_filter(function(e)
+    return viewed.is_viewed(session, e) ~= on
+  end, entries)
+  if session.viewed_file and #changed > 0 then
+    session.viewed_undo = session.viewed_undo or {}
+    table.insert(session.viewed_undo, { entries = changed, on = on, shown = shown_marked and before[cur].entry })
+  end
   viewed.set(session, entries, on)
   if shown_marked then
     local index = {}
@@ -1114,15 +1173,38 @@ local function set_viewed(session, rows, on)
       end
     end
     if target then
-      if reveal(session, target) then
-        M.redraw(session)
-      end
-      local row = session.tree_all[target]
-      session.current_file_line = row.lnum
-      set_tree_cursor(session, row.lnum)
-      M.open_row(session, row)
+      go_to_row(session, target)
     else
       say_none_left()
+    end
+  end
+  run.ready({ session = session.id, event = 'viewed' })
+end
+
+--- `<leader>du`: revert the last viewed change of the session (marking or
+--- unmarking, the file or every file under a header) and reopen the file
+--- shown when it was marked.
+function M.undo_viewed(session)
+  local last = table.remove(session.viewed_undo or {})
+  if not last then
+    vim.notify('diffy: no viewed change to undo', vim.log.levels.INFO)
+    run.ready({ session = session.id, event = 'viewed' })
+    return
+  end
+  viewed.set(session, last.entries, not last.on)
+  local shown = last.shown
+  if shown then
+    for i, row in ipairs(session.tree_all or {}) do
+      local e = row.entry
+      if
+        row.kind == 'file'
+        and e.path == shown.path
+        and e.left_id == shown.left_id
+        and e.right_id == shown.right_id
+      then
+        go_to_row(session, i)
+        break
+      end
     end
   end
   run.ready({ session = session.id, event = 'viewed' })
@@ -1175,7 +1257,7 @@ local function current_row(session)
   return nil
 end
 
---- `<leader>m` / `:Diffy viewed`: toggle the file shown.
+--- `<leader>dm` / `:Diffy viewed`: toggle the file shown.
 function M.toggle_viewed_current(session)
   local row = current_row(session)
   if row then
@@ -1258,6 +1340,12 @@ function M.setup(session)
     map(session, 'n', mark_key, function()
       M.toggle_viewed_at_cursor(session)
     end, { buffer = buf, desc = 'toggle viewed' })
+  end
+  local undo_key = require('diffy').config.keymaps.undo_viewed
+  if undo_key and undo_key ~= '' then
+    map(session, 'n', undo_key, function()
+      M.undo_viewed(session)
+    end, { buffer = buf, desc = 'undo viewed' })
   end
   require('diffy.layout').map_panel_keys(session, buf)
   require('diffy.review.ui').map_last(session, buf)

@@ -229,7 +229,7 @@ T['the thread float is centred over the other side, at most 100 wide, and refitt
   child.api.nvim_set_current_win(w.right)
   child.fn.win_execute(w.right, 'call cursor(5, 1)')
   arm_ready_raw('thread')
-  child.type_keys('K')
+  child.type_keys('<CR>')
   ui.wait_ready_raw(child)
   local frame = float_frame()
   MiniTest.expect.equality(frame.width, 100)
@@ -247,22 +247,22 @@ T['the thread float is centred over the other side, at most 100 wide, and refitt
   child.cmd('Diffy close')
 end
 
-T['K opens the thread on a commented line and falls through to the buffer\'s K elsewhere'] = function()
+T['K is the buffer\'s K even on a commented line; <CR> enters the thread'] = function()
   open_default()
   local w = ui.wins(child)
   write_comment(w.right, 5, 'here')
   child.cmd([[command! -nargs=1 KwProbe let g:kw = <q-args>]])
   child.api.nvim_set_current_win(w.right)
   child.bo.keywordprg = ':KwProbe'
-  child.fn.win_execute(w.right, 'call cursor(8, 1)')
+  child.fn.win_execute(w.right, 'call cursor(5, 1)')
   child.type_keys('K')
   MiniTest.expect.equality(child.g.kw, child.fn.expand('<cword>'))
-  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
+  local float = ui.thread_float(child)
+  MiniTest.expect.equality(float == vim.NIL or not float.focused, true)
 
   child.g.kw = nil
-  child.fn.win_execute(w.right, 'call cursor(5, 1)')
   arm_ready_raw('thread')
-  child.type_keys('K')
+  child.type_keys('<CR>')
   ui.wait_ready_raw(child)
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
   MiniTest.expect.equality(child.g.kw, vim.NIL)
@@ -311,9 +311,9 @@ T['hovering a commented line previews it over the other diff window with its bar
   MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
   MiniTest.expect.equality(heavy(), {})
 
-  -- K enters the thread; q leaves it and returns to the diff, on the same
+  -- <CR> enters the thread; q leaves it and returns to the diff, on the same
   -- commented line, where the hover shows it again
-  child.type_keys('5G', 'K')
+  child.type_keys('5G', '<CR>')
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
   child.type_keys('q')
   MiniTest.expect.equality(ui.thread_float(child).focused, false)
@@ -323,7 +323,7 @@ T['hovering a commented line previews it over the other diff window with its bar
   child.cmd('Diffy close')
 end
 
-T['<Esc> closes the hover card and keeps it closed on that line until the cursor leaves or <Tab>/K ask for it'] = function()
+T['<Esc> closes the hover card and keeps it closed on that line until the cursor leaves or <Tab>/<CR> ask for it'] = function()
   open_default()
   local w = ui.wins(child)
   -- line 3 reads `uncommitted`: room to move along it
@@ -341,7 +341,7 @@ T['<Esc> closes the hover card and keeps it closed on that line until the cursor
 
   child.type_keys('<Esc>', '<Tab>')
   MiniTest.expect.equality(ui.thread_float(child).focused, false)
-  child.type_keys('<Esc>', 'K')
+  child.type_keys('<Esc>', '<CR>')
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
   child.type_keys('q')
   -- nothing open: <Esc> is a no-op
@@ -378,12 +378,14 @@ T['each comment in the thread float is headed by who wrote it, when, and its sta
   write_comment(w.right, 5, 'first point')
   child.api.nvim_set_current_win(w.right)
   child.fn.win_execute(w.right, 'call cursor(5, 1)')
-  child.type_keys('K')
+  child.type_keys('<CR>')
   compose('r')
   child.type_keys('drop them<CR><CR>```suggestion<CR>```', '<Esc>')
   save()
 
-  -- saving the reply went back into the thread
+  -- saving the reply went back to the diff, the thread only previewed
+  MiniTest.expect.equality({ ui.thread_float(child).focused, child.api.nvim_get_current_win() }, { false, w.right })
+  child.type_keys('<CR>')
   local float = ui.thread_float(child)
   MiniTest.expect.equality(float.focused, true)
   local text = table.concat(float.text, '\n')
@@ -399,7 +401,7 @@ T['each comment in the thread float is headed by who wrote it, when, and its sta
 
   send_review('')
   child.fn.win_execute(w.right, 'call cursor(5, 1)')
-  child.type_keys('K')
+  child.type_keys('<CR>')
   float = ui.thread_float(child)
   MiniTest.expect.equality({ float.text[1], float.text[4] }, { 'You  just now  sent', 'You  just now  sent' })
   -- a sent comment can't be edited or deleted any more
@@ -427,13 +429,13 @@ local function reply_layout()
   ]])
 end
 
-T['replying keeps the thread in view above the reply box, then goes back into it'] = function()
+T['replying keeps the thread in view above the reply box; cancelling goes back into it, saving to the diff'] = function()
   open_default()
   local w = ui.wins(child)
   write_comment(w.right, 5, 'first point')
   child.api.nvim_set_current_win(w.right)
   child.fn.win_execute(w.right, 'call cursor(5, 1)')
-  child.type_keys('K')
+  child.type_keys('<CR>')
   compose('r')
 
   local float = ui.thread_float(child)
@@ -450,8 +452,14 @@ T['replying keeps the thread in view above the reply box, then goes back into it
   compose('r')
   child.type_keys('second point', '<Esc>')
   save()
+  MiniTest.expect.equality({ ui.thread_float(child).focused, child.api.nvim_get_current_win() }, { false, w.right })
+
+  -- entering the thread again lands on its latest comment
+  child.type_keys('<CR>')
   float = ui.thread_float(child)
   MiniTest.expect.equality({ float.focused, float.text[#float.text] }, { true, 'second point' })
+  local below = table.concat(child.api.nvim_buf_get_lines(0, child.fn.line('.') - 1, -1, false), '\n')
+  MiniTest.expect.equality({ below:find('second point', 1, true) ~= nil, below:find('first point', 1, true) }, { true, nil })
   child.type_keys('q')
 
   child.cmd('Diffy close')
@@ -475,7 +483,7 @@ T['leaving a comment box or the thread float puts the diff cursor back where it 
   save()
   MiniTest.expect.equality(cursor(), { true, { 12, 1 } })
 
-  child.type_keys('K', 'G', 'q')
+  child.type_keys('<CR>', 'G', 'q')
   MiniTest.expect.equality(cursor(), { true, { 12, 1 } })
 
   child.cmd('Diffy close')
@@ -487,12 +495,12 @@ T['e and dd in the thread float act on the draft under the cursor'] = function()
   write_comment(w.right, 5, 'first point')
   child.api.nvim_set_current_win(w.right)
   child.fn.win_execute(w.right, 'call cursor(5, 1)')
-  child.type_keys('K')
+  child.type_keys('<CR>')
   compose('r')
   child.type_keys('second point', '<Esc>')
   save()
 
-  child.type_keys('gg')
+  child.type_keys('<CR>', 'gg')
   compose('e')
   MiniTest.expect.equality(child.api.nvim_buf_get_lines(0, 0, -1, false), { 'first point' })
   -- in normal mode, on the draft's last character
@@ -501,15 +509,17 @@ T['e and dd in the thread float act on the draft under the cursor'] = function()
   child.type_keys('a, edited', '<Esc>')
   save()
 
-  -- back into the thread, on the edited card
+  -- back in the diff, the thread previewed with the edit
+  MiniTest.expect.equality({ ui.thread_float(child).focused, child.api.nvim_get_current_win() }, { false, w.right })
+  child.type_keys('<CR>')
   local float = ui.thread_float(child)
   MiniTest.expect.equality({ float.focused, float.text[2], float.text[5] }, { true, 'first point, edited', 'second point' })
-  MiniTest.expect.equality(child.api.nvim_win_get_cursor(0)[1], 1)
+  child.type_keys('gg')
 
   child.type_keys('dd')
   child.fn.win_execute(w.right, 'call cursor(5, 1)')
   child.api.nvim_set_current_win(w.right)
-  child.type_keys('K')
+  child.type_keys('<CR>')
   MiniTest.expect.equality(ui.thread_float(child).text, { 'You  just now  draft', 'second point' })
   child.type_keys('q')
 
@@ -563,7 +573,7 @@ T['on an added file the thread and its edit box leave the commented lines visibl
   -- others stay
   local side = w.right and 'right' or 'left'
   MiniTest.expect.equality(vim.tbl_map(function(v) return v.line end, ui.threads_visible(child, side)), { 35 })
-  child.type_keys('K')
+  child.type_keys('<CR>')
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
   MiniTest.expect.equality(overlaps(), {})
 
@@ -636,10 +646,11 @@ T['a thread\'s comments are separated by a rule across the card'] = function()
   write_comment(w.right, 5, 'first comment')
   child.api.nvim_set_current_win(w.right)
   child.fn.win_execute(w.right, 'call cursor(5, 1)')
-  child.type_keys('K')
+  child.type_keys('<CR>')
   compose('r')
   child.type_keys('the reply', '<Esc>')
   save()
+  child.type_keys('<CR>')
 
   -- screen rows of the two bodies, and of rows ruled from frame to frame
   local seen = child.lua([[
@@ -727,7 +738,7 @@ T['resolved threads read ✓ inline, <leader>dr hides them and <leader>ds keeps 
   write_comment(w.right, 5, 'still open')
   write_comment(w.right, 10, 'settled')
   child.api.nvim_set_current_win(w.right)
-  child.type_keys('10G', 'K', 'x', 'q')
+  child.type_keys('10G', '<CR>', 'x', 'q')
 
   local visible = ui.threads_visible(child, 'right')
   MiniTest.expect.equality({ visible[1].line, visible[2].line }, { 5, 10 })
@@ -1069,7 +1080,7 @@ T['<CR> in the threads view goes to the thread\'s line and hovers that thread, n
   -- the next keystroke's hover check keeps it
   child.type_keys('$')
   MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('second thread', 1, true) ~= nil, true)
-  child.type_keys('K')
+  child.type_keys('<CR>')
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
 
   child.cmd('Diffy close')
@@ -1080,7 +1091,7 @@ T['<leader>e in the thread float hides the column, or shows it and goes to the f
   local w = ui.wins(child)
   write_comment(w.right, 5, 'a thread')
   child.api.nvim_set_current_win(w.right)
-  child.type_keys('1G', '5G', 'K')
+  child.type_keys('1G', '5G', '<CR>')
   local float = ui.thread_float(child)
   MiniTest.expect.equality(float.focused, true)
 
@@ -1107,13 +1118,14 @@ T['<leader>dl goes back into the last thread you were in, from another file, pas
   ui.open_tree_row(child, 'f.txt', '<CR>', 'render')
   local w = ui.wins(child)
   write_comment(w.right, 5, 'come back here')
-  -- a reply, so the jump has to land on the comment you left the thread on
+  -- a reply, so the jump has to land on the comment you left the thread on,
+  -- not on the latest one where entering the thread lands
   child.api.nvim_set_current_win(w.right)
-  child.type_keys('1G', '5G', 'K')
+  child.type_keys('1G', '5G', '<CR>')
   compose('r')
   child.type_keys('the reply', '<Esc>')
   save()
-  child.type_keys('G')
+  child.type_keys('<CR>', 'gg')
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
   child.type_keys('q')
 
@@ -1133,9 +1145,10 @@ T['<leader>dl goes back into the last thread you were in, from another file, pas
   local float = ui.thread_float(child)
   MiniTest.expect.equality(float.focused, true)
   MiniTest.expect.equality(table.concat(float.text, '\n'):find('come back here', 1, true) ~= nil, true)
-  -- on the reply's card, where you left it
+  -- on the first comment's card, where you left it
   local below = table.concat(child.api.nvim_buf_get_lines(0, child.fn.line('.') - 1, -1, false), '\n')
-  MiniTest.expect.equality({ below:find('the reply', 1, true) ~= nil, below:find('come back here', 1, true) }, { true, nil })
+  MiniTest.expect.equality({ below:find('come back here', 1, true) ~= nil, below:find('the reply', 1, true) ~= nil }, { true, true })
+  MiniTest.expect.equality(child.fn.line('.'), 1)
 
   child.cmd('Diffy close')
 end

@@ -268,13 +268,13 @@ local function compose_draft(win, lnum, body)
   save_composed(body)
 end
 
---- Enter the thread at `lnum` of `win` whose text has `needle`: `K` opens the
+--- Enter the thread at `lnum` of `win` whose text has `needle`: `<CR>` opens the
 --- default one, `]t`/`[t` step through the others stacked there.
 local function enter_thread_with(win, lnum, needle)
   child.api.nvim_set_current_win(win)
   for _, step in ipairs({ ']t', '[t' }) do
     child.fn.win_execute(win, ('call cursor(%d, 1)'):format(lnum))
-    child.type_keys('K')
+    child.type_keys('<CR>')
     for _ = 1, 4 do
       local f = ui.thread_float(child)
       if f ~= vim.NIL and table.concat(f.text, '\n'):find(needle, 1, true) then
@@ -300,7 +300,7 @@ local function to_card(needle)
 end
 
 --- In the open thread float: `e` on the card with `needle`, its text
---- replaced by `body`.
+--- replaced by `body`. Saving leaves the cursor in the diff.
 local function edit_card(needle, body)
   to_card(needle)
   ui.arm_ready_raw(child, 'compose')
@@ -378,7 +378,7 @@ T['a draft is in your pending review moments after you write it; its edit and de
     local e = remote_comment('mirrored draft')
     return e and e.body == 'mirrored draft, edited'
   end, 'the edit on GitHub')
-
+  enter_thread_with(right, 30, 'mirrored draft, edited')
   key_in_float('mirrored draft', 'dd')
   -- its last comment gone, GitHub deletes the review itself
   wait_for(function()
@@ -593,7 +593,7 @@ T['a reply drafted on a new thread follows it into the same GitHub thread'] = fu
   ui.arm_ready_raw(child, 'compose')
   child.type_keys('r')
   save_composed('follow-up')
-  child.type_keys('q')
+
   compose_draft(right, 30, 'nit')
   -- a read syncs too
   read_github(function()
@@ -623,7 +623,6 @@ T['a pending comment changed on both sides keeps both versions until dd drops on
     local c = stored('mine v2')
     return c and c.conflict
   end, 'the conflict')
-  child.type_keys('q')
   -- nothing was overwritten
   eq(remote_comment('web v2') ~= nil, true)
   eq(pr_row():find('1 conflict', 1, true) ~= nil, true)
@@ -669,7 +668,6 @@ T['an edit beats a delete, whichever side made which'] = function()
   web_delete('deleted there')
   enter_thread_with(right, 28, 'deleted there')
   edit_card('deleted there', 'deleted there, but edited here')
-  child.type_keys('q')
 
   read_github(function()
     return stored('deleted here, but edited on the web') ~= nil and remote_comment('deleted there, but edited here') ~= nil
@@ -711,7 +709,7 @@ T['a staged edit next to an edit made on github.com: dd drops yours, dd on the l
   local right = wins().right
   enter_thread_with(right, 30, 'D1')
   edit_card('D1', 'D1 my staged edit')
-  eq(ui.thread_float(child).text[1]:find('edit staged', 1, true) ~= nil, true)
+  eq(enter_thread_with(right, 30, 'D1 my staged edit').text[1]:find('edit staged', 1, true) ~= nil, true)
   child.type_keys('q')
   -- staged only
   eq(remote_comment('D1').body:find('^D1 published') ~= nil, true)
@@ -779,10 +777,8 @@ T['a staged edit of a comment deleted on github.com becomes a draft reply, or go
   local right = wins().right
   enter_thread_with(right, 30, 'D1R')
   edit_card('D1R', 'D1R my edit')
-  child.type_keys('q')
   enter_thread_with(right, 20, 'D2')
   edit_card('D2', 'D2 my edit')
-  child.type_keys('q')
 
   web_delete('D1R')
   web_delete('D2')
@@ -818,7 +814,6 @@ T['your pending review made elsewhere is adopted: its comments are your drafts, 
     return remote_comment('E1 edited in diffy') ~= nil
   end, 'the edit on GitHub')
   eq(remote_comment('E1 edited in diffy').review, review)
-  child.type_keys('q')
   child.cmd('Diffy close')
 end
 
@@ -878,7 +873,6 @@ T['a draft reply on a resolved thread is mirrored; once its thread is deleted, i
   ui.arm_ready_raw(child, 'compose')
   child.type_keys('r')
   save_composed('reply on a resolved thread')
-  child.type_keys('q')
   wait_for(function()
     return remote_comment('reply on a resolved thread') ~= nil
   end, 'the reply in the pending review')
@@ -980,6 +974,7 @@ T['a GitHub submit sends the review, then staged edits and deletions, then resol
   local right = wins().right
   enter_thread_with(right, 30, 'D1')
   edit_card('D1', 'D1 edited at submit')
+  enter_thread_with(right, 30, 'D1 edited at submit')
   ui.arm_ready_raw(child, 'review')
   child.type_keys('x')
   wait_ready_raw()
@@ -1030,7 +1025,6 @@ T['a staged edit GitHub refuses shows ⚠ on the PR row, stays staged and goes w
   open_file('f.txt')
   enter_thread_with(wins().right, 30, 'D1')
   edit_card('D1', 'D1 refused edit')
-  child.type_keys('q')
   submit_to_github('with a refused edit')
   ui.capture_warnings(child)
   child.type_keys('<CR>')
@@ -1136,7 +1130,7 @@ T['the thread float names each author and marks drafts, pending comments and res
   child.type_keys('r')
   save_composed('a reply')
 
-  local text = ui.thread_float(child).text
+  local text = enter_thread_with(right, 30, 'a reply').text
   -- D1 is published: its header carries no state
   eq(text[1]:find('^GuillaumeLagrange  ') ~= nil, true)
   eq({ text[1]:find('draft', 1, true), text[1]:find('pending', 1, true) }, {})

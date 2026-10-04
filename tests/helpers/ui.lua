@@ -130,6 +130,37 @@ function M.rows_with(child, panel, group)
   return out
 end
 
+--- Texts of the `panel` rows whose text, indent aside, is drawn entirely in
+--- highlight `group` (`hl_group` extmarks).
+function M.rows_drawn_in(child, panel, group)
+  return child.lua(([=[
+    local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
+    local win = s and s.wins[%q]
+    if not (win and vim.api.nvim_win_is_valid(win)) then return {} end
+    local buf = vim.api.nvim_win_get_buf(win)
+    local first, count = require('diffy.panels.stack').range(s, %q)
+    local covered = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, -1, { first, 0 }, { first + count - 1, -1 }, { details = true })) do
+      if m[4].hl_group == %q then
+        covered[m[2]] = covered[m[2]] or {}
+        table.insert(covered[m[2]], { m[3], m[4].end_col })
+      end
+    end
+    local out = {}
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, first, first + count, false)) do
+      local from = #l:match('^%%s*')
+      local col = from
+      local spans = covered[first + i - 1] or {}
+      table.sort(spans, function(a, b) return a[1] < b[1] end)
+      for _, sp in ipairs(spans) do
+        if sp[1] <= col then col = math.max(col, sp[2]) end
+      end
+      if #spans > 0 and col >= #l then table.insert(out, l) end
+    end
+    return out
+  ]=]):format(panel, panel, group))
+end
+
 --- Lines of `win`'s buffer drawn on screen (first cell) with background `bg`
 --- (0xRRGGBB, under 'termguicolors'); lines scrolled out of view are left
 --- out. With `want`, first waits up to 1 s for exactly those lines: a colour

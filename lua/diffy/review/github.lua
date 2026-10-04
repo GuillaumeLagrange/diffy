@@ -397,6 +397,8 @@ local function build_thread(node, exists, pending_review_id, mine)
     },
     outdated = false,
     _has_source = source_commit ~= nil,
+    -- the first one's `diffHunk` and `originalCommit`: the code as written
+    _raw_comments = node.comments.nodes,
   }
 end
 

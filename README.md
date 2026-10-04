@@ -32,9 +32,10 @@ require('diffy').setup({
   -- each other (see The panels). The others open in a float.
   column = { 'tree', 'log' },
   keymaps = {
-    toggle_panel = '<leader>e',   -- in every diffy window: hide the panel column, or show it and go to the file tree
-    toggle_viewed = '<leader>m',  -- in the diff windows: mark the file shown viewed, or unmark it
-    tree_toggle_viewed = 'm',     -- in the file tree: the same for the file, folder or section at the cursor
+    toggle_panel = '<leader>e',    -- in every diffy window: hide the panel column, or show it and go to the file tree
+    toggle_viewed = '<leader>dm', -- in the diff windows: mark the file shown viewed, or unmark it
+    tree_toggle_viewed = 'm',      -- in the file tree: the same for the file, folder or section at the cursor
+    undo_viewed = '<leader>du',    -- in the diff windows and the file tree: undo the last mark or unmark, one more per press
   },
   -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
@@ -73,6 +74,10 @@ the base branch's upstream (usually `origin/main`: the remote's tip as of your l
 `main` that may be behind), else the local branch, else the one remote-tracking branch of that name. When
 the layer then finds the PR on another base, the session is rebuilt once on it, keeping the selected
 commits when they're still listed. An explicit `base` is used as given.
+
+`:Diffy branch` (and `:Diffy pr`) opens on the file you last looked at on the branch, kept in
+`.git/diffy/<branch>/last_file.json`, if the view still has it and it isn't viewed; otherwise on the first
+unviewed file as usual.
 
 `:Diffy feedback` opens a box to describe something you don't like in the current session; `<C-s>` sends
 it, `q` cancels. diffy doesn't store it: it fires `User DiffyFeedback` with `data.text`, right after the box
@@ -166,6 +171,7 @@ headers stay when a section is empty; with no changes at all the tree says `(no 
 | `s` / `u` | stage / unstage the file, whichever section it's in (a rename stages both paths) |
 | `S` / `U` | stage / unstage everything |
 | `m` | mark the file viewed, or unmark it; on a folder, section or `Viewed` header, mark every file under it, or unmark them all when they all are viewed |
+| `<leader>du` | undo the last mark or unmark (see Viewed files) |
 
 Folder and section headers start with `▾` when expanded and `▸` when collapsed. A collapsed folder stays
 collapsed as you change the selection; jumping to a file inside it from the diff expands it.
@@ -176,11 +182,14 @@ Staged: `s` (or `-` in Unstaged) on its own row marks it resolved, as in the con
 can also stage hunk by hunk: for an Unstaged file the left side is the index, so `do`/`dp` or editing it and
 `:w` stages; for a Staged file the right side is the index.
 
-**Viewed files.** Marking a file viewed (`m` in the tree, `<leader>m` in the diff, `:Diffy viewed`) moves it
-to a folded `Viewed (n)` group at the bottom of its section (or of the tree, without sections). The group
+**Viewed files.** Marking a file viewed (`m` in the tree, `<leader>dm` in the diff, `:Diffy viewed`) moves it
+to a folded `Viewed (n)` group at the top of its section (or of the tree, without sections), drawn grayed out
+(`DiffyViewed`), folders and files included. The group
 unfolds while it holds the file shown and folds back once that file leaves it, unless you unfolded it
 yourself. `]f`/`[f` skip viewed files, and so does the file opened first after a refresh. Marking the file
-shown opens the next unviewed one; with none left, the keys stay where they are and say so.
+shown opens the next unviewed one; with none left, the keys stay where they are and say so. `<leader>du`, in
+the tree or the diff, undoes the last mark or unmark of the session (a whole folder at once if that's what
+it was) and goes back to the file you were looking at when you marked it; press again to undo the one before.
 
 A mark records the file's change as the view shows it: the blob on the left and the blob on the right. The
 file stays viewed while the view shows that same pair: committing, staging, amending or rebasing on a base
@@ -207,7 +216,8 @@ session.
 | Key (in either diff window) | |
 |---|---|
 | `]f` / `[f` | next / previous file, skipping viewed files |
-| `<leader>m` | mark the file shown viewed (and open the next unviewed one), or unmark it |
+| `<leader>dm` | mark the file shown viewed (and open the next unviewed one), or unmark it |
+| `<leader>du` | undo the last mark or unmark, back to the file shown when it was marked |
 | `]r` / `[r` | next / previous commit |
 | `R` | refresh everything: git state, panels, window sizes; and read the PR again (see GitHub review) |
 | `<leader>e` | hide the panel column, the cursor staying where it is; or show it and go to the file tree |
@@ -253,7 +263,7 @@ aligned. Several summaries under one line are listed top to bottom by the line t
 Moving onto a commented line opens its leftmost thread; `<Tab>`/`<S-Tab>` cycle through the others covering
 that line, left to right. `]t`/`[t` walk every thread of the side by the line its range starts on, then the
 larger range first (the one drawn further left), then oldest first. `<Esc>` closes the card, and it stays
-closed until the cursor leaves the line (or `<Tab>`, `K`, `]t` ask for it).
+closed until the cursor leaves the line (or `<Tab>`, `<CR>`, `]t` ask for it).
 
 The bars take over the diff windows' `statuscolumn` (fold, sign and number columns, then the bars) while
 the file has comments, and put your own back otherwise.
@@ -262,7 +272,7 @@ the file has comments, and put your own back otherwise.
 |---|---|
 | `gc` | comment on the line (visual mode: on the range); `<C-s>` or `:w` saves, `q` cancels |
 | move onto a commented line | preview its leftmost thread, over the other diff window |
-| `K` / `<CR>` | enter the thread float; `K` off a commented line is LSP hover (or `keywordprg`) as usual |
+| `<CR>` | enter the thread float (`K` stays LSP hover / `keywordprg`, commented line or not) |
 | `]t` / `[t` | next / previous thread, by first line, larger range first, oldest first |
 | `<Tab>` / `<S-Tab>` | next / previous thread covering the cursor line, left to right, wrapping (also in the thread float) |
 | `<Esc>` | close the thread card; no preview on this line until the cursor leaves it. With no card open, whatever `<Esc>` is mapped to outside diffy (e.g. `:nohlsearch`) |
@@ -286,7 +296,7 @@ diffy), `pending` (in your unsubmitted GitHub review), `local only: <why>` (a dr
 frame's colour separates consecutive comments, in the thread float and the `:Diffy threads` preview. The first header
 also says `outdated`, `✓ resolved`, `resolve staged`. Summaries carry the same states, shortened (`conflict`,
 `local only`, `edit staged`, …). Bodies render as markdown; suggestion blocks are labelled, empty
-ones as "remove these lines". A preview taller than half the window is cut, with a hint to press `K`.
+ones as "remove these lines". A preview taller than half the window is cut, with a hint to press `<CR>`.
 
 Bodies full of HTML, as bots like greptile write them, are shown as their markdown equivalent: HTML
 comments dropped, `<h2>` as `## `, `<b>`/`<em>`/`<code>` as `**`/`_`/`` ` ``, `<br>`/`<li>` as line breaks
@@ -309,9 +319,9 @@ lines wrap at words. This is display only: bodies are stored and sent as written
 
 In the thread float, the footer lists the keys that apply: `r` reply, `e` edit the comment under the
 cursor (a draft, or with a PR your published comment), `dd` delete it, `x` resolve/unresolve, `]t`/`[t`
-switch thread, `q` close. A
+switch thread, `q` close. Entering a thread puts the cursor on its latest comment. A
 reply or an edit is written in a box under the thread, which stays in view (a reply starts in insert
-mode, an edit in normal mode at the end of the draft); saving or cancelling goes
+mode, an edit in normal mode at the end of the draft); saving goes back to the diff, cancelling goes
 back into the thread. Leaving a comment box or the thread for the diff puts the cursor back where it
 was. In the compose float, `<C-g>s` inserts a GitHub suggestion block with the commented lines. `gP`
 shows the PR description and its conversation the same way.
@@ -326,13 +336,15 @@ the last one when it's someone else, its states (`draft`, `pending`, `conflict`,
 doesn't show has its line dimmed.
 
 It opens in a float over the diff with a preview beside it (on a wide enough screen): which commits show
-the thread (GitHub), the code it's on (its lines numbered and marked, up to 3 lines of context above, the
-middle of a long range cut), then the thread. With `'threads'` in `column` it sits in the left column
+the thread (GitHub), for an outdated or detached thread the commit it was written on (`a commit no longer
+in the branch` once a rebase or force-push replaced it), the code as it was written (its lines numbered and
+marked, up to 3 lines of context above, the middle of a long range cut; GitHub's diff hunk for a published
+thread), then the thread. With `'threads'` in `column` it sits in the left column
 instead, compact and without the preview, and `:Diffy threads` moves the cursor into it.
 
 | Key (in the threads view) | |
 |---|---|
-| `<CR>` | go to the thread: its file, the cursor on its first line, the thread hovered there (that one, when several share the line; `K` enters it). An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). Resolved or hidden threads are shown again. On a group header: fold / unfold; on a file header: its first thread |
+| `<CR>` | go to the thread: its file, the cursor on its first line, the thread hovered there (that one, when several share the line; `<CR>` enters it). An outdated thread opens in the view it was written in: its commit alone when that commit changes the file, else everything up to that commit. Otherwise, when the selected range doesn't show the thread, the selection switches to one that does first (the whole range, else the newest commit showing it). A thread written on a commit no longer in the branch that no view shows stays in the threads view with a warning: the preview has its code as written. Resolved or hidden threads are shown again. On a group header: fold / unfold; on a file header: its first thread |
 | `<Tab>` | fold / unfold the group under the cursor |
 | `x` | resolve / unresolve the thread under the cursor (with a PR, staged until you submit) |
 | `m` | only threads you started / everyone's (GitHub) |
@@ -396,7 +408,8 @@ the PR merged or closed: its row, its threads and what was read, not your drafts
   with nothing read before, there's no layer and no warning.
 - Threads are placed like every thread (see above), as github.com's "Changes" view does: in the full view
   and in each commit's view, at the line they track to, hidden where their lines changed. Outdated threads
-  are in the threads view with the others; `<CR>` there opens the commit they were written on.
+  are in the threads view with the others; `<CR>` there opens the commit they were written on, and the
+  preview shows their code as written, also for commits a force-push replaced.
 - **Your pending review follows your drafts.** About 2 seconds after you write, edit or delete a draft,
   diffy mirrors it into your pending review on GitHub, which only you see: the review is created with the
   first draft, a draft lands on the commit you wrote it on (a removed line as a left-side comment), a
@@ -448,7 +461,7 @@ All set with `default = true`, so a colorscheme or your config can override any 
 | `DiffyDirectory`, `DiffySha`, `DiffyLabel`, `DiffyMerge` | `Directory`, `Identifier`, `Title`, `Comment` | tree folders, log rows |
 | `DiffySelection` | `Visual` | selected commits |
 | `DiffyCurrentFile`, `DiffyCurrentFileName` | `Visual`, bold | the file shown in the diff |
-| `DiffyViewedChanged` | `DiagnosticWarn` | the `●` of a viewed file that changed since |
+| `DiffyViewed` / `DiffyViewedChanged` | `Comment` / `DiagnosticWarn` | the Viewed group, its folders and files / the `●` of a viewed file that changed since |
 | `DiffySyncState` / `DiffySyncFailed` | `Comment` / `DiagnosticWarn` | the PR row's `↻` and `⊘` / its `⚠` |
 | `DiffyThreadSummary` / `DiffyThreadCurrent` | `Comment` / bold | comment summaries / the weight of the open one's |
 | `DiffyThreadStep` | `Normal`'s colour, bold | the `]t`/`[t` marks on summaries |

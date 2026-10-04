@@ -76,6 +76,12 @@ function M.set_nav_keymaps(session, buf)
       require('diffy.panels.tree').toggle_viewed_current(session)
     end, { buffer = buf, desc = 'toggle viewed' })
   end
+  local undo_key = require('diffy').config.keymaps.undo_viewed
+  if undo_key and undo_key ~= '' then
+    map(session, 'n', undo_key, function()
+      require('diffy.panels.tree').undo_viewed(session)
+    end, { buffer = buf, desc = 'undo viewed' })
+  end
   require('diffy.layout').map_panel_keys(session, buf)
   require('diffy.review.ui').setup_diff_keymaps(session, buf)
 end

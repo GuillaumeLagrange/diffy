@@ -309,6 +309,60 @@ T['<CR> in the threads view opens an outdated thread where it was written: its c
   child.cmd('Diffy close')
 end
 
+T['an outdated thread written on a commit rewritten out of the branch previews its code as written; <CR> stays put'] = function()
+  if live.enabled then
+    MiniTest.skip('placement: recorded-fixture only')
+  end
+  -- an earlier push: P3 with f.txt line 70 changed, then rewritten away (in
+  -- the repo, not in the branch); no view of the branch has that line
+  local p3 = git(dir, { 'rev-parse', '6ec44a6' })
+  local index = vim.fn.tempname()
+  local env = { GIT_INDEX_FILE = index }
+  local function plumb(args, stdin)
+    local res = vim.system(vim.list_extend({ 'git', '-c', 'user.name=x', '-c', 'user.email=x@x' }, args), { cwd = dir, env = env, stdin = stdin, text = true }):wait()
+    assert(res.code == 0, res.stderr)
+    return vim.trim(res.stdout)
+  end
+  local lines = vim.split(git(dir, { 'show', p3 .. ':f.txt' }), '\n')
+  local was = lines[70]
+  lines[70] = 'earlier push: 70'
+  plumb({ 'read-tree', p3 })
+  plumb({ 'update-index', '--cacheinfo', '100644,' .. plumb({ 'hash-object', '-w', '--stdin' }, table.concat(lines, '\n') .. '\n') .. ',f.txt' })
+  local old = plumb({ 'commit-tree', plumb({ 'write-tree' }), '-p', p3, '-m', 'earlier push' })
+  vim.fn.delete(index)
+  child.lua(([[
+    local pr = _G.__fake_state.reads[2].repository.pullRequest
+    table.insert(pr.reviewThreads.nodes, {
+      id = 'PRRT_OLD', isResolved = false, path = 'f.txt', diffSide = 'RIGHT', originalLine = 70,
+      comments = { nodes = { {
+        id = 'PRRC_OLD', author = { login = 'x' }, body = 'OLD outdated here',
+        createdAt = '2026-09-27T07:00:00Z', originalLine = 70,
+        commit = { oid = %q }, originalCommit = { oid = %q },
+        diffHunk = '@@ -69,2 +69,2 @@\n ' .. %q .. '\n-' .. %q .. '\n+earlier push: 70',
+      } } },
+    })
+  ]]):format(old, old, lines[69], was))
+  child.o.columns = 200
+  open_pr()
+  local before = ui.rows_with(child, 'log', 'DiffySelection')
+  child.cmd('Diffy threads')
+  for i, l in ipairs(ui.threads_view(child).rows) do
+    if l:find('OLD outdated here', 1, true) then
+      child.api.nvim_win_set_cursor(wins().threads, { i, 0 })
+    end
+  end
+  local view = ui.threads_view(child)
+  local written = ('Written on %s, a commit no longer in the branch'):format(old:sub(1, 7))
+  MiniTest.expect.equality(vim.tbl_contains(view.preview, written), true)
+  MiniTest.expect.equality(vim.tbl_contains(view.preview, '70 │ earlier push: 70'), true)
+
+  child.type_keys('<CR>')
+  MiniTest.expect.equality(ui.threads_view(child).cursor, view.cursor)
+  MiniTest.expect.equality(ui.rows_with(child, 'log', 'DiffySelection'), before)
+  child.type_keys('q')
+  child.cmd('Diffy close')
+end
+
 local function log_rows()
   return ui.layout(child).log
 end

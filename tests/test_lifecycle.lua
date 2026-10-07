@@ -150,6 +150,64 @@ T['closing one of two session tabs leaves the other working'] = function()
   MiniTest.expect.equality(l.right.path, 'f.txt')
 end
 
+-- both show the same `.git//0/f.txt` blob buffer: fugitive names it by path
+T['closing one of two sessions on the same file keeps the other one\'s pair'] = MiniTest.new_set({
+  parametrize = { { 'Diffy close' }, { 'tabclose' } },
+})
+
+T['closing one of two sessions on the same file keeps the other one\'s pair']['works'] = function(close)
+  vim.fn.writefile({ 'changed' }, repo.dir .. '/f.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  local before = ui.layout(child)
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+
+  child.cmd(close)
+  wait_tabs(2)
+  child.cmd('tabnext 2')
+  local l = ui.layout(child)
+  MiniTest.expect.equality({ l.left.rev, l.left.path, l.right.rev, l.right.path },
+    { before.left.rev, 'f.txt', 'worktree', 'f.txt' })
+  local w = ui.wins(child)
+  MiniTest.expect.equality(child.lua_get(('{ vim.wo[%d].diff, vim.wo[%d].diff }'):format(w.left, w.right)), { true, true })
+end
+
+-- both map their keys on the same worktree buffer
+T['two sessions on the same worktree file keep their diff keys'] = MiniTest.new_set({
+  parametrize = { { 'refresh' }, { 'close' } },
+})
+
+T['two sessions on the same worktree file keep their diff keys']['when the other one'] = function(action)
+  repo:commit('g', { ['g.txt'] = Repo.lines(5, 'g') })
+  vim.fn.writefile({ 'changed' }, repo.dir .. '/f.txt')
+  vim.fn.writefile({ 'changed' }, repo.dir .. '/g.txt')
+  for _ = 1, 2 do
+    ui.arm_ready(child, 'render')
+    child.cmd('Diffy')
+    ui.wait_ready(child)
+  end
+
+  child.cmd('tabnext 2')
+  if action == 'refresh' then
+    child.api.nvim_set_current_win(ui.wins(child).tree)
+    ui.arm_ready(child, 'render')
+    child.type_keys('R')
+    ui.wait_ready(child)
+    child.cmd('tabnext 3')
+  else
+    child.cmd('Diffy close')
+    child.cmd('tabnext 2')
+  end
+
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  MiniTest.expect.equality(ui.layout(child).right.path, 'f.txt')
+  child.type_keys(']f')
+  MiniTest.expect.equality(ui.layout(child).right.path, 'g.txt')
+end
+
 T['the worktree side is a listed buffer, like :edit would open'] = function()
   vim.fn.writefile({ 'changed' }, repo.dir .. '/f.txt')
   ui.arm_ready(child, 'render')

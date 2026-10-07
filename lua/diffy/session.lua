@@ -82,34 +82,80 @@ local function run_mapping(m, lhs)
   end
 end
 
+-- buf -> mode -> lhsraw -> { dispatch, shadowed, handlers = { [session] = fn } }.
+-- A buffer has one map per key, and sessions in other tabs can show the same
+-- buffer (a worktree file, a fugitive blob): each session's handler lives here,
+-- and the map goes once no session has one left.
+local shared = {}
+
+local function shared_entry(buf, mode, lhsraw)
+  local entry = vim.tbl_get(shared, buf, mode, lhsraw)
+  if not entry then
+    return nil
+  end
+  -- a wiped or unloaded buffer took the map with it
+  for _, m in ipairs(vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_keymap(buf, mode) or {}) do
+    if m.lhsraw == lhsraw and m.callback == entry.dispatch then
+      return entry
+    end
+  end
+  shared[buf][mode][lhsraw] = nil
+  return nil
+end
+
+local function release(session, km)
+  local entry = shared_entry(km.buf, km.mode, km.lhsraw)
+  if not entry then
+    return
+  end
+  entry.handlers[session] = nil
+  if not next(entry.handlers) then
+    shared[km.buf][km.mode][km.lhsraw] = nil
+    pcall(vim.keymap.del, km.mode, km.lhs, { buffer = km.buf })
+  end
+end
+
 --- Set a buffer-local keymap and record it for teardown/`unmap_buffer`.
 --- `opts.buffer` is required. All diffy keymaps get a `diffy: ` prefixed
 --- `desc`, which the leak check relies on to find stragglers.
---- Outside the session's tab (the buffer shown in a `:tab split`), and with
+--- In the tab of a session that mapped the key on this buffer, its `rhs`
+--- runs. Elsewhere (the buffer shown in a `:tab split`), and with
 --- `opts.fallback` when `rhs` returns false, the key does what it did
 --- without diffy (the buffer-local map it shadowed, else the global one,
 --- else the built-in).
 function M.map(session, modes, lhs, rhs, opts)
   opts = vim.deepcopy(opts or {})
-  assert(opts.buffer, 'session.map: opts.buffer is required')
+  local buf = opts.buffer
+  assert(buf, 'session.map: opts.buffer is required')
   opts.desc = 'diffy: ' .. (opts.desc or lhs)
   local fallback = opts.fallback
   opts.fallback = nil
   local lhsraw = vim.keycode(lhs)
+  local function handler()
+    if not fallback then
+      rhs()
+      return true
+    end
+    return rhs()
+  end
   for _, mode in ipairs(type(modes) == 'table' and modes or { modes }) do
-    local shadowed = find_map(vim.api.nvim_buf_get_keymap(opts.buffer, mode), lhsraw)
-    local function mode_rhs()
-      if vim.api.nvim_get_current_tabpage() == session.tab then
-        if not fallback then
-          return rhs()
-        elseif rhs() then
-          return
+    local entry = shared_entry(buf, mode, lhsraw)
+    if not entry then
+      entry = { handlers = {}, shadowed = find_map(vim.api.nvim_buf_get_keymap(buf, mode), lhsraw) }
+      function entry.dispatch()
+        local owner = M.current()
+        local h = owner and entry.handlers[owner]
+        if not (h and h()) then
+          run_mapping(entry.shadowed or find_map(vim.api.nvim_get_keymap(mode), lhsraw), lhs)
         end
       end
-      run_mapping(shadowed or find_map(vim.api.nvim_get_keymap(mode), lhsraw), lhs)
+      shared[buf] = shared[buf] or {}
+      shared[buf][mode] = shared[buf][mode] or {}
+      shared[buf][mode][lhsraw] = entry
     end
-    vim.keymap.set(mode, lhs, mode_rhs, opts)
-    table.insert(session.keymaps, { buf = opts.buffer, mode = mode, lhs = lhs })
+    entry.handlers[session] = handler
+    vim.keymap.set(mode, lhs, entry.dispatch, opts)
+    table.insert(session.keymaps, { buf = buf, mode = mode, lhs = lhs, lhsraw = lhsraw })
   end
 end
 
@@ -119,7 +165,7 @@ function M.unmap_buffer(session, buf)
   for i = #session.keymaps, 1, -1 do
     local km = session.keymaps[i]
     if km.buf == buf then
-      pcall(vim.keymap.del, km.mode, km.lhs, { buffer = km.buf })
+      release(session, km)
       table.remove(session.keymaps, i)
     end
   end
@@ -480,6 +526,18 @@ local function lone_file_window(session)
   return win
 end
 
+-- A fugitive blob is one buffer per name, so another session can show it too.
+-- Deleting it closes that session's window, silently from a TabClosed callback:
+-- no WinClosed for its teardown nor for diffchar.vim, which then errors on it.
+local function shown_elsewhere(session, buf)
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    if vim.api.nvim_win_get_tabpage(win) ~= session.tab then
+      return true
+    end
+  end
+  return false
+end
+
 --- Idempotent teardown: closes managed windows/buffers, deletes the
 --- augroup, removes tracked keymaps, clears extmarks in this session's
 --- namespaces from every buffer, and closes the tab if still open. Windows
@@ -531,9 +589,7 @@ function M.teardown(session, opts)
   end
 
   for _, km in ipairs(session.keymaps) do
-    if km.buf and vim.api.nvim_buf_is_valid(km.buf) then
-      pcall(vim.keymap.del, km.mode, km.lhs, { buffer = km.buf })
-    end
+    release(session, km)
   end
   session.keymaps = {}
 
@@ -552,7 +608,7 @@ function M.teardown(session, opts)
   end
 
   for _, buf in pairs(session.bufs) do
-    if vim.api.nvim_buf_is_valid(buf) then
+    if vim.api.nvim_buf_is_valid(buf) and not shown_elsewhere(session, buf) then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
     end
   end

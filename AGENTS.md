@@ -72,7 +72,9 @@ Conventions the code relies on:
   Every buffer diffy creates goes through `session.register_buffer` (`bufhidden=wipe`; fugitive blobs
   `delete`, so jumplist/tag stack entries pointing at them survive); every buffer-local
   map through `session.map` (desc prefixed `diffy: `, removed on teardown or when a real file leaves a diffy
-  window); every namespace through `session.namespace`. Window options are only set inside the session tab.
+  window; sessions showing the same buffer share one map that runs the current tab's session's handler,
+  deleted with the last one); every namespace through `session.namespace`. Window options are only set
+  inside the session tab.
   A non-focusable float laid over other windows (peeks, the tree's hover, the commit message) goes through
   `session.overlay`, which unbinds it from the diff. `teardown` is idempotent and runs from every close path.
 - **Views.** The file tree, the commit log and the threads list are views (`layout.lua`): a buffer at
@@ -279,6 +281,10 @@ with the real config and `--listen`, screenshotted with `grim`:
 - `WinClosed`/`BufWipeout` callbacks that close other windows of the same tab race `:tabclose`/`:qa`
   (spurious E444); defer them with `vim.schedule`.
 - `:bwipeout!` on an unlisted scratch buffer closes its window too (firing `WinClosed`).
+- Sessions on the same repo share buffers: fugitive names a blob by path, so two sessions showing the
+  same file show the same `.git//0/<path>` buffer. Deleting it closes the other tab's window, and from
+  the `TabClosed` reaper that fires no `WinClosed` (no teardown, diffchar.vim keeps the gone buffer and
+  raises E680 on its next diff toggle in any tab). Teardown leaves buffers shown in other tabs alone.
 - `v:exiting` is already set in `VimLeavePre` on a normal quit: tells an exit apart from a tab close.
 - `vim.system(cmd, { env })` merges `env` into the inherited environment.
 - `vim.json.decode` turns JSON `null` into `vim.NIL`; pass `{ luanil = { object = true, array = true } }`.

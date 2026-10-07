@@ -1027,6 +1027,22 @@ T['the threads view groups open, outdated, detached, then resolved threads (fold
   child.cmd('Diffy close')
 end
 
+T['dd in the threads view deletes the thread under the cursor, from the view and the diff'] = function()
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'keep me')
+  write_comment(w.right, 10, 'drop me')
+  threads('Diffy threads')
+  press_on_row('drop me', 'dd', 'review')
+  local groups = ui.thread_groups(ui.threads_view(child))
+  MiniTest.expect.equality({ groups[1].count, groups[1].rows[1]:find('keep me', 1, true) ~= nil }, { 1, true })
+  child.type_keys('q')
+  MiniTest.expect.equality(vim.tbl_map(function(t)
+    return t.line
+  end, ui.threads_visible(child, 'right')), { 5 })
+  child.cmd('Diffy close')
+end
+
 T['<leader>dc opens the threads view from the file tree and from the commit log'] = function()
   open_default()
   write_comment(ui.wins(child).right, 5, 'a thread')

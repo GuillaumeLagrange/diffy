@@ -1134,6 +1134,33 @@ T['review github starts on the event its argument names'] = function()
   child.cmd('Diffy close')
 end
 
+T['dd in the threads view deletes your unpublished thread, from your pending review too; a published one stays'] = function()
+  child.o.columns = 220
+  setup_pending()
+  open_pr()
+  child.cmd('Diffy threads')
+  local function cursor_on(needle)
+    for i, l in ipairs(ui.threads_view(child).rows) do
+      if l:find(needle, 1, true) then
+        child.api.nvim_win_set_cursor(wins().threads, { i, 0 })
+      end
+    end
+  end
+  ui.capture_warnings(child)
+  cursor_on('D1 published')
+  child.type_keys('dd')
+  eq(table.concat(ui.warnings(child, 'WARN'), '\n'):find('unpublished', 1, true) ~= nil, true)
+  cursor_on('E1 pending')
+  child.type_keys('dd')
+  wait_for(function()
+    return remote_comment('E1 pending') == nil
+  end, 'E1 out of the pending review')
+  eq(remote_comment('D1 published') ~= nil, true)
+  eq(stored('E1 pending'), nil)
+  child.type_keys('q')
+  child.cmd('Diffy close')
+end
+
 T[':Diffy review clear asks, then drops your drafts and deletes your pending review'] = function()
   setup_pending()
   open_pr()

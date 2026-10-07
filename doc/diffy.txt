@@ -776,6 +776,10 @@ Keys, in the threads view ~
   `<Tab>`         Fold / unfold the group under the cursor.
   `x`             Resolve / unresolve the thread under the cursor (with a
                   pull request, staged until you submit).
+  `dd`            Delete the thread under the cursor when it's only yours
+                  and unpublished (drafts, comments sent to the agent),
+                  replies included; mirrored drafts leave your pending
+                  review too.
   `m`             Only threads you started / everyone's (GitHub).
   `<C-f>` / `<C-b>`
                   Scroll the preview.

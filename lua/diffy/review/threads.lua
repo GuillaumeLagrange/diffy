@@ -537,6 +537,24 @@ local function setup(session, buf)
     end
     ui.set_resolved(session, row.entry.thread, not row.entry.thread.resolved)
   end, { buffer = buf, desc = 'resolve/unresolve thread' })
+  map(session, 'n', 'dd', function()
+    local row = cursor_row(session)
+    if not (row and row.kind == 'thread' and review_of(session)) then
+      return
+    end
+    local t = row.entry.thread
+    local ids = {}
+    for _, c in ipairs(t.comments) do
+      if c.state == 'draft' or c.state == 'sent' then
+        table.insert(ids, c.id)
+      end
+    end
+    if t.github or #ids < #t.comments then
+      vim.notify('diffy: only a thread of your own unpublished comments can be deleted here', vim.log.levels.WARN)
+      return
+    end
+    require('diffy.review.drafts').remove(session, ids)
+  end, { buffer = buf, desc = 'delete thread (unpublished)' })
   map(session, 'n', 'm', function()
     local review = review_of(session)
     if not (review and review.backend.capabilities.people) then
@@ -564,7 +582,7 @@ M.view = {
   preview = preview,
   keys = function(session)
     local review = review_of(session)
-    local keys = { { '<CR>', 'go to' }, { '<Tab>', 'fold', drop = 2 } }
+    local keys = { { '<CR>', 'go to' }, { '<Tab>', 'fold', drop = 2 }, { 'dd', 'delete', drop = 0 } }
     if review and review.backend.capabilities.resolve then
       table.insert(keys, { 'x', 'resolve', drop = 3 })
     end

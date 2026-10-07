@@ -427,7 +427,8 @@ the folders become `…/`. With the cursor on a cut row, the whole row is
 drawn over it, past the panel's edge.
 
 Folder and section headers start with `▾` when expanded and `▸` when
-collapsed. A collapsed folder stays collapsed as you change the selection;
+collapsed. A collapsed header shows the `+added -removed` of every file
+under it. A collapsed folder stays collapsed as you change the selection;
 jumping to a file inside it from the diff expands it.
 
 Keys, in the files view ~

@@ -350,29 +350,48 @@ local function dirname(path)
   return path:match('^(.*)/[^/]*$') or ''
 end
 
+--- `left` then `+added -removed` right-aligned at `width` (one space apart
+--- without one), and the counts' highlight spans.
+local function with_counts(left, width, added, removed)
+  local counts = ('+%d -%d'):format(added, removed)
+  local pad = width and math.max(1, width - vim.fn.strdisplaywidth(left) - #counts) or 1
+  local text = left .. (' '):rep(pad) .. counts
+  local plus_end = #text - #counts + #tostring(added) + 1
+  return text, { { #text - #counts, plus_end, 'DiffyAdded' }, { plus_end + 1, #text, 'DiffyRemoved' } }
+end
+
 --- One display row fitted to `width` cells (untruncated without one):
 --- `text`, highlight spans `{start_col, end_col, group}` (byte columns),
 --- for a file the byte range of its name, and whether fitting cut anything.
 local function row_line(row, width)
   local indent = ('  '):rep(row.depth)
-  if row.kind == 'dir' then
-    local head = indent .. chevron(row)
-    local avail = width and math.max(1, width - vim.fn.strdisplaywidth(head) - 1)
-    local name = avail and hl.truncate_path(row.name, avail) or row.name
-    local text = head .. name .. '/'
-    return text, { { #indent, #text, row.viewed and 'DiffyViewed' or 'DiffyDirectory' } }, nil, name ~= row.name
-  end
-  if row.kind == 'section' or row.kind == 'viewed' then
-    local full = indent .. chevron(row) .. ('%s (%d)'):format(row.label, row.count)
-    local text = width and hl.truncate(full, math.max(1, width)) or full
-    local group = row.kind == 'viewed' and 'DiffyViewed' or 'DiffyLabel'
-    return text, { { #indent, #text, group } }, nil, text ~= full
+  if row.kind ~= 'file' then
+    local sum = row.collapsed and row.sum
+    local reserve = sum and (#('+%d -%d'):format(sum.added, sum.removed) + 1) or 0
+    local group, left, cut
+    if row.kind == 'dir' then
+      local head = indent .. chevron(row)
+      local avail = width and math.max(1, width - vim.fn.strdisplaywidth(head) - 1 - reserve)
+      local name = avail and hl.truncate_path(row.name, avail) or row.name
+      left, cut = head .. name .. '/', name ~= row.name
+      group = row.viewed and 'DiffyViewed' or 'DiffyDirectory'
+    else
+      local full = indent .. chevron(row) .. ('%s (%d)'):format(row.label, row.count)
+      left = width and hl.truncate(full, math.max(1, width - reserve)) or full
+      cut = left ~= full
+      group = row.kind == 'viewed' and 'DiffyViewed' or 'DiffyLabel'
+    end
+    if not sum then
+      return left, { { #indent, #left, group } }, nil, cut
+    end
+    local text, count_spans = with_counts(left, width, sum.added, sum.removed)
+    if group == 'DiffyViewed' then
+      return text, { { #indent, #text, group } }, nil, cut
+    end
+    return text, { { #indent, #left, group }, count_spans[1], count_spans[2] }, nil, cut
   end
   local e = row.entry
-  local counts = ''
-  if e.added or e.removed then
-    counts = ('+%d -%d'):format(e.added or 0, e.removed or 0)
-  end
+  local counts = (e.added or e.removed) and ('+%d -%d'):format(e.added or 0, e.removed or 0) or ''
   local dot = row.changed and '● ' or ''
   local head = indent .. e.status .. ' ' .. dot
   local avail = width and (width - vim.fn.strdisplaywidth(head) - (counts ~= '' and (#counts + 1) or 0)) or math.huge
@@ -397,8 +416,10 @@ local function row_line(row, width)
     name = hl.truncate_path(name, math.max(1, avail))
   end
   local left = head .. name
-  local pad = width and math.max(1, width - vim.fn.strdisplaywidth(left) - #counts) or 1
-  local text = counts ~= '' and (left .. (' '):rep(pad) .. counts) or left
+  local text, count_spans = left, {}
+  if counts ~= '' then
+    text, count_spans = with_counts(left, width, e.added or 0, e.removed or 0)
+  end
   if row.viewed then
     return text, { { #indent, #text, 'DiffyViewed' } }, { #head, #left }, name ~= full_name
   end
@@ -407,11 +428,7 @@ local function row_line(row, width)
     local at = #indent + #e.status + 1
     table.insert(spans, { at, at + #'●', 'DiffyViewedChanged' })
   end
-  if counts ~= '' then
-    local plus_end = #text - #counts + #tostring(e.added or 0) + 1
-    table.insert(spans, { #text - #counts, plus_end, 'DiffyAdded' })
-    table.insert(spans, { plus_end + 1, #text, 'DiffyRemoved' })
-  end
+  vim.list_extend(spans, count_spans)
   return text, spans, { #head, #left }, name ~= full_name
 end
 
@@ -853,7 +870,8 @@ end
 
 --- `session.tree_rows`: the rows of `tree_all` not under a collapsed
 --- header, each given its buffer line (`lnum`, nil when hidden). A header
---- with nothing under it (an empty section) isn't foldable.
+--- with nothing under it (an empty section) isn't foldable. A collapsed
+--- header gets `sum`, its files' counts added up (nil when none has counts).
 local function visible_rows(session)
   local all, collapsed = session.tree_all, session.tree_collapsed or {}
   local rows, hide_below = {}, nil
@@ -871,6 +889,21 @@ local function visible_rows(session)
       end
       row.foldable = row.key and all[i + 1] and all[i + 1].depth > row.depth or nil
       row.collapsed = folded and row.foldable or nil
+      row.sum = nil
+      if row.collapsed then
+        for j = i + 1, #all do
+          local r = all[j]
+          if r.depth <= row.depth then
+            break
+          end
+          local e = r.entry
+          if r.kind == 'file' and (e.added or e.removed) then
+            row.sum = row.sum or { added = 0, removed = 0 }
+            row.sum.added = row.sum.added + (e.added or 0)
+            row.sum.removed = row.sum.removed + (e.removed or 0)
+          end
+        end
+      end
       hide_below = row.collapsed and row.depth or nil
     end
   end

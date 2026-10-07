@@ -582,6 +582,56 @@ T['<CR> on a folder collapses it to its header and expands it back, top-level fo
   child.cmd('Diffy close')
 end
 
+T['a collapsed folder shows the counts of every file under it, an expanded one none'] = function()
+  repo = Repo.new()
+    :commit('Base', { ['top.txt'] = Repo.lines(1), ['a/b/old.txt'] = Repo.lines(4) })
+    :commit('Add', {
+      ['a/b/old.txt'] = { '1', '2' },
+      ['a/b/new.txt'] = Repo.lines(3),
+      ['a/one.txt'] = Repo.lines(5),
+    })
+  child.fn.chdir(repo.dir)
+  ui.arm_ready(child, 'render')
+  child.cmd(('Diffy %s..%s'):format(repo.sha.Base, repo.sha.Add))
+  ui.wait_ready(child)
+  local function squeezed()
+    return vim.tbl_map(function(l)
+      return (l:gsub('(%S)%s+', '%1 '))
+    end, tree())
+  end
+
+  MiniTest.expect.equality(squeezed(), {
+    '▾ a/',
+    '  ▾ b/',
+    '    A new.txt +3 -0',
+    '    M old.txt +0 -2',
+    '  A one.txt +5 -0',
+  })
+  keys_on('  ▾ b/', '<CR>')
+  MiniTest.expect.equality(squeezed(), { '▾ a/', '  ▸ b/ +3 -2', '  A one.txt +5 -0' })
+  keys_on('▾ a/', '<CR>')
+  MiniTest.expect.equality(squeezed(), { '▸ a/ +8 -2' })
+  keys_on('▸ a/', '<CR>')
+  MiniTest.expect.equality(squeezed()[1], '▾ a/')
+  child.cmd('Diffy close')
+end
+
+T['a collapsed section shows the counts of its files'] = function()
+  repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(5), ['d/g.txt'] = Repo.lines(5) })
+  vim.fn.writefile({ '1', '2', 'x' }, repo.dir .. '/f.txt')
+  vim.fn.writefile({ '1', '2', '3', '4', '5', '6' }, repo.dir .. '/d/g.txt')
+  child.fn.chdir(repo.dir)
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+
+  keys_on('▾ Unstaged (2)', '<CR>')
+  MiniTest.expect.equality(vim.tbl_map(function(l)
+    return (l:gsub('(%S)%s+', '%1 '))
+  end, tree()), { '▸ Unstaged (2) +2 -3', '  Staged (0)' })
+  child.cmd('Diffy close')
+end
+
 T['a collapsed folder stays collapsed across renders, ]f skips it, a jump to a file in it expands it'] = function()
   repo = Repo.new():commit('Base', {
     ['0.txt'] = Repo.lines(3),

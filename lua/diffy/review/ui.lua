@@ -2382,6 +2382,7 @@ function M.open_pr_description(session)
   local heads = fill_cards(session, buf, messages, { people = true, avatar_url = review.backend.avatar_url })
 
   local title = ('#%d %s'):format(pr.number, pr.title or '')
+  local hints = { { 'gX', 'github.com', drop = 1 }, { 'q', 'close' } }
   local function width()
     return math.max(40, math.min(CARD_WIDTH, vim.o.columns - 4))
   end
@@ -2390,7 +2391,7 @@ function M.open_pr_description(session)
     style = 'minimal',
     border = 'rounded',
     title = card_title(title, width()),
-    footer = key_hints({ { 'q', 'close' } }, width()),
+    footer = key_hints(hints, width()),
     zindex = 200,
   }))
   vim.wo[win].conceallevel = 2
@@ -2399,7 +2400,7 @@ function M.open_pr_description(session)
   -- as tall as its wrapped text allows; the frame's two rows count
   local function place()
     local w = width()
-    vim.api.nvim_win_set_config(win, { width = w, title = card_title(title, w), footer = key_hints({ { 'q', 'close' } }, w) })
+    vim.api.nvim_win_set_config(win, { width = w, title = card_title(title, w), footer = key_hints(hints, w) })
     local height = math.max(1, math.min(vim.api.nvim_win_text_height(win, {}).all, vim.o.lines - 6))
     vim.api.nvim_win_set_config(win, layout.centered(w, height, { row = math.floor((vim.o.lines - height - 2) / 2) }))
   end

@@ -270,19 +270,44 @@ T['gP shows an HTML bot comment as readable text: headings, badges, folded detai
   child.cmd('Diffy close')
 end
 
-T['gX opens the PR on github.com from a diff window and from the column'] = function()
+T['gX opens the PR on github.com from a diff window and from the column, hinted where the PR shows'] = function()
   if live.enabled then
     MiniTest.skip('fake PR url only')
   end
   child.lua([[
     _G.__opened = {}
     vim.ui.open = function(url) table.insert(_G.__opened, url) end
+    _G.__footer = function(win)
+      local f = vim.api.nvim_win_get_config(win).footer or {}
+      return vim.trim(table.concat(vim.tbl_map(function(c) return c[1] end, type(f) == 'table' and f or { { f } })))
+    end
   ]])
   open_pr()
   open_file('f.txt')
   child.api.nvim_set_current_win(wins().right)
   child.type_keys('gX')
+
+  child.type_keys('gP')
+  MiniTest.expect.equality(child.lua_get('_G.__footer(0)'), 'gX github.com   q close')
+  child.type_keys('q')
+
+  -- the PR row's float hints it; a commit's doesn't
+  local function log_float_footer(lnum)
+    ui.arm_ready_raw(child, 'commitmsg')
+    child.api.nvim_win_set_cursor(wins().log, { lnum, 0 })
+    ui.wait_ready_raw(child)
+    return child.lua_get('_G.__footer(require("diffy.session").current().wins.commitmsg)')
+  end
   child.api.nvim_set_current_win(wins().log)
+  MiniTest.expect.equality(log_float_footer(ui.lnum(child, 'log', 1)), 'gX github.com')
+  local commit_row
+  for i, l in ipairs(ui.layout(child).log) do
+    if not commit_row and l:match('%x%x%x%x%x%x%x ') then
+      commit_row = i
+    end
+  end
+  MiniTest.expect.equality(log_float_footer(ui.lnum(child, 'log', commit_row)), '')
+
   child.type_keys('gX')
   local url = 'https://github.com/GuillaumeLagrange/diffy-tests/pull/2'
   MiniTest.expect.equality(child.lua_get('_G.__opened'), { url, url })

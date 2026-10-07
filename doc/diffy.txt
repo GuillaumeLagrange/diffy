@@ -645,7 +645,8 @@ Keys, in a diff window ~
   `gP`            The pull request's description and conversation (with
                   an open pull request).
   `gX`            Open the pull request on github.com (also in the column
-                  and the `gP` card).
+                  and the `gP` card). The `gP` card and the float of the
+                  log's pull request row show it in their footer.
 
                                                           *diffy-thread-float*
 Thread cards ~

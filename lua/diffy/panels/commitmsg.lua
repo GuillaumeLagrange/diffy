@@ -188,7 +188,7 @@ local function content(session, msg, width)
 end
 
 --- Editor-relative config beside the log window, aligned with its cursor row.
-local function config(session, lines_fn)
+local function config(session, lines_fn, hints)
   local log = session.wins.log
   local pos = vim.api.nvim_win_get_position(log)
   local is_float = vim.api.nvim_win_get_config(log).relative ~= ''
@@ -221,6 +221,8 @@ local function config(session, lines_fn)
     height = height,
     style = 'minimal',
     border = 'rounded',
+    -- '' clears the PR row's hints when the same float moves to a commit
+    footer = hints and require('diffy.highlight').key_hints(hints, width) or '',
     focusable = false,
     zindex = 60,
   },
@@ -238,7 +240,7 @@ local function draw(session, msg)
   local st = state(session)
   local cfg, lines, spans = config(session, function(w)
     return content(session, msg, w)
-  end)
+  end, msg.pr and { { 'gX', 'github.com' } } or nil)
   local buf = session_mod.overlay(session, 'commitmsg', cfg, lines, require('diffy.highlight').CARD_HL)
   local ns = session_mod.namespace(session, 'commitmsg')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)

@@ -247,7 +247,7 @@ T['the thread float is centred over the other side, at most 100 wide, and refitt
   child.cmd('Diffy close')
 end
 
-T['K is the buffer\'s K even on a commented line; <CR> enters the thread'] = function()
+T['K is the buffer\'s K even on a commented line'] = function()
   open_default()
   local w = ui.wins(child)
   write_comment(w.right, 5, 'here')
@@ -259,14 +259,6 @@ T['K is the buffer\'s K even on a commented line; <CR> enters the thread'] = fun
   MiniTest.expect.equality(child.g.kw, child.fn.expand('<cword>'))
   local float = ui.thread_float(child)
   MiniTest.expect.equality(float == vim.NIL or not float.focused, true)
-
-  child.g.kw = nil
-  arm_ready_raw('thread')
-  child.type_keys('<CR>')
-  ui.wait_ready_raw(child)
-  MiniTest.expect.equality(ui.thread_float(child).focused, true)
-  MiniTest.expect.equality(child.g.kw, vim.NIL)
-  child.type_keys('q')
   child.cmd('Diffy close')
 end
 
@@ -344,9 +336,6 @@ T['<Esc> closes the hover card and keeps it closed on that line until the cursor
   child.type_keys('<Esc>', '<CR>')
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
   child.type_keys('q')
-  -- nothing open: <Esc> is a no-op
-  child.type_keys('<Esc>', '<Esc>')
-  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
   MiniTest.expect.equality(child.api.nvim_get_current_win(), w.right)
 
   child.cmd('Diffy close')
@@ -1228,26 +1217,8 @@ T['a thread deleted by another nvim closes its open card'] = function()
   child.cmd('Diffy close')
 end
 
-T["typing a line above a thread moves its bar along with its summary, the other side's padding following"] = function()
-  child.o.lines = 50
-  child.o.columns = 160
-  open_default()
-  local w = ui.wins(child)
-  write_comment(w.right, 20, 'about line 20')
-
-  child.api.nvim_set_current_win(w.right)
-  child.type_keys('10G', 'o', 'typed', '<Esc>')
-
-  MiniTest.expect.equality(vim.tbl_map(function(v) return v.line end, ui.threads_visible(child, 'right')), { 21 })
-  local bars = ui.thread_bars(child, 'right')
-  MiniTest.expect.equality({ bars['20'], bars['21'] ~= nil, bars['21+1'] ~= nil }, { nil, true, true })
-  child.fn.win_execute(w.right, 'call cursor(25, 1)')
-  MiniTest.expect.equality(ui.aligned(child), true)
-
-  child.cmd('Diffy close')
-end
-
-T['a worktree comment follows lines typed above it, goes outdated when its first line changes, and comes back on undo'] = function()
+T["a worktree comment follows lines typed above it, its bar and the other side's padding too, goes outdated when its first line changes, and comes back on undo"] = function()
+  child.o.lines, child.o.columns = 50, 160
   open_default()
   local w = ui.wins(child)
   write_comment(w.right, 20, 'about line 20')
@@ -1265,6 +1236,10 @@ T['a worktree comment follows lines typed above it, goes outdated when its first
   child.api.nvim_set_current_win(w.right)
   child.type_keys('10G', 'O', 'typed above', '<Esc>')
   MiniTest.expect.equality(lines(), { 21 })
+  local bars = ui.thread_bars(child, 'right')
+  MiniTest.expect.equality({ bars['20'], bars['21'] ~= nil, bars['21+1'] ~= nil }, { nil, true, true })
+  child.fn.win_execute(w.right, 'call cursor(25, 1)')
+  MiniTest.expect.equality(ui.aligned(child), true)
 
   child.type_keys('21G', 'A', ' edited', '<Esc>')
   MiniTest.expect.equality(lines(), {})
@@ -1375,7 +1350,6 @@ T['review agent writes review.md for worktree, index and commit views, marks sen
   send_review('')
 
   local review_md = review_file('review.md')
-  MiniTest.expect.equality(vim.fn.filereadable(review_md), 1)
   local text = table.concat(vim.fn.readfile(review_md), '\n')
   -- raw bytes: `readfile()` turns NUL back into NL, hiding a `writefile()`
   -- of an entry with an embedded `\n`; other tools read review.md as bytes

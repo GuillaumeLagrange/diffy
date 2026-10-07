@@ -837,7 +837,9 @@ Each comment says where it is now (its lines tracked to the worktree, the
 index for an index comment, with the code around them) and where it was
 written (the commit and the diff hunk), then the comment. An outdated,
 detached or old-side comment has no location now: it gets its commit,
-lines and code where it was written. A message alone is sent too.
+lines and code where it was written. A reply quotes the comments before it
+in its thread, yours and others' (a GitHub review bot's comment you
+answered), with their authors. A message alone is sent too.
 
 Each comment's section starts with a `- [ ] resolved` box, and the prompt
 asks the agent to tick it once the comment is handled. diffy reads the

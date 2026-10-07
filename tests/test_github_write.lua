@@ -943,14 +943,39 @@ T['submitting to the agent takes your drafts out of the pending review'] = funct
   wait_ready_raw()
 
   local md = table.concat(vim.fn.readfile(branch_dir() .. '/review.md'), '\n')
-  -- your drafts, adopted ones included; not D1, which is published
-  eq({ md:find('for the agent', 1, true) ~= nil, md:find('E1 pending', 1, true) ~= nil, md:find('D1 published', 1, true) }, { true, true, nil })
+  -- your drafts, adopted ones included; not D1, which is published (only quoted, above the E4 reply to it)
+  eq({ md:find('for the agent', 1, true) ~= nil, md:find('E1 pending', 1, true) ~= nil, md:find('\nD1 published', 1, true) }, { true, true, nil })
   wait_for(function()
     return remote().pending == nil
   end, 'the pending review emptied')
   eq(remote_comment('for the agent'), nil)
   eq(remote_comment('D1 published') ~= nil, true)
   eq({ stored('for the agent').state, stored('for the agent').gh }, { 'sent', nil })
+  child.cmd('Diffy close')
+end
+
+T['a reply sent to the agent comes with the thread it answers'] = function()
+  setup_pending()
+  open_pr()
+  open_file('f.txt')
+  enter_thread_with(wins().right, 30, 'D1')
+  ui.arm_ready_raw(child, 'compose')
+  child.type_keys('r')
+  save_composed('a reply for the agent')
+
+  ui.arm_ready_raw(child, 'compose')
+  child.cmd('Diffy review submit')
+  wait_ready_raw()
+  ui.arm_ready_raw(child, 'choose')
+  child.type_keys('<C-s>')
+  wait_ready_raw()
+  ui.arm_ready_raw(child, 'review')
+  child.type_keys('a')
+  wait_ready_raw()
+
+  local md = table.concat(vim.fn.readfile(branch_dir() .. '/review.md'), '\n')
+  local section = md:match('\n## [^\n]* f%.txt:30\n(.-a reply for the agent)')
+  eq(section and section:find('> D1 published thread', 1, true) ~= nil, true)
   child.cmd('Diffy close')
 end
 

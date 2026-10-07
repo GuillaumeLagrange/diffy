@@ -1,8 +1,13 @@
 # Answering reviews on your own PR — design draft
 
-Status: parked, open questions below unanswered, nothing implemented. Builds on the PR layer
-(`docs/pr-mode.md`): one set of threads per branch, background sync, staged resolves, submit to the agent
-or to GitHub.
+Status: parked, open questions below unanswered. Builds on the PR layer (`docs/pr-mode.md`): one set of
+threads per branch, background sync, staged resolves, submit to the agent or to GitHub.
+
+Today's stopgap, short of this design: reply to a reviewer's thread (`r` in the card) with what you want
+done, submit to the agent. The reply's section in `review.md` quotes the comments before it in its thread,
+with their authors, so the agent sees the review comment it answers. It's still per comment, not per
+thread: the agent gets your instruction rather than the thread to answer, and the reply goes to the agent
+and leaves your pending review, so the reviewer never sees it; answering them is a second reply.
 
 ## The ask
 

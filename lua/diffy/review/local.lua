@@ -332,6 +332,28 @@ local function render_comment(out, item, lines, hunks)
   table.insert(out, fence)
   table.insert(out, '</details>')
   table.insert(out, '')
+  local earlier = {}
+  for _, c in ipairs(thread.comments) do
+    if c == comment then
+      break
+    end
+    table.insert(earlier, c)
+  end
+  -- a reply means nothing to the agent without what it answers
+  if #earlier > 0 then
+    table.insert(out, 'Earlier in this thread:')
+    table.insert(out, '')
+    for _, c in ipairs(earlier) do
+      table.insert(out, ('> **%s**:'):format(c.author or 'unknown'))
+      table.insert(out, '>')
+      for _, l in ipairs(vim.split((c.body or ''):gsub('\r', ''), '\n', { plain = true })) do
+        table.insert(out, l == '' and '>' or '> ' .. l)
+      end
+      table.insert(out, '')
+    end
+    table.insert(out, ('Reply by %s:'):format(comment.author or 'unknown'))
+    table.insert(out, '')
+  end
   vim.list_extend(out, vim.split(comment.body, '\n', { plain = true }))
   table.insert(out, '')
 end

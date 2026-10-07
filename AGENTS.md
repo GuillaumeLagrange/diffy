@@ -278,6 +278,9 @@ with the real config and `--listen`, screenshotted with `grim`:
   `navigation.lua` reacts on the next tick. `bufload` fires `BufWinEnter` in a hidden autocmd window.
   Wiping a buffer drops its jumplist and tag stack entries; a new tab's diff windows inherit the previous
   window's jumplist and tag stack (`session.open` clears them).
+- Treesitter folds keep per-buffer state dropped on `BufUnload`, so a buffer wiped inside an autocmd
+  callback leaves it behind. Setting 'foldminlines'/'foldnestmax' globally (`vim.wo[win].x = …` is `:set`)
+  then refreshes every buffer in that state and errors `Invalid buffer id`; set them with `vim.wo[win][0]`.
 - `WinClosed`/`BufWipeout` callbacks that close other windows of the same tab race `:tabclose`/`:qa`
   (spurious E444); defer them with `vim.schedule`.
 - `:bwipeout!` on an unlisted scratch buffer closes its window too (firing `WinClosed`).

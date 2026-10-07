@@ -1607,6 +1607,36 @@ T["comment decorations don't show in a window outside the session showing the sa
   child.cmd('Diffy close')
 end
 
+T["a thread opens from the threads view after a treesitter-folded buffer was wiped inside an autocmd"] = function()
+  -- nvim forgets a buffer's treesitter fold state on BufUnload, which a wipe
+  -- from inside another autocmd doesn't fire: a global 'foldminlines' set
+  -- then refreshes the gone buffer and errors
+  child.lua([[
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.cmd('split | buffer ' .. buf)
+    vim.wo.foldmethod = 'expr'
+    vim.wo.foldexpr = 'v:lua.vim.treesitter.foldexpr()'
+    vim.fn.foldlevel(1)
+    vim.cmd('close')
+    vim.api.nvim_create_autocmd('User', { pattern = 'Wipe', once = true, callback = function()
+      vim.cmd('bwipe! ' .. buf)
+    end })
+    vim.api.nvim_exec_autocmds('User', { pattern = 'Wipe' })
+  ]])
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'a comment')
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('1G')
+  child.v.errmsg = ''
+
+  threads('Diffy threads')
+  press_on_row('a comment', '<CR>', 'thread')
+  MiniTest.expect.equality(child.v.errmsg, '')
+  MiniTest.expect.equality(ui.thread_float(child).text[2], 'a comment')
+  child.cmd('Diffy close')
+end
+
 T['screenshot: nested comment ranges draw side by side, their summaries dotted in the bar colour'] = function()
   child.o.lines, child.o.columns = 24, 80
   -- the screenshot embeds the worktree's absolute path: keep it stable

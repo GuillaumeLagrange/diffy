@@ -649,7 +649,9 @@ end
 --- Call again when `buf` is shown in another window.
 function M.attach(session, win, buf)
   local s = by_buf[buf]
-  local wo = vim.wo[win]
+  -- local: a global 'foldminlines' set makes nvim refresh the treesitter folds
+  -- of every buffer it knows, wiped ones included (E: Invalid buffer id)
+  local wo = vim.wo[win][0]
   wo.foldmethod = 'manual'
   wo.foldtext = "v:lua.require'diffy.review.render'.foldtext()"
   wo.foldminlines = 0

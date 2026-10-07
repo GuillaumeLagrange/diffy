@@ -513,9 +513,10 @@ local function stack_below(session, top, anchor_win, first, last, height, lnum, 
   return { relative = 'win', win = block.win, row = block.row + top_height + 2, col = block.col, width = t.width, height = height }
 end
 
---- `CursorMoved` in a diff window: preview the cursor line's thread, keep
---- the open one if it covers the line, close it off every thread. After
---- `<Esc>` (`_hover_off`), nothing opens until the cursor leaves the line.
+--- `CursorMoved` in a diff window: preview the cursor line's leftmost
+--- unresolved thread, keep the open one if it covers the line, close it
+--- otherwise. Resolved threads only open when asked (`<Tab>`, `]t`, `<CR>`).
+--- After `<Esc>` (`_hover_off`), nothing opens until the cursor leaves the line.
 local function hover(session)
   local review = session.review
   if session.closed or not review.inline then
@@ -535,12 +536,19 @@ local function hover(session)
   end
   local threads = M.threads_at(session, win, line)
   local open = review._open
-  if #threads == 0 and open then
-    M.close_thread(session)
-  elseif #threads == 0 or (open and open.src == win and vim.tbl_contains(threads, open.thread)) then
+  if open and open.src == win and vim.tbl_contains(threads, open.thread) then
     paint(session)
+    return
+  end
+  local pick = vim.iter(threads):find(function(t)
+    return not t.resolved
+  end)
+  if pick then
+    M.show_thread(session, pick)
+  elseif open then
+    M.close_thread(session)
   else
-    M.show_thread(session, threads[1])
+    paint(session)
   end
 end
 

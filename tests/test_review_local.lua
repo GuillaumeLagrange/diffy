@@ -700,7 +700,7 @@ T['a thread\'s comments are separated by a rule across the card'] = function()
   child.cmd('Diffy close')
 end
 
-T['threads stacked on a line are drawn oldest first; the hover opens the leftmost (oldest) and ]t walks right'] = function()
+T['threads stacked on a line are drawn oldest first; the hover opens the leftmost unresolved and ]t walks right'] = function()
   child.o.columns = 160
   open_default()
   local w = ui.wins(child)
@@ -731,7 +731,9 @@ T['threads stacked on a line are drawn oldest first; the hover opens the leftmos
   end
   child.api.nvim_set_current_win(w.right)
   child.type_keys('1G', '5G')
-  -- the leftmost bar is the oldest one, resolved or not
+  -- the oldest is resolved: the hover skips it, its bar stays leftmost
+  MiniTest.expect.equality(shown(), 'second')
+  child.type_keys('[t')
   MiniTest.expect.equality(shown(), 'first')
   child.type_keys(']t')
   MiniTest.expect.equality(shown(), 'second')
@@ -744,6 +746,29 @@ T['threads stacked on a line are drawn oldest first; the hover opens the leftmos
   MiniTest.expect.equality(shown(), 'third')
   child.type_keys('5[t')
   MiniTest.expect.equality(shown(), 'first')
+
+  child.cmd('Diffy close')
+end
+
+T['moving onto a resolved thread leaves it closed until <Tab> opens it'] = function()
+  child.o.columns = 160
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 10, 'settled')
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('10G', '<CR>', 'x', 'q')
+
+  child.type_keys('1G', '10G')
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
+  child.type_keys('<Tab>')
+  MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('settled', 1, true) ~= nil, true)
+  -- asked for, it stays open while the cursor moves along its line
+  child.type_keys('$')
+  MiniTest.expect.equality(table.concat(ui.thread_float(child).text, '\n'):find('settled', 1, true) ~= nil, true)
+  child.type_keys('1G')
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
+  child.type_keys('10G')
+  MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
 
   child.cmd('Diffy close')
 end

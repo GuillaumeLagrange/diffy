@@ -610,12 +610,13 @@ line numbers and the text, and a one-line summary under its last line
   number columns, then the bars) while the file has comments, and put your
   own back otherwise.
 
-Moving onto a commented line opens its leftmost thread; `<Tab>`/`<S-Tab>`
-cycle through the others covering that line, left to right. `]t`/`[t` walk
-every thread of the side by the line its range starts on, then the larger
-range first (the one drawn further left), then oldest first. `<Esc>` closes
-the card, and it stays closed until the cursor leaves the line (or `<Tab>`,
-`<CR>`, `]t` ask for it).
+Moving onto a commented line opens its leftmost unresolved thread; a
+resolved one only opens when asked for (`<Tab>`, `<CR>`, `]t`).
+`<Tab>`/`<S-Tab>` cycle through the threads covering that line, left to
+right. `]t`/`[t` walk every thread of the side by the line its range starts
+on, then the larger range first (the one drawn further left), then oldest
+first. `<Esc>` closes the card, and it stays closed until the cursor leaves
+the line (or `<Tab>`, `<CR>`, `]t` ask for it).
 
                                                            *diffy-review-keys*
 Keys, in a diff window ~

@@ -484,34 +484,40 @@ local function git_refresh(session, args)
   })
 end
 
---- Paths of every file row of the section `header`, collapsed folders included.
-local function section_paths(session, header)
-  local paths, inside = {}, false
+--- The file rows under header `row` (a folder, section or Viewed group).
+local function rows_under(session, header)
+  local out, inside = {}, false
   for _, row in ipairs(session.tree_all) do
-    if row.kind == 'section' then
-      if inside then
+    if row == header then
+      inside = true
+    elseif inside then
+      if row.depth <= header.depth then
         break
       end
-      inside = row == header
-    elseif inside and row.kind == 'file' then
-      vim.list_extend(paths, row_paths(row))
+      if row.kind == 'file' then
+        table.insert(out, row)
+      end
     end
   end
-  return paths
+  return out
 end
 
 --- `git <verb> -- <paths>` for the row at the cursor: its file, or every
---- file of its section on a header. `to` is the section the file lands in,
---- where the cursor follows it after the re-render.
+--- file row under it on a header (section, folder or Viewed group: a folder
+--- inside a Viewed group holds only its viewed files). `to` is the section
+--- the file lands in, where the cursor follows it after the re-render.
 local function stage_at_cursor(session, verb, to)
   local row, lnum = cursor_row(session)
   local paths
   if row and row.kind == 'file' then
     paths = row_paths(row)
     session.tree_keep = { path = row.entry.path, pair = to, lnum = lnum }
-  elseif row and row.kind == 'section' then
-    paths = section_paths(session, row)
-    session.tree_keep = { section = row.pair, lnum = lnum }
+  elseif row then
+    paths = {}
+    for _, r in ipairs(rows_under(session, row)) do
+      vim.list_extend(paths, row_paths(r))
+    end
+    session.tree_keep = { section = row.kind == 'section' and row.pair or nil, lnum = lnum }
   end
   -- `git add` fails on a path with nothing to stage and missing from the
   -- worktree (a staged deletion or rename source). A conflicted path is
@@ -541,7 +547,7 @@ local function stage_at_cursor(session, verb, to)
   git_refresh(session, args)
 end
 
---- `s`: stage the file (or both paths of a rename pair) or section at the
+--- `s`: stage the file (or both paths of a rename pair) or header at the
 --- cursor, or mark a conflicted ('U') row resolved (warns if markers remain).
 function M.stage(session)
   local row = row_at_cursor(session)
@@ -554,7 +560,7 @@ function M.stage(session)
   end
 end
 
---- `u`: unstage the file (or both paths of a rename pair) or section at the cursor.
+--- `u`: unstage the file (or both paths of a rename pair) or header at the cursor.
 function M.unstage(session)
   if require_split(session) then
     stage_at_cursor(session, 'reset', selection.UNSTAGED)
@@ -567,10 +573,11 @@ function M.toggle(session)
     return
   end
   local row = cursor_row(session)
-  if not (row and row.pair) then
+  local first = row and (row.pair and row or rows_under(session, row)[1])
+  if not (first and first.pair) then
     return
   end
-  if row.pair == selection.UNSTAGED then
+  if first.pair == selection.UNSTAGED then
     M.stage(session)
   else
     M.unstage(session)
@@ -1208,24 +1215,6 @@ function M.undo_viewed(session)
     end
   end
   run.ready({ session = session.id, event = 'viewed' })
-end
-
---- The file rows under header `row` (a folder, section or Viewed group).
-local function rows_under(session, header)
-  local out, inside = {}, false
-  for _, row in ipairs(session.tree_all) do
-    if row == header then
-      inside = true
-    elseif inside then
-      if row.depth <= header.depth then
-        break
-      end
-      if row.kind == 'file' then
-        table.insert(out, row)
-      end
-    end
-  end
-  return out
 end
 
 --- `m` in the tree: toggle the file at the cursor; on a header, mark every

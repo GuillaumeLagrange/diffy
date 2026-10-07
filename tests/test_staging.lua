@@ -281,6 +281,64 @@ T['keys on a section header apply to all its files'] = function()
   child.cmd('Diffy close')
 end
 
+T['`-` on a folder moves the files rendered under it, keeping viewed and unviewed apart'] = function()
+  repo = Repo.new():commit('Base', { ['d/a.txt'] = 'a', ['d/b.txt'] = 'b', ['d/c.txt'] = 'c', ['d/e.txt'] = 'e', ['f.txt'] = 'f' })
+  for _, name in ipairs({ 'd/a.txt', 'd/b.txt', 'd/c.txt', 'd/e.txt', 'f.txt' }) do
+    vim.fn.writefile({ 'changed' }, repo.dir .. '/' .. name)
+  end
+  child.fn.chdir(repo.dir)
+
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  press_in_tree(line_in('Unstaged', 'a.txt'), 'm', 'viewed')
+  press_in_tree(line_in('Unstaged', 'b.txt'), 'm', 'viewed')
+  child.api.nvim_win_set_cursor(ui.wins(child).tree, { line_in('Unstaged', 'Viewed'), 0 })
+  child.type_keys('o')
+  local plain = function()
+    return vim.tbl_map(function(l)
+      return (l:gsub('%s+%+%d+ %-%d+$', ''))
+    end, tree())
+  end
+  MiniTest.expect.equality(plain(), {
+    '▾ Unstaged (5)',
+    '  ▾ Viewed (2)',
+    '    ▾ d/',
+    '      M a.txt',
+    '      M b.txt',
+    '  ▾ d/',
+    '    M c.txt',
+    '    M e.txt',
+    '  M f.txt',
+    '  Staged (0)',
+  })
+
+  press_in_tree(6, '-')
+  MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'd/c.txt\nd/e.txt')
+  MiniTest.expect.equality(plain(), {
+    '▾ Unstaged (3)',
+    '  ▾ Viewed (2)',
+    '    ▾ d/',
+    '      M a.txt',
+    '      M b.txt',
+    '  M f.txt',
+    '▾ Staged (2)',
+    '  ▾ d/',
+    '    M c.txt',
+    '    M e.txt',
+  })
+
+  press_in_tree(3, '-')
+  MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'd/a.txt\nd/b.txt\nd/c.txt\nd/e.txt')
+  MiniTest.expect.equality(plain(), { '▾ Unstaged (1)', '  M f.txt', '▾ Staged (4)', '  ▸ Viewed (2)', '  ▾ d/', '    M c.txt', '    M e.txt' })
+
+  -- the Staged folder outside the folded Viewed group: its viewed files stay staged
+  press_in_tree(5, '-')
+  MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'd/a.txt\nd/b.txt')
+
+  child.cmd('Diffy close')
+end
+
 T['the working tree selected with commits shows one merged tree, no sections'] = function()
   repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(5) }):commit('C1', { ['c.txt'] = Repo.lines(2) })
   vim.fn.writefile({ 'staged' }, repo.dir .. '/s.txt')

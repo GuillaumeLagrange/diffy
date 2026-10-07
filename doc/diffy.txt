@@ -458,8 +458,10 @@ opens that section's diff: the real file on the right for Unstaged, the
 index on the right for Staged. Both headers stay when a section is empty;
 with no changes at all the tree says `(no changes)`.
 
-- On a section header, collapsed or not, `-`, `s` and `u` apply to every
-  file of that section.
+- On a folder, section or `Viewed` header, collapsed or not, `-`, `s` and
+  `u` apply to every file listed under it. A folder inside a `Viewed` group
+  holds only the folder's viewed files, the folder of the same name below
+  the group only its other files.
 
 - After staging, the cursor follows the file into the section it moved to.
 

@@ -332,10 +332,14 @@ with the real config and `--listen`, screenshotted with `grim`:
 Validation:
 - Accepted: changed lines and up to 3 context lines around a hunk of `merge-base...commitOID`, both sides,
   multi-line ranges (even across hunks), renamed/added/deleted files, file-level threads.
-- Rejected: anything else ("Line could not be resolved"), including lines brought in by merging the base;
-  unknown path ("Path could not be resolved"). One invalid thread fails the whole `addPullRequestReview`,
-  so validate locally first. `model.anchor_valid` takes `-U0` hunks (it adds the ±3 itself);
-  `model.diff_position` needs the real `-U3` diff.
+- Rejected: anything else, including lines brought in by merging the base. `addPullRequestReview` fails
+  with "Line could not be resolved" (unknown path: "Path could not be resolved"), and one invalid thread
+  fails the whole review, so validate locally first. `addPullRequestReviewThread` answers `thread: null`
+  with no error (any invalid line or path); the legacy `addPullRequestReviewComment` fails with "Pull
+  request review thread position is invalid" (or "path is invalid"). Local validation passing doesn't
+  mean GitHub agrees: the local base branch can lag the PR's (a stacked PR whose base was pushed since).
+  `model.anchor_valid` takes `-U0` hunks (it adds the ±3 itself); `model.diff_position` needs the real
+  `-U3` diff.
 - Always send a renamed file's new path.
 
 Pending reviews:

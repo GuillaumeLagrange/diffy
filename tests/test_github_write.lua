@@ -863,6 +863,34 @@ T['a draft GitHub cannot take stays local with a badge until a commit and a push
   child.cmd('Diffy close')
 end
 
+T['a draft on a line the PR base on GitHub has since taken in stays local with a badge, no warning'] = function()
+  setup_empty()
+  -- the base branch moved on GitHub to Q1 (f.txt L5-7) while the local one
+  -- still points at the old base: diffy shows L6 changed, GitHub doesn't
+  if live.enabled then
+    ui.git(dir, { 'push', '-q', 'origin', Q1 .. ':refs/heads/' .. live.current.base })
+    wait_for(function()
+      return live.graphql('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){baseRefOid}}}', { o = OWNER, r = NAME, n = pr_number() })
+        .repository.pullRequest.baseRefOid == Q1
+    end, 'the PR base moved')
+  else
+    child.lua(('_G.__fake_state.merge_base = %q'):format(Q1))
+  end
+  open_pr()
+  open_file('f.txt')
+  local right = wins().right
+  compose_draft(right, 6, 'on the old base')
+  read_github(function()
+    local c = stored('on the old base')
+    return c and c.blocked == 'outside the diff' and row_icon() ~= '↻'
+  end, 'the draft kept local, the sync over')
+  eq(row_icon(), nil)
+  eq(#remote().threads, 0)
+  eq(enter_thread_with(right, 6, 'on the old base').text[1]:find('local only: outside the diff', 1, true) ~= nil, true)
+  child.type_keys('q')
+  child.cmd('Diffy close')
+end
+
 T['a draft reply on a resolved thread is mirrored; once its thread is deleted, it goes with its text in a notification'] = function()
   fake_only()
   setup_pending()

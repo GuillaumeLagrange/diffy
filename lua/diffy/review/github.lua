@@ -1434,17 +1434,19 @@ local function send(ctx, it, target, next, retried)
       end)
       next()
     end
+    -- `err` nil: `addPullRequestReviewThread` answers a thread GitHub can't
+    -- anchor with `thread: null` and no error
     local function failed(err)
-      if is_not_found(err) and tostring(err):find(review_id, 1, true) and not retried then
+      if err and is_not_found(err) and err:find(review_id, 1, true) and not retried then
         -- deleted with its last comment, or on github.com
         forget_review(ctx.session, review_id)
         send(ctx, it, target, next, true)
         return
       end
-      if tostring(err):lower():find('could not be resolved', 1, true) then
+      if not err or err:find('thread position is invalid', 1, true) or err:find('thread path is invalid', 1, true) then
         set_blocked(ctx, it.c.id, 'outside the diff')
       else
-        fail(ctx.notes, ("couldn't mirror a draft: %s"):format(tostring(err)))
+        fail(ctx.notes, ("couldn't mirror a draft: %s"):format(err))
       end
       next()
     end

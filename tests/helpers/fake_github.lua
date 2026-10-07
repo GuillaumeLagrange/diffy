@@ -33,7 +33,10 @@
 --   joins the pending review; a position on a `-` line makes a LEFT thread
 --   (merge-base line), otherwise RIGHT; `originalCommit` is the commit,
 --   `commit` moves to head at once when trackable, `line == originalLine`.
--- - `addPullRequestReviewThread(pullRequestReviewId)` joins it at head.
+-- - `addPullRequestReviewThread(pullRequestReviewId)` joins it at head. A
+--   line or path it can't anchor gets `thread: null` and no error; the
+--   legacy mutation fails with "Pull request review thread position (or
+--   path) is invalid", as gh's stderr.
 -- - A second `addPullRequestReview` while one is pending fails with
 --   UNPROCESSABLE and creates nothing.
 -- - Comments, pending or published, are edited and deleted in place; a thread
@@ -208,11 +211,12 @@ local function line_at_position(diff_lines, position)
 end
 
 --- The side and line a legacy `position` on `path` meant, in
---- `git diff -U3 -M base commit`, or nil.
+--- `git diff -U3 -M base commit`, or `nil, 'path' | 'position'`: what GitHub
+--- calls invalid.
 local function position_line(state, base, commit, path, position)
   local out = git(state, { 'diff', '-U3', '-M', base, commit })
   if not out then
-    return nil
+    return nil, 'path'
   end
   local lines = vim.split(out, '\n', { plain = true })
   local section
@@ -231,9 +235,13 @@ local function position_line(state, base, commit, path, position)
     end
   end
   if not section then
-    return nil
+    return nil, 'path'
   end
-  return line_at_position(section, position)
+  local side, line = line_at_position(section, position)
+  if not side then
+    return nil, 'position'
+  end
+  return side, line
 end
 
 --- Hunks of `path` in `git diff -U0 -M from to`.
@@ -659,7 +667,7 @@ function M.new(state)
       if state.repo_dir and state.merge_base then
         side, line = position_line(state, state.merge_base, variables.c, variables.p, variables.pos)
         if not side then
-          gql_error(cb, 'UNPROCESSABLE', 'Line could not be resolved')
+          fail(cb, ("gh: Pull request review thread %s is invalid and Pull request review thread diff hunk can't be blank"):format(line))
           return
         end
       end
@@ -690,9 +698,9 @@ function M.new(state)
         not_found(cb, variables.r)
         return
       end
-      local ok, err = validate(state, db.head, variables.p, variables.s == 'LEFT' and 'old' or 'new', variables.sl or variables.l, variables.l)
+      local ok = validate(state, db.head, variables.p, variables.s == 'LEFT' and 'old' or 'new', variables.sl or variables.l, variables.l)
       if not ok then
-        gql_error(cb, 'UNPROCESSABLE', err)
+        respond(cb, { addPullRequestReviewThread = {} })
         return
       end
       local c = comment_node(state, fresh_id(db, 'COMMENT'), variables.r, {

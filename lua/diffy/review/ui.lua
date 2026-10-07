@@ -1,6 +1,6 @@
 -- Review UI shared by every backend: range bars + summaries, the thread
 -- float (`K`/`<CR>`), the compose float (`gc`), `]t`/`[t`, the display
--- toggles (`<leader>dt`/`ds`/`dr`), `gP` and the jump used by
+-- toggles (`<leader>dt`/`ds`/`dh`), `gP` and the jump used by
 -- `:Diffy threads`.
 --
 -- A backend exposes `name`, `capabilities = {resolve, suggestions, people}`,
@@ -14,7 +14,7 @@
 -- `session.review`: nil until `M.ensure` runs, `false` if the range kind
 -- doesn't support review, else
 --   { backend, branch, threads: Thread[], inline (`<leader>dt`),
---     summaries (`<leader>ds`), hide_resolved (`<leader>dr`),
+--     summaries (`<leader>ds`), hide_resolved (`<leader>dh`),
 --     pr (GitHub only, `gP`'s source), merge_base (GitHub), _track
 --     (`review/track.lua`'s diffs) }
 local session_mod = require('diffy.session')
@@ -830,7 +830,7 @@ function M.toggle_summaries(session)
   M.decorate(session)
 end
 
---- `<leader>dr`: resolved threads on/off.
+--- `<leader>dh`: resolved threads on/off.
 function M.toggle_resolved(session)
   local review = M.ensure(session)
   if not review then
@@ -2314,7 +2314,7 @@ function M.setup_diff_keymaps(session, buf)
   map(session, 'n', '<leader>ds', function()
     M.toggle_summaries(session)
   end, { buffer = buf, desc = 'review: toggle thread summaries (range bars stay)' })
-  map(session, 'n', '<leader>dr', function()
+  map(session, 'n', '<leader>dh', function()
     M.toggle_resolved(session)
   end, { buffer = buf, desc = 'review: toggle resolved threads' })
   map(session, 'n', 'gP', function()

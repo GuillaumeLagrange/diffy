@@ -731,7 +731,7 @@ T['threads stacked on a line are drawn oldest first; the hover opens the leftmos
   child.cmd('Diffy close')
 end
 
-T['resolved threads read ✓ inline, <leader>dr hides them and <leader>ds keeps only the range bars'] = function()
+T['resolved threads read ✓ inline, <leader>dh hides them and <leader>ds keeps only the range bars'] = function()
   child.o.columns = 160
   open_default()
   local w = ui.wins(child)
@@ -758,12 +758,12 @@ T['resolved threads read ✓ inline, <leader>dr hides them and <leader>ds keeps 
   end
   MiniTest.expect.equality(bars(), { ['5'] = 'open', ['10'] = 'resolved' })
 
-  child.type_keys('\\dr')
+  child.type_keys('\\dh')
   MiniTest.expect.equality(vim.tbl_map(function(v) return v.line end, ui.threads_visible(child, 'right')), { 5 })
   MiniTest.expect.equality(bars(), { ['5'] = 'open' })
   child.type_keys('1G', '10G')
   MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
-  child.type_keys('\\dr')
+  child.type_keys('\\dh')
   MiniTest.expect.equality(#ui.threads_visible(child, 'right'), 2)
 
   child.type_keys('\\ds')

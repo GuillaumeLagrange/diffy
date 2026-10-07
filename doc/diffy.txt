@@ -633,7 +633,7 @@ Keys, in a diff window ~
                   you left it on. Also in the panels and the threads view.
   `<leader>ds`    Hide / show the summaries, keeping the bars (hovering
                   still previews).
-  `<leader>dr`    Hide / show resolved threads.
+  `<leader>dh`    Hide / show resolved threads.
   `<leader>dt`    Hide / show comments inline altogether.
   `<leader>dc`    The threads view: every thread, the file in the diff
                   first (|:Diffy-threads|).

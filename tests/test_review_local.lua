@@ -122,6 +122,34 @@ T['gc + <C-s> shows a range bar and summary, mirrored as blank lines on the othe
   child.cmd('Diffy close')
 end
 
+T['coming back to a file, a thread on an unchanged line of the unfocused side opens the fold on both sides'] = function()
+  child.o.columns = 160
+  -- the commit takes f.txt's edit too: edit it again
+  repo:commit('g', { ['g.txt'] = Repo.lines(5) })
+  vim.fn.writefile(Repo.edit(1, 'changed')(Repo.lines(5)), repo.dir .. '/g.txt')
+  vim.fn.writefile(Repo.edit(3, 'edited again')(vim.fn.readfile(repo.dir .. '/f.txt')), repo.dir .. '/f.txt')
+  open_default()
+  local w = ui.wins(child)
+  -- line 25 sits in the closed fold below the line 3 edit
+  write_comment(w.left, 25, 'unchanged line', 25)
+  -- redrawn from the right window, with only the range bars (summary rows
+  -- open the folds on both sides themselves)
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('\\ds', ']f')
+  MiniTest.expect.equality(ui.layout(child).right.path, 'g.txt')
+  child.type_keys('[f')
+  MiniTest.expect.equality(ui.layout(child).right.path, 'f.txt')
+
+  local function closed(win)
+    return child.lua_get('vim.api.nvim_win_call(..., function() return { vim.fn.foldclosed(12), vim.fn.foldclosed(25) } end)', { win })
+  end
+  MiniTest.expect.equality({ left = closed(w.left), right = closed(w.right) }, { left = { -1, -1 }, right = { -1, -1 } })
+  child.fn.win_execute(w.right, 'call cursor(25, 1)')
+  MiniTest.expect.equality(ui.aligned(child), true)
+
+  child.cmd('Diffy close')
+end
+
 T['stacked threads pad both sides to the larger count and open one at a time, switched with ]t/[t'] = function()
   child.o.columns = 160
   open_default()

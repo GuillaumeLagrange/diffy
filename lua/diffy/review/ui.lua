@@ -750,9 +750,18 @@ function M.decorate(session)
         pos = {},
         lit = {},
       }
+      -- A fold opened from outside its window stays closed in the other
+      -- diff window: open the counterpart there too, or the sides drift apart.
+      local other = wins[name == 'left' and 'right' or 'left']
+      local other_map = other and vim.api.nvim_win_is_valid(other) and vim.wo[other].diff and row_map(other)
       for _, t in ipairs(placed[name]) do
-        open_fold_if_closed(win, t._place.start_line)
-        open_fold_if_closed(win, t._place.end_line)
+        for _, l in ipairs({ t._place.start_line, t._place.end_line }) do
+          open_fold_if_closed(win, l)
+          local counterpart = other_map and other_map.line[line_rows.row[l]]
+          if counterpart then
+            open_fold_if_closed(other, counterpart)
+          end
+        end
         if review.summaries ~= false then
           local row = line_rows.row[t._place.end_line]
           rows[row] = rows[row] or {}

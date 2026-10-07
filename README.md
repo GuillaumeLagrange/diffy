@@ -50,5 +50,6 @@ In a session:
 | `<leader>dc` | diff, column | every review thread |
 | `R` | diff, column | refresh |
 
-`:Diffy review submit` sends your comments to your agent (a markdown file and a prompt in the `+`
-register), or to GitHub when the branch has an open pull request. Closing the tab ends the session.
+`:Diffy review agent` sends your comments to your agent (a markdown file and a prompt in the `+`
+register); `:Diffy review github` submits them as a review on the branch's open pull request. Closing
+the tab ends the session.

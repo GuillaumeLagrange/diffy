@@ -1,6 +1,6 @@
 -- The review layer's UI and local backend -
 -- compose/sign/summary/alignment, persistence across restarts, excerpt
--- relocation on edit/delete, review.md (review submit), and namespace scoping.
+-- relocation on edit/delete, review.md (review agent), and namespace scoping.
 local Repo = require('tests.helpers.repo')
 local leak = require('tests.helpers.leak')
 local ui = require('tests.helpers.ui')
@@ -84,11 +84,11 @@ local function write_comment(win, lnum, body, last)
   save()
 end
 
---- `:Diffy review submit`, type `message` (may be empty), `<C-s>` to send
+--- `:Diffy review agent`, type `message` (may be empty), `<C-s>` to send
 --- the review to the agent.
 local function send_review(message)
   arm_ready_raw('compose')
-  child.cmd('Diffy review submit')
+  child.cmd('Diffy review agent')
   ui.wait_ready_raw(child)
   if message ~= '' then
     child.type_keys(message)
@@ -1324,17 +1324,17 @@ T[':Diffy completes subcommands, then what the session review and threads take']
   end
   MiniTest.expect.equality(complete('Diffy re'), { 'restore', 'review' })
   -- no session yet: every review subcommand, push and pull gone
-  MiniTest.expect.equality(complete('Diffy review '), { 'clear', 'submit' })
+  MiniTest.expect.equality(complete('Diffy review '), { 'agent', 'clear', 'github' })
   open_default()
   write_comment(ui.wins(child).right, 5, 'a comment')
-  -- the local review has no review events
-  MiniTest.expect.equality(complete('Diffy review '), { 'clear', 'submit' })
-  MiniTest.expect.equality(complete('Diffy review submit '), {})
+  -- no pull request: nothing goes to GitHub
+  MiniTest.expect.equality(complete('Diffy review '), { 'agent', 'clear' })
+  MiniTest.expect.equality(complete('Diffy review github '), {})
   MiniTest.expect.equality(complete('Diffy threads state=o'), { 'state=open', 'state=outdated' })
   child.cmd('Diffy close')
 end
 
-T['review submit writes review.md for worktree, index and commit views, marks sent, prompt in +'] = function()
+T['review agent writes review.md for worktree, index and commit views, marks sent, prompt in +'] = function()
   repo:commit('second', { ['f.txt'] = Repo.edit(15, 'second: line 15') })
   -- so `Unstaged` has a diff to comment on
   vim.fn.writefile(Repo.edit(3, 'second uncommitted')(vim.fn.readfile(repo.dir .. '/f.txt')), repo.dir .. '/f.txt')
@@ -1489,7 +1489,7 @@ T['a comment the agent ticks resolved in review.md shows resolved, on R and on t
   child.cmd('Diffy close')
 end
 
-T['review submit quotes a bracketed path from its own file, not a loaded file its name pattern-matches'] = function()
+T['review agent quotes a bracketed path from its own file, not a loaded file its name pattern-matches'] = function()
   -- `a[b].txt` read as a file pattern matches `ab.txt`
   repo:commit('brackets', { ['a[b].txt'] = Repo.lines(10), ['ab.txt'] = Repo.lines(10) })
   vim.fn.writefile(Repo.edit(5, 'bracket edit')(Repo.lines(10)), repo.dir .. '/a[b].txt')

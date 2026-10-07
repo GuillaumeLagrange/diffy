@@ -47,7 +47,7 @@ lua/diffy/
                         jump to another file; a left-window jump is moved to the right window
   checkout.lua          X checkout mode (the selected commit stays checked out as you move), checkout.json, restore
   conflict.lua          :Diffy conflicts and the 4-window conflict view
-  prompt.lua            key-driven yes/no, pick-one and checklist floats (vim.fn.confirm can't be driven in tests)
+  prompt.lua            key-driven yes/no float (vim.fn.confirm can't be driven in tests)
   highlight.lua         highlight groups (default links, card backgrounds) and width-fitting helpers
   avatar.lua            images over the terminal (kitty graphics): avatars, body badges; detect, fetch, place, clear
   review/model.lua      thread data, ids, excerpt relocation, the placement rule (source, line tracking),
@@ -92,10 +92,11 @@ Conventions the code relies on:
   from an earlier selection is dropped). Chained calls start the next link from the previous callback, so
   dropping one link drops the chain.
 - **DiffyReady.** `run.ready({ session, event })` fires `User DiffyReady` when something finished drawing.
-  Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `choose`, `conflict`,
+  Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `conflict`,
   `checkout`, `restore`, `pr` (a GitHub layer read finished, attached or not; `:Diffy pr` warning), `sync`
-  (a background sync into the pending review finished, or had nothing to do), `confirm` (the GitHub submit's
-  checklist is open), `close`, `commitmsg`, `feedback`, `viewed`. Tests wait on these; never sleep.
+  (a background sync into the pending review finished, or had nothing to do), `recap` (the list under
+  `:Diffy review github`'s message is filled), `close`, `commitmsg`, `feedback`, `viewed`. Tests wait on
+  these; never sleep.
 - **The GitHub layer.** `:Diffy` and `:Diffy branch` render without GitHub; `github.start` then reads
   (`session.layer`). Attaching swaps `session.review.backend` to `review/github.lua` and adds the
   published threads and `review.pr`; detaching swaps back to `review/local.lua`. The log's layer rows
@@ -105,9 +106,10 @@ Conventions the code relies on:
 - **Review backends** expose `name`, `capabilities = {resolve, suggestions, people}`, `author`,
   `place(session, thread) -> {win, start_line, end_line} | nil` (in the open file), `view_place` (the same
   for any file of the current pair, or of a given pair: the threads view uses it to pick a selection that
-  shows a thread), and for authoring `save(session, thread, comment?)`, `clear(session, cb)`,
-  `submit` (local: to the agent; GitHub: the confirm float, then the pending review), and on GitHub the
-  staging calls `toggle_resolve`/`stage_edit`/`drop_edit`/`toggle_delete`. Both place through `review/track.lua`,
+  shows a thread), and for authoring `save(session, thread, comment?)`, `clear(session, cb)`, and on GitHub
+  the staging calls `toggle_resolve`/`stage_edit`/`drop_edit`/`toggle_delete`. Sending isn't a backend
+  call: `:Diffy review agent` is `review/local.lua`'s `send_to_agent` whichever backend is on, `:Diffy
+  review github` is `review/github.lua`'s `submit_recap` then `submit`. Both place through `review/track.lua`,
   so a thread shows in every view it tracks to, whichever backend wrote it. `review/ui.lua` only draws what
   `place` returns and caches it on `thread._place`.
 - **One store per branch.** Your comments live in `.git/diffy/<branch>/threads.json`, keyed by

@@ -334,15 +334,13 @@ local function pr_row()
   return ui.layout(child).log[1]
 end
 
---- `:Diffy review submit comment` with `body`, up to the confirm float.
+--- `:Diffy review github` with `body`, then into the list of what goes out
+--- once it's in; returns its lines.
 local function submit_to_github(body)
-  ui.arm_ready_raw(child, 'compose')
-  child.cmd('Diffy review submit comment')
+  ui.arm_ready_raw(child, 'recap')
+  child.cmd('Diffy review github')
   wait_ready_raw()
-  child.type_keys(body, '<Esc>')
-  ui.arm_ready_raw(child, 'confirm')
-  child.type_keys('<C-s>')
-  wait_ready_raw()
+  child.type_keys(body, '<Esc>', '<Tab>')
   return child.api.nvim_buf_get_lines(0, 0, -1, false)
 end
 
@@ -933,14 +931,13 @@ T['submitting to the agent takes your drafts out of the pending review'] = funct
   end, 'the draft mirrored')
 
   ui.arm_ready_raw(child, 'compose')
-  child.cmd('Diffy review submit')
+  child.cmd('Diffy review agent')
   wait_ready_raw()
-  ui.arm_ready_raw(child, 'choose')
   child.type_keys('<C-s>')
-  wait_ready_raw()
-  ui.arm_ready_raw(child, 'review')
-  child.type_keys('a')
-  wait_ready_raw()
+  -- a background sync's redraw also fires `review`
+  wait_for(function()
+    return vim.fn.filereadable(branch_dir() .. '/review.md') == 1
+  end, 'review.md written')
 
   local md = table.concat(vim.fn.readfile(branch_dir() .. '/review.md'), '\n')
   -- your drafts, adopted ones included; not D1, which is published (only quoted, above the E4 reply to it)
@@ -964,13 +961,10 @@ T['a reply sent to the agent comes with the thread it answers'] = function()
   save_composed('a reply for the agent')
 
   ui.arm_ready_raw(child, 'compose')
-  child.cmd('Diffy review submit')
-  wait_ready_raw()
-  ui.arm_ready_raw(child, 'choose')
-  child.type_keys('<C-s>')
+  child.cmd('Diffy review agent')
   wait_ready_raw()
   ui.arm_ready_raw(child, 'review')
-  child.type_keys('a')
+  child.type_keys('<C-s>')
   wait_ready_raw()
 
   local md = table.concat(vim.fn.readfile(branch_dir() .. '/review.md'), '\n')
@@ -979,7 +973,7 @@ T['a reply sent to the agent comes with the thread it answers'] = function()
   child.cmd('Diffy close')
 end
 
-T['the submit float lists what goes out; a draft left out returns into a fresh pending review'] = function()
+T['the list under the GitHub submit message shows what goes out; a draft left out returns into a fresh pending review'] = function()
   setup_empty()
   open_pr()
   open_file('f.txt')
@@ -1004,7 +998,7 @@ T['the submit float lists what goes out; a draft left out returns into a fresh p
   end
   child.type_keys('x')
   eq(table.concat(child.api.nvim_buf_get_lines(0, 0, -1, false), '\n'):find('[ ] new thread f.txt:28', 1, true) ~= nil, true)
-  child.type_keys('<CR>')
+  child.type_keys('<C-s>')
 
   wait_for(function()
     local r = remote()
@@ -1042,7 +1036,7 @@ T['a GitHub submit sends the review, then staged edits and deletions, then resol
     eq({ want, text:find(want, 1, true) ~= nil }, { want, true })
   end
   ui.capture_warnings(child)
-  child.type_keys('<CR>')
+  child.type_keys('<C-s>')
   wait_for(function()
     return submitted('with staged changes') and remote_comment('D1 edited at submit') ~= nil and remote_comment('D2') == nil
   end, 'the submit and the staged changes')
@@ -1080,7 +1074,7 @@ T['a staged edit GitHub refuses shows ⚠ on the PR row, stays staged and goes w
   edit_card('D1', 'D1 refused edit')
   submit_to_github('with a refused edit')
   ui.capture_warnings(child)
-  child.type_keys('<CR>')
+  child.type_keys('<C-s>')
   wait_for(function()
     return submitted('with a refused edit') and row_icon() == '⚠'
   end, '⚠ on the row')
@@ -1094,44 +1088,49 @@ T['a staged edit GitHub refuses shows ⚠ on the PR row, stays staged and goes w
   child.cmd('Diffy close')
 end
 
-T['review submit asks agent or GitHub, then comment, approve or request changes; approving needs no drafts'] = function()
+T['review github: the event cycles in the title while you write, the list says only the message goes; approving needs no drafts'] = function()
   setup_empty()
   open_pr()
-  eq(child.fn.getcompletion('Diffy review submit ', 'cmdline'), live.enabled and { 'comment' } or { 'comment', 'approve', 'request_changes' })
+  eq(child.fn.getcompletion('Diffy review github ', 'cmdline'), live.enabled and { 'comment' } or { 'comment', 'approve', 'request_changes' })
 
-  ui.arm_ready_raw(child, 'compose')
-  child.cmd('Diffy review submit')
+  local function title()
+    return child.api.nvim_win_get_config(0).title[1][1]
+  end
+  ui.arm_ready_raw(child, 'recap')
+  child.cmd('Diffy review github')
   wait_ready_raw()
-  child.type_keys('lgtm', '<Esc>')
-  ui.arm_ready_raw(child, 'choose')
-  child.type_keys('<C-s>')
-  wait_ready_raw()
-  eq(vim.list_slice(child.api.nvim_buf_get_lines(0, 0, -1, false), 2), { '  a  agent', '  g  GitHub' })
+  child.type_keys('lgtm')
   local expected
   if live.enabled then
-    -- your own PR: comment is the only event, no second prompt
-    child.type_keys('g')
+    -- your own PR: comment is the only event
+    eq(title(), ' Submit to GitHub ')
     expected = { state = 'COMMENTED', body = 'lgtm' }
   else
-    ui.arm_ready_raw(child, 'choose')
-    child.type_keys('g')
-    wait_ready_raw()
-    eq(vim.list_slice(child.api.nvim_buf_get_lines(0, 0, -1, false), 2), { '  c  comment', '  a  approve', '  r  request changes' })
-    -- cancelling goes back to the message, kept
-    child.type_keys('q')
-    eq(child.api.nvim_buf_get_lines(0, 0, -1, false), { 'lgtm' })
-    ui.arm_ready_raw(child, 'choose')
-    child.type_keys('<C-s>')
-    wait_ready_raw()
-    ui.arm_ready_raw(child, 'choose')
-    child.type_keys('g')
-    wait_ready_raw()
-    child.type_keys('a')
+    eq(title(), ' Submit to GitHub · comment ')
+    child.type_keys('<C-t>')
+    eq(title(), ' Submit to GitHub · approve ')
     expected = { state = 'APPROVED', body = 'lgtm' }
   end
+  child.type_keys('<Esc>', '<Tab>')
+  eq(child.api.nvim_buf_get_lines(0, 0, -1, false), { '    no comments or staged changes: only the message' })
+  child.type_keys('<C-s>')
   wait_for(function()
     return vim.deep_equal(remote().submitted, { expected })
   end, 'the review')
+  child.cmd('Diffy close')
+end
+
+T['review github starts on the event its argument names'] = function()
+  fake_only()
+  setup_empty()
+  open_pr()
+  ui.arm_ready_raw(child, 'recap')
+  child.cmd('Diffy review github request_changes')
+  wait_ready_raw()
+  eq(child.api.nvim_win_get_config(0).title[1][1], ' Submit to GitHub · request changes ')
+  child.type_keys('<C-t>')
+  eq(child.api.nvim_win_get_config(0).title[1][1], ' Submit to GitHub · comment ')
+  child.type_keys('<Esc>', 'q')
   child.cmd('Diffy close')
 end
 
@@ -1162,13 +1161,10 @@ T[':Diffy review clear asks, then drops your drafts and deletes your pending rev
   child.cmd('Diffy close')
 end
 
-T['with a PR, review has no push or pull'] = function()
+T['with a PR, review completes agent, clear and github'] = function()
   setup_empty()
   open_pr()
-  eq(child.fn.getcompletion('Diffy review ', 'cmdline'), { 'clear', 'submit' })
-  ui.capture_warnings(child)
-  child.cmd('Diffy review push')
-  eq(table.concat(ui.warnings(child, 'WARN'), '\n'):find('expects clear|submit', 1, true) ~= nil, true)
+  eq(child.fn.getcompletion('Diffy review ', 'cmdline'), { 'agent', 'clear', 'github' })
   child.cmd('Diffy close')
 end
 

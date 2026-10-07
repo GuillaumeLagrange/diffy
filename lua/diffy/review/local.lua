@@ -1,6 +1,6 @@
 -- Local review backend: comments meant to be fed to an LLM. Available in
 -- `:Diffy` and `:Diffy branch`. Drafts live in the branch's one store
--- (`review/drafts.lua`); `:Diffy review submit` renders
+-- (`review/drafts.lua`); `:Diffy review agent` renders
 -- `.git/diffy/<branch>/review.md`.
 local drafts = require('diffy.review.drafts')
 local model = require('diffy.review.model')
@@ -399,10 +399,10 @@ local function upstream_base(session, cb)
   end)
 end
 
---- `:Diffy review submit`: render `review.md` with `body` (the overall
+--- `:Diffy review agent`: render `review.md` with `body` (the overall
 --- message, may be blank) and every non-`sent` comment, mark them `sent`,
 --- save, and copy the prompt to `+`. `cb(ok, warnings)`.
-function M.submit(session, _event, body, cb)
+function M.send_to_agent(session, body, cb)
   local review = session.review
   -- the ticks in the review.md about to be replaced
   M.sync(session)

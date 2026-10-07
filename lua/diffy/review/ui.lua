@@ -8,8 +8,7 @@
 -- `place(session, thread) -> nil | {win, start_line, end_line}` (in the open
 -- file), `view_place(session, thread, pair?)` (any file of a pair), and for
 -- authoring `save(session, thread, comment?)` (`gc`, `r`, `x` are no-ops
--- without it), `submit(session, event, body, cb(ok, warnings))` (`event`
--- nil unless the backend offers review events through `verdicts(session)`).
+-- without it) and `clear(session, cb)`.
 -- Drafts live in the branch's one store (`review/drafts.lua`).
 --
 -- `session.review`: nil until `M.ensure` runs, `false` if the range kind
@@ -23,7 +22,6 @@ local model = require('diffy.review.model')
 local run = require('diffy.git.run')
 local highlight = require('diffy.highlight')
 local avatar = require('diffy.avatar')
-local prompt = require('diffy.prompt')
 local layout = require('diffy.layout')
 local render = require('diffy.review.render')
 
@@ -2408,27 +2406,99 @@ function M.open_pr_description(session)
   M.map_open_pr(session, buf)
 end
 
---- `:Diffy review submit`'s modal, centered since a review body isn't
---- anchored to any line: write the message, then `<C-s>`/`:w`. With
---- several `opts.choices` (`{ { key, label, value, sub?, sub_title? }, … }`)
---- a key prompt picks one, then one of its `sub` choices if it has any
---- (cancelling goes back to the message); `on_save(body, value)` then runs
---- (body blank if left empty, value the leaf choice's, or nil without
---- choices) and the modal closes. `q` cancels.
+--- The message modal (`:Diffy review agent`/`github`, `:Diffy feedback`),
+--- centered since a message isn't anchored to any line: write, then
+--- `<C-s>`/`:w`; `q` cancels. `opts.verdicts` (`{ { label, value }, … }`,
+--- from `opts.verdict`) cycle with `<C-t>`, named in the title.
+--- `opts.recap(done)` fills a list under the message (`opts.recap_title`):
+--- `done(rows, blocked)`, rows `{ text, value? }`, those with a value
+--- checked and left out or put back with `x`; `<Tab>` goes between the two.
+--- A `<C-s>` before `done` waits for it; a `blocked` reason refuses it.
+--- Then the modal closes and `on_save(body, verdict, excluded)` runs (body
+--- blank if left empty, `excluded` the set of values left out).
 function M.open_submit_body(session, on_save, opts)
   opts = opts or {}
-  local choices = opts.choices or {}
+  local verdicts = opts.verdicts or {}
+  local verdict = opts.verdict or 1
   local buf = scratch_buf(session, 'submit', 'acwrite', 'markdown')
-
   local width = math.max(40, math.min(80, vim.o.columns - 4))
-  local win = open_card(buf, true, layout.centered(width, 8, {
+  local height = 8
+  local recap = opts.recap and { excluded = {} }
+
+  local function title()
+    local text = opts.title or 'Submit review'
+    if #verdicts > 1 then
+      text = ('%s · %s'):format(text, verdicts[verdict][1])
+    end
+    return card_title(text, width)
+  end
+  local hints = { { '<C-s>', opts.action or 'submit' } }
+  if #verdicts > 1 then
+    table.insert(hints, { '<C-t>', 'verdict', drop = 2 })
+  end
+  if recap then
+    table.insert(hints, { '<Tab>', 'list', drop = 1 })
+  end
+  table.insert(hints, { 'q', 'cancel' })
+
+  local function recap_lines()
+    if not recap.rows then
+      return { '    syncing…' }
+    end
+    local out = {}
+    for _, r in ipairs(recap.rows) do
+      if r.value ~= nil then
+        table.insert(out, ('[%s] %s'):format(recap.excluded[r.value] and ' ' or 'x', r.text))
+      else
+        table.insert(out, '    ' .. r.text)
+      end
+    end
+    return out
+  end
+
+  --- The message on top, the list right under it, both centered together.
+  local function configs(recap_rows)
+    local rh = recap and math.max(1, math.min(recap_rows, 12, vim.o.lines - height - 8)) or 0
+    local total = height + 2 + (recap and rh + 2 or 0)
+    local top = math.max(0, math.floor((vim.o.lines - total) / 2))
+    local col = math.floor((vim.o.columns - width) / 2)
+    return { relative = 'editor', row = top, col = col, width = width, height = height },
+      { relative = 'editor', row = top + height + 2, col = col, width = width, height = rh }
+  end
+
+  local msg_cfg, recap_cfg = configs(1)
+  local win = open_card(buf, true, vim.tbl_extend('force', msg_cfg, {
     style = 'minimal',
     border = 'rounded',
-    title = card_title(opts.title or 'Submit review', width),
-    footer = key_hints({ { '<C-s>', opts.action or 'submit' }, { 'q', 'cancel' } }, width),
+    title = title(),
+    footer = key_hints(hints, width),
     zindex = 200,
   }))
   vim.wo[win].foldcolumn = '1'
+
+  local recap_buf, recap_win
+  local function draw_recap()
+    local lines = recap_lines()
+    vim.bo[recap_buf].modifiable = true
+    vim.api.nvim_buf_set_lines(recap_buf, 0, -1, false, lines)
+    vim.bo[recap_buf].modifiable = false
+    local m, r = configs(#lines)
+    vim.api.nvim_win_set_config(win, m)
+    vim.api.nvim_win_set_config(recap_win, r)
+  end
+  if recap then
+    recap_buf = scratch_buf(session, 'submit_recap', 'nofile')
+    recap_win = open_card(recap_buf, false, vim.tbl_extend('force', recap_cfg, {
+      style = 'minimal',
+      border = 'rounded',
+      title = card_title(opts.recap_title or 'Going out', width),
+      footer = key_hints({ { 'x', 'leave out / put back' }, { '<Tab>', 'message', drop = 1 }, { '<C-s>', opts.action or 'submit' } }, width),
+      zindex = 200,
+    }))
+    vim.wo[recap_win].wrap = false
+    vim.wo[recap_win].cursorline = true
+    draw_recap()
+  end
 
   local closed = false
   local function close()
@@ -2436,61 +2506,95 @@ function M.open_submit_body(session, on_save, opts)
       return
     end
     closed = true
-    vim.cmd('stopinsert')
+    if vim.api.nvim_get_current_win() == win then
+      vim.cmd('stopinsert')
+    end
     close_win(win)
+    if recap_win then
+      close_win(recap_win)
+    end
+  end
+  for _, w in ipairs({ win, recap_win }) do
+    vim.api.nvim_create_autocmd('WinClosed', {
+      group = session.augroup,
+      pattern = tostring(w),
+      once = true,
+      -- a `:q` in one closes the other
+      callback = function()
+        vim.schedule(close)
+      end,
+    })
   end
 
-  local function finish(value)
-    local body = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
-    close()
-    on_save(body, value)
-  end
-
-  --- Pick among `list`: a lone choice is taken without asking.
-  local function pick(list, title)
-    if #list < 2 then
-      local c = list[1]
-      if c and c.sub then
-        pick(c.sub, c.sub_title)
-      else
-        finish(c and c[3])
-      end
+  local queued = false
+  local function submit()
+    if closed then
       return
     end
-    vim.cmd('stopinsert')
-    -- after the write: `:w` isn't done with this window yet
-    vim.schedule(function()
-      prompt.choose(session, title or 'Submit as', list, function(value)
-        local chosen
-        for _, c in ipairs(list) do
-          if value ~= nil and c[3] == value then
-            chosen = c
-          end
-        end
-        if chosen and chosen.sub then
-          pick(chosen.sub, chosen.sub_title)
-        elseif chosen then
-          finish(value)
-        elseif vim.api.nvim_win_is_valid(win) then
-          vim.api.nvim_set_current_win(win)
-        end
-      end)
-      run.ready({ session = session.id, event = 'choose' })
-    end)
+    if recap and not recap.rows then
+      queued = true
+      return
+    end
+    if recap and recap.blocked then
+      vim.notify('diffy: ' .. recap.blocked, vim.log.levels.WARN)
+      return
+    end
+    local body = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+    close()
+    on_save(body, verdicts[verdict] and verdicts[verdict][2], recap and recap.excluded or {})
   end
 
+  local map = session_mod.map
   vim.api.nvim_create_autocmd('BufWriteCmd', {
     group = session.augroup,
     buffer = buf,
     callback = function()
       vim.bo[buf].modified = false
-      pick(choices, opts.choose_title)
+      submit()
     end,
   })
-  session_mod.map(session, { 'n', 'i' }, '<C-s>', function()
+  map(session, { 'n', 'i' }, '<C-s>', function()
     vim.cmd('write')
-  end, { buffer = buf, desc = 'submit review' })
-  session_mod.map(session, 'n', 'q', close, { buffer = buf, desc = 'cancel submit' })
+  end, { buffer = buf, desc = 'submit' })
+  map(session, 'n', 'q', close, { buffer = buf, desc = 'cancel' })
+  if #verdicts > 1 then
+    for _, b in ipairs({ buf, recap_buf }) do
+      map(session, { 'n', 'i' }, '<C-t>', function()
+        verdict = verdict % #verdicts + 1
+        vim.api.nvim_win_set_config(win, { title = title() })
+      end, { buffer = b, desc = 'next review event' })
+    end
+  end
+
+  if recap then
+    map(session, 'n', '<Tab>', function()
+      vim.api.nvim_set_current_win(recap_win)
+    end, { buffer = buf, desc = 'to the list' })
+    map(session, 'n', '<Tab>', function()
+      vim.api.nvim_set_current_win(win)
+    end, { buffer = recap_buf, desc = 'to the message' })
+    map(session, 'n', '<C-s>', submit, { buffer = recap_buf, desc = 'submit' })
+    map(session, 'n', 'q', close, { buffer = recap_buf, nowait = true, desc = 'cancel' })
+    map(session, 'n', 'x', function()
+      local r = recap.rows and recap.rows[vim.api.nvim_win_get_cursor(recap_win)[1]]
+      if r and r.value ~= nil then
+        recap.excluded[r.value] = not recap.excluded[r.value] or nil
+        draw_recap()
+      end
+    end, { buffer = recap_buf, nowait = true, desc = 'leave out / put back' })
+    opts.recap(function(rows, blocked)
+      if closed then
+        return
+      end
+      recap.rows, recap.blocked = rows, blocked
+      draw_recap()
+      run.ready({ session = session.id, event = 'recap' })
+      if queued then
+        queued = false
+        submit()
+      end
+    end)
+  end
 
   vim.cmd('startinsert')
   run.ready({ session = session.id, event = 'compose' })

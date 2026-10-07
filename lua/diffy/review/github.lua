@@ -1966,7 +1966,7 @@ end
 -- ---------------------------------------------------------------------
 -- submitting
 
---- Review events `:Diffy review submit` offers: GitHub refuses approving or
+--- Review events `:Diffy review github` offers: GitHub refuses approving or
 --- requesting changes on your own PR.
 function M.verdicts(session)
   local pr = session.review and session.review.pr
@@ -2075,40 +2075,23 @@ local function execute(session, plan, excluded, event, body, cb)
   end)
 end
 
---- `:Diffy review submit` to GitHub: mirror what's left, then confirm in a
---- float listing everything going out (each excludable with `x`), what
---- stays behind and unpushed commits; then `execute`. Sync conflicts must be
---- settled first. `cb(ok, warnings)`.
-function M.submit(session, event, body, cb)
-  local st = sync_state(session)
+--- What `:Diffy review github` sends, once what's left is mirrored:
+--- `cb(rows, blocked, plan)`, `rows` (`{ text, value? }`) listing everything
+--- going out (value: its index in `plan.items`, excludable), what stays
+--- behind and unpushed commits; `blocked` says why it can't go yet (sync
+--- conflicts to settle). Not called once the session is closed.
+function M.submit_recap(session, cb)
   M.mirror(session, function()
     if session.closed then
       return
     end
     local plan = submit_plan(session)
-    if plan.conflicts > 0 then
-      warn(('settle the %d sync conflict%s first: `dd` the version you drop'):format(plan.conflicts, plan.conflicts == 1 and '' or 's'))
-      cb(false, {})
-      return
-    end
-    local function go(excluded)
-      st.held = true
-      execute(session, plan, excluded, event, body, function(ok, notes)
-        st.held = false
-        -- the read brings the published comments, then syncs (excluded drafts
-        -- go into a fresh pending review)
-        M.read(session, function()
-          cb(ok, notes)
-        end)
-      end)
-    end
-    if #plan.items == 0 then
-      go({})
-      return
-    end
     local rows = {}
     for i, it in ipairs(plan.items) do
       table.insert(rows, { text = it.text, value = i })
+    end
+    if #plan.items == 0 then
+      table.insert(rows, { text = 'no comments or staged changes: only the message' })
     end
     for _, s in ipairs(plan.stay) do
       table.insert(rows, { text = 'stays behind: ' .. s })
@@ -2117,14 +2100,27 @@ function M.submit(session, event, body, cb)
     if standing and (standing:find('unpushed', 1, true) or standing == 'diverged') then
       table.insert(rows, { text = 'branch: ' .. standing })
     end
-    prompt.checklist(session, 'Going to GitHub', rows, function(excluded)
-      if not excluded then
-        cb(false, {})
-        return
-      end
-      go(excluded)
+    local blocked
+    if plan.conflicts > 0 then
+      blocked = ('settle the %d sync conflict%s first: `dd` the version you drop'):format(plan.conflicts, plan.conflicts == 1 and '' or 's')
+      table.insert(rows, 1, { text = blocked })
+    end
+    cb(rows, blocked, plan)
+  end)
+end
+
+--- Send `plan` (`M.submit_recap`'s) but its `excluded` items as an `event`
+--- review with `body`. `cb(ok, warnings)`.
+function M.submit(session, plan, excluded, event, body, cb)
+  local st = sync_state(session)
+  st.held = true
+  execute(session, plan, excluded, event, body, function(ok, notes)
+    st.held = false
+    -- the read brings the published comments, then syncs (excluded drafts
+    -- go into a fresh pending review)
+    M.read(session, function()
+      cb(ok, notes)
     end)
-    run.ready({ session = session.id, event = 'confirm' })
   end)
 end
 

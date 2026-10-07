@@ -19,7 +19,7 @@ M.config = {
     -- in the diff windows and the file tree: undo the last mark or unmark, one more per press
     undo_viewed = '<leader>du',
   },
-  -- copied to `+` by `:Diffy review submit` (local review); %s is the absolute path of review.md
+  -- copied to `+` by `:Diffy review agent`; %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
   -- GitHub avatars in comment headers, on terminals with the kitty graphics
   -- protocol (needs curl and ImageMagick)
@@ -75,16 +75,16 @@ local function report_remote(s, done_msg)
   end
 end
 
--- review events, in the order the submit prompt lists them
+-- review events, in the order `<C-t>` cycles them
 local VERDICTS = {
-  { event = 'COMMENT', arg = 'comment', key = 'c', label = 'comment', title = 'Submit review' },
-  { event = 'APPROVE', arg = 'approve', key = 'a', label = 'approve', title = 'Approve' },
-  { event = 'REQUEST_CHANGES', arg = 'request_changes', key = 'r', label = 'request changes', title = 'Request changes' },
+  { event = 'COMMENT', arg = 'comment', label = 'comment' },
+  { event = 'APPROVE', arg = 'approve', label = 'approve' },
+  { event = 'REQUEST_CHANGES', arg = 'request_changes', label = 'request changes' },
 }
 
---- The VERDICTS entries `backend` offers in session `s`.
-local function offered_verdicts(s, backend)
-  local events = backend.verdicts(s)
+--- The VERDICTS entries GitHub takes in session `s`.
+local function offered_verdicts(s)
+  local events = require('diffy.review.github').verdicts(s)
   return vim.tbl_filter(function(v)
     return vim.tbl_contains(events, v.event)
   end, VERDICTS)
@@ -103,6 +103,9 @@ end
 local review_subcommands = {}
 
 function review_subcommands.clear(s, review)
+  if not backend_supports(review, 'clear') then
+    return
+  end
   review.backend.clear(s, function(done)
     if done ~= false then
       vim.notify('diffy: review cleared')
@@ -111,65 +114,68 @@ function review_subcommands.clear(s, review)
   end)
 end
 
---- `:Diffy review submit [comment|approve|request_changes]`: a modal for
---- the review message. Without a PR it goes to the agent. With one, `a`
---- agent or `g` GitHub, then the review event (skipped when the argument
---- names it, which also means GitHub, or when only one applies).
-function review_subcommands.submit(s, review, ui, args)
-  local verdicts = review.pr and offered_verdicts(s, require('diffy.review.github')) or nil
-  local preset = args[2]
-  if preset then
-    local match = vim.tbl_filter(function(v)
-      return v.arg == preset
-    end, verdicts or {})
-    if #match == 0 then
-      local expected = vim.tbl_map(function(v)
-        return v.arg
-      end, verdicts or {})
-      vim.notify(
-        #expected > 0 and ('diffy: `review submit` expects %s'):format(table.concat(expected, '|'))
-          or "diffy: `review submit` takes no argument when the branch has no open PR",
-        vim.log.levels.WARN
-      )
-      return
-    end
-    verdicts = match
-  end
-  local to_agent = function(body)
-    require('diffy.review.local').submit(s, nil, body, function(ok, warnings)
+--- `:Diffy review agent`: a modal for the message, then review.md.
+function review_subcommands.agent(s, review, ui)
+  ui.open_submit_body(s, function(body)
+    require('diffy.review.local').send_to_agent(s, body, function(ok, warnings)
       -- what went to the agent leaves your pending review
       if ok and review.pr then
         require('diffy.review.github').mirror(s)
       end
       report_remote(s)(ok, warnings)
     end)
-  end
-  if not verdicts then
-    ui.open_submit_body(s, to_agent, { title = 'Send review to the agent', action = 'send' })
-    return
-  end
-  local github_choice = {
-    'g',
-    'GitHub',
-    'github',
-    sub = vim.tbl_map(function(v)
-      return { v.key, v.label, v.event }
-    end, verdicts),
-    sub_title = 'Submit as',
-  }
-  local choices = preset and { github_choice } or { { 'a', 'agent', 'agent' }, github_choice }
-  ui.open_submit_body(s, function(body, value)
-    if value == 'agent' then
-      to_agent(body)
-    else
-      require('diffy.review.github').submit(s, value, body, report_remote(s, 'diffy: review submitted'))
-    end
-  end, { title = 'Submit review', action = 'submit', choices = choices, choose_title = 'Send to' })
+  end, { title = 'Send review to the agent', action = 'send' })
 end
 
-local REVIEW_SUBCOMMANDS = { 'clear', 'submit' }
+--- `:Diffy review github [comment|approve|request_changes]`: a modal for
+--- the message, the review event (the argument's first) cycled in it, and
+--- under it what goes out.
+function review_subcommands.github(s, review, ui, args)
+  if not review.pr then
+    vim.notify('diffy: `review github` needs the pull request attached (:Diffy pr, or R)', vim.log.levels.WARN)
+    return
+  end
+  local verdicts = offered_verdicts(s)
+  local start = 1
+  if args[2] then
+    start = nil
+    for i, v in ipairs(verdicts) do
+      if v.arg == args[2] then
+        start = i
+      end
+    end
+    if not start then
+      local expected = vim.tbl_map(function(v)
+        return v.arg
+      end, verdicts)
+      vim.notify(('diffy: `review github` expects %s'):format(table.concat(expected, '|')), vim.log.levels.WARN)
+      return
+    end
+  end
+  local github = require('diffy.review.github')
+  local plan
+  ui.open_submit_body(s, function(body, event, excluded)
+    github.submit(s, plan, excluded, event, body, report_remote(s, 'diffy: review submitted'))
+  end, {
+    title = 'Submit to GitHub',
+    action = 'submit',
+    verdicts = vim.tbl_map(function(v)
+      return { v.label, v.event }
+    end, verdicts),
+    verdict = start,
+    recap_title = 'Going to GitHub',
+    recap = function(done)
+      github.submit_recap(s, function(rows, blocked, p)
+        plan = p
+        done(rows, blocked)
+      end)
+    end,
+  })
+end
 
---- `:Diffy review clear|submit`.
+local REVIEW_SUBCOMMANDS = { 'agent', 'clear', 'github' }
+
+--- `:Diffy review agent|clear|github`.
 function M.dispatch.review(args)
   local s = current_session()
   if not s then
@@ -187,9 +193,7 @@ function M.dispatch.review(args)
     vim.notify(('diffy: `review` expects %s'):format(table.concat(REVIEW_SUBCOMMANDS, '|')), vim.log.levels.WARN)
     return
   end
-  if backend_supports(review, sub) then
-    handler(s, review, ui, args)
-  end
+  handler(s, review, ui, args)
 end
 
 function M.dispatch.close()
@@ -552,17 +556,15 @@ local function candidates(words, arg_lead)
   end
   if sub == 'review' then
     local s, backend = completion_backend()
+    local github = not backend or backend.name == 'github'
     if #words == 1 then
       return vim.tbl_filter(function(name)
-        return not backend or type(backend[name]) == 'function'
+        return name ~= 'github' or github
       end, REVIEW_SUBCOMMANDS)
-    elseif #words == 2 and words[2] == 'submit' then
-      if backend and type(backend.verdicts) ~= 'function' then
-        return {}
-      end
+    elseif #words == 2 and words[2] == 'github' and github then
       return vim.tbl_map(function(v)
         return v.arg
-      end, backend and offered_verdicts(s, backend) or VERDICTS)
+      end, backend and offered_verdicts(s) or VERDICTS)
     end
   elseif sub == 'threads' then
     local key = arg_lead:match('^(%a+)=')

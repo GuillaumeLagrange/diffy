@@ -173,10 +173,13 @@ events the current session offers, |:Diffy-threads| filters, paths for
   `resolved`, `outdated`, `detached`.
 
                                                                *:Diffy-review*
-:Diffy review submit [{event}]
-  Send your comments to the agent (|diffy-review-local|), or to GitHub when
-  the branch has an open pull request (|diffy-github-submit|). {event} is
-  one of `comment`, `approve`, `request_changes`, and means GitHub.
+:Diffy review agent
+  Send your comments to the agent (|diffy-review-local|).
+
+:Diffy review github [{event}]
+  Submit a review on the open pull request (|diffy-github-submit|). {event}
+  is the review event it starts on: `comment` (default), `approve`,
+  `request_changes`.
 
 :Diffy review clear
   Drop your comments. With an open pull request, also your staged changes
@@ -232,7 +235,7 @@ Defaults ~
       undo_viewed = '<leader>du',
     },
 
-    -- Copied to the `+` register by a local review submit
+    -- Copied to the `+` register by `:Diffy review agent`
     review_prompt = 'Read %s and address each review comment. Reply per '
       .. 'comment id with what you changed, and tick its "- [ ] resolved" '
       .. 'box in that file once it is handled.',
@@ -257,7 +260,7 @@ always in view, between the files and the commits: >lua
 <
 # Review prompt ~
 
-`review_prompt` is what `:Diffy review submit` copies to the `+` register
+`review_prompt` is what `:Diffy review agent` copies to the `+` register
 for a local review; `%s` is the absolute path of the written `review.md`.
 See |diffy-review-local|.
 
@@ -828,7 +831,7 @@ Local review, for an LLM agent ~
 
 Available in |:Diffy| and |:Diffy-branch|.
 
-`:Diffy review submit` opens a box for an overall message (may be left
+`:Diffy review agent` opens a box for an overall message (may be left
 empty); `<C-s>` writes `.git/diffy/<branch>/review.md` with that message and
 every comment not yet sent, marks them sent and copies `review_prompt`
 (|diffy.config|) to the `+` register: paste it to your agent.
@@ -950,20 +953,26 @@ submit:
                                                          *diffy-github-submit*
 Submitting ~
 
-`:Diffy review submit` opens a box for the review message; `<C-s>` then
-asks where it goes: `a` the agent (as without a pull request,
-|diffy-review-local|: your drafts, marked sent and taken out of your
-pending review) or `g` GitHub, which then asks `c` comment, `a` approve or
-`r` request changes (`q` goes back to the message). An argument picks the
-event and means GitHub, skipping both questions; on your own pull request,
-where GitHub only allows a comment, there's no second question. Each
-comment goes to one place.
+`:Diffy review github` opens a box for the review message, and under it
+the list of everything going out: new threads, replies, staged edits,
+deletions and resolves, each `[x]`, then the drafts that stay behind and
+unpushed commits. The list fills in once your drafts are synced; a `<C-s>`
+before that waits for it.
 
-Before a GitHub submit, a float lists everything going out: new threads,
-replies, staged edits, deletions and resolves, each `[x]`. `x` leaves one
-out (a draft left out stays a draft and goes into a new pending review
-afterwards), `<CR>` sends, `q` cancels. It also lists the drafts that stay
-behind and unpushed commits. Sync conflicts must be settled first.
+  `<C-s>`         Submit (`:w` in the message too).
+  `<C-t>`         Next review event: comment, approve, request changes. The
+                  title names the current one; on your own pull request,
+                  where GitHub only allows a comment, there's no choice.
+  `<Tab>`         Between the message and the list (Normal mode).
+  `x`             In the list: leave the item out, or put it back. A draft
+                  left out stays a draft and goes into a new pending review
+                  afterwards.
+  `q`             Cancel.
+
+Sync conflicts must be settled first: the list says so and `<C-s>` refuses.
+Sending to the agent instead is `:Diffy review agent` (|diffy-review-local|:
+your drafts, marked sent and taken out of your pending review). Each
+comment goes to one place.
 
 Then: the drafts left out leave the pending review, the review is
 submitted (with no comment going, the message alone: approving without

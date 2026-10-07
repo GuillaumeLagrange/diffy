@@ -1,8 +1,9 @@
 -- BufWinEnter-driven pair swapping when a diff window shows a buffer diffy
 -- didn't put there: a jump to another file already in the current list
 -- (go-to-definition, `gf`, `:e`) swaps both sides and highlights it in the
--- tree; a jump outside the list leaves diff mode with a placeholder. A jump
--- in the left window is moved to the right one, which owns navigation.
+-- tree; a jump outside the list leaves diff mode, the file alone in the
+-- right window. A jump in the left window is moved to the right one, which
+-- owns navigation.
 local M = {}
 
 --- Run `fn(...)` as a diffy-made buffer change the `BufWinEnter` handler
@@ -44,7 +45,7 @@ end
 
 --- React to the right window's buffer becoming `buf`: swap in the matching
 --- pair if its path is in the current file list, otherwise leave diff mode
---- with an "outside diff" placeholder.
+--- with `buf` alone.
 local function handle(session, buf)
   local path = relative_path(session, buf)
   if not (path and require('diffy.panels.tree').open_path(session, path)) then

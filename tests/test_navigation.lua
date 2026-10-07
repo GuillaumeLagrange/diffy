@@ -1,7 +1,7 @@
 -- A `BufWinEnter` in the right diff window swaps the
 -- pair when the new buffer's path is in the current file list and
--- highlights it in the tree; otherwise diff mode turns off and the left
--- window shows an "outside diff" placeholder. `<C-o>` restores the pair.
+-- highlights it in the tree; otherwise diff mode turns off and the right
+-- window shows the file alone. `<C-o>` restores the pair.
 --
 -- The jump cases simulate what an LSP go-to-definition does without an LSP:
 -- push the tag stack, then `:edit` the target in the current window.
@@ -135,18 +135,16 @@ local function expect_one(side, p)
   no_errors()
 end
 
---- Outside the file list: the right window shows `name`, unbound, the left
---- the placeholder, nothing marked in the tree.
+--- Outside the file list: the right window shows `name` alone, unbound,
+--- nothing marked in the tree.
 local function expect_outside(name)
   local l = ui.layout(child)
   local w = ui.wins(child)
   eq(l.right.name, name)
   eq(l.right.bar, '(outside diff)')
-  eq(l.left.text, { '(outside diff)' })
-  for _, side in ipairs({ 'left', 'right' }) do
-    eq({ side, wo(w[side], 'diff'), wo(w[side], 'scrollbind'), wo(w[side], 'cursorbind') }, { side, false, false, false })
-  end
-  eq(#child.api.nvim_tabpage_list_wins(0), base_wins)
+  eq(l.left, vim.NIL)
+  eq({ wo(w.right, 'diff'), wo(w.right, 'scrollbind'), wo(w.right, 'cursorbind') }, { false, false, false })
+  eq(#child.api.nvim_tabpage_list_wins(0), base_wins - 1)
   eq(current_rows(), {})
   no_errors()
 end
@@ -205,7 +203,7 @@ T['a picker jump re-setting foldmethod keeps the diff folds'] = function()
   child.cmd('Diffy close')
 end
 
-T['jumping outside the file list leaves diff mode with a placeholder, and <C-o> restores the pair'] = function()
+T['jumping outside the file list shows the file alone, and <C-o> restores the pair'] = function()
   open()
   child.api.nvim_set_current_win(ui.wins(child).right)
   child.cmd('edit ' .. path('outside.txt'))
@@ -374,7 +372,9 @@ T['<C-o> in the left window through blobs of earlier pairs keeps a consistent la
   keys('20G')
   ui.select_log_row(child, 'rename')
   for _ = 1, 4 do
-    child.api.nvim_set_current_win(ui.wins(child).left)
+    -- once outside the diff the left window is gone: on from the right one
+    local w = ui.wins(child)
+    child.api.nvim_set_current_win(w.left or w.right)
     keys('<C-o>')
     child.lua('vim.wait(0)')
     expect_consistent()
@@ -420,8 +420,7 @@ T['deleting the file shown on the right with a window-keeping :bdelete leaves th
   child.api.nvim_set_current_win(ui.wins(child).right)
   child.lua([[require('mini.bufremove').delete(0, true)]])
   no_errors()
-  eq(ui.layout(child).left.text, { '(outside diff)' })
-  eq(#child.api.nvim_tabpage_list_wins(0), base_wins)
+  expect_outside(child.api.nvim_buf_get_name(0))
   ui.open_tree_row(child, 'b.txt', 'o', 'open_row')
   expect_pair('b.txt')
   child.api.nvim_set_current_win(ui.wins(child).right)
@@ -459,7 +458,7 @@ T[':edit of a file in another repo or of a panel buffer from the right window'] 
   child.api.nvim_set_current_win(ui.wins(child).right)
   lsp_jump(other, 1)
   expect_outside(other)
-  -- on from the outside state (left shows the placeholder): out, then in
+  -- on from the outside state: out, then in
   lsp_jump(repo.dir .. '/outside.txt', 2)
   expect_outside(repo.dir .. '/outside.txt')
   lsp_jump(repo.dir .. '/b.txt', 2)
@@ -502,10 +501,11 @@ T['toggling the panel while outside the diff, then <C-t>, restores the pair'] = 
   child.api.nvim_set_current_win(ui.wins(child).tree)
   keys('\\e')
   no_errors()
-  eq(#child.api.nvim_tabpage_list_wins(0), base_wins - 1)
-  child.api.nvim_set_current_win(ui.wins(child).left)
+  eq(#child.api.nvim_tabpage_list_wins(0), base_wins - 2)
+  child.api.nvim_set_current_win(ui.wins(child).right)
   keys('\\e')
   no_errors()
+  eq(#child.api.nvim_tabpage_list_wins(0), base_wins - 1)
   child.api.nvim_set_current_win(ui.wins(child).right)
   keys('<C-t>')
   expect_pair('a.txt')

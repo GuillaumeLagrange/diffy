@@ -302,34 +302,31 @@ end
 local OUTSIDE = '(outside diff)'
 
 --- Leave diff mode because the right window navigated outside the current
---- file list: the right window keeps whatever real buffer it now shows (its
---- diffy keymaps removed), the left one becomes a placeholder. Selecting a
---- listed file again (`M.show`) restores the pair.
+--- file list: the right window keeps whatever buffer it now shows, alone
+--- like a one-sided file, with only the column toggle of diffy's keys (the
+--- column stays reachable with it hidden). Selecting a listed file again
+--- (`M.show`) restores the pair.
 function M.leave(session)
-  for _, name in ipairs(SIDES) do
-    local win = session.wins[name]
-    if valid_win(win) then
-      session_mod.unbind(win)
-      require('diffy.review.ui').fit_gutter(win, nil)
-      vim.api.nvim_win_call(win, function()
-        pcall(vim.cmd, 'diffoff')
-      end)
-      vim.w[win].diffy_rev = nil
-      vim.w[win].diffy_path = nil
-      vim.wo[win].winbar = OUTSIDE
-    end
+  local right = session.wins.right
+  if not valid_win(right) then
+    return
   end
+  set_one_sided(session, nil)
+  session_mod.unbind(right)
+  require('diffy.review.ui').fit_gutter(right, nil)
+  vim.api.nvim_win_call(right, function()
+    pcall(vim.cmd, 'diffoff!')
+  end)
+  vim.w[right].diffy_rev = nil
+  vim.w[right].diffy_path = nil
+  vim.wo[right].winbar = OUTSIDE
   drop_real(session, 'right')
+  hide_side(session, 'left')
 
-  local left = session.wins.left
-  if valid_win(left) then
-    local buf = session_mod.scratch_buf(session, 'left')
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { OUTSIDE })
-    session_mod.register_buffer(session, 'left', buf)
-    -- the only diffy window left with keys: the right one's real file lost them
-    M.set_nav_keymaps(session, buf)
-    vim.api.nvim_win_set_buf(left, buf)
-  end
+  local buf = vim.api.nvim_win_get_buf(right)
+  session.real_bufs = session.real_bufs or {}
+  session.real_bufs.right = buf
+  require('diffy.layout').map_toggle(session, buf)
 
   session.current_path = nil
   require('diffy.panels.tree').mark_current(session)

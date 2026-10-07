@@ -520,11 +520,12 @@ An added or deleted file takes the whole diff area on its own, coloured as
 added or deleted.
 
 Jumping to another file from the right side (go-to-definition, `gf`, `:e`,
-a picker) loads that file's pair if it's part of the diff; otherwise diff
-mode turns off until you come back (|CTRL-O|, |CTRL-T| or the tree). A jump
-from the left side opens in the right window, so |CTRL-O|/|CTRL-T| there
-bring the pair back. |CTRL-O| never goes back past the start of the
-session.
+a picker) loads that file's pair if it's part of the diff; otherwise that
+file takes the whole diff area, out of diff mode and with none of diffy's
+keys but the panel toggle, until you come back (|CTRL-O|, |CTRL-T| or the
+tree). A jump from the left side opens in the right window, so
+|CTRL-O|/|CTRL-T| there bring the pair back. |CTRL-O| never goes back past
+the start of the session.
 
 Keys, in either diff window ~
 

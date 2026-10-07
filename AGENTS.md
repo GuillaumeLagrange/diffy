@@ -129,9 +129,9 @@ Conventions the code relies on:
   `drafts.apply` lays it over the live comment. GitHub ids of threads: `github = true` stored threads are
   published GitHub threads (their id is GitHub's), `gh_thread` the GitHub thread a draft thread became,
   valid while its first comment is mirrored.
-- **One-sided files.** An added or deleted file closes the empty side's window (`session.hidden_side`,
-  `session.wins[side] = nil`) until `diffpair.restore`; anything reaching for `session.wins.left/right`
-  checks it exists. The conflict view restores both first.
+- **One-sided files.** An added or deleted file, and a file outside the diff, closes the other side's
+  window (`session.hidden_side`, `session.wins[side] = nil`) until `diffpair.restore`; anything reaching
+  for `session.wins.left/right` checks it exists. The conflict view restores both first.
 - **Alignment.** Counterpart lines come from nvim's own diff: in each window `row(l) = l + Σ diff_filler(k)`
   for `k ≤ l`; equal rows are counterparts. Summaries under a row are padded with blank virt_lines to the
   busier side's count so both windows stay aligned.

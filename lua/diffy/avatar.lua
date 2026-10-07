@@ -233,6 +233,51 @@ local function transmit(img)
   return true
 end
 
+local function placement(it, id, pid)
+  -- q=1: errors come back, so an image the terminal dropped can be sent again
+  return ('\0277\27[%d;%dH\27_Ga=p,i=%d,p=%d,r=1,C=1,q=1\27\\\0278'):format(it.row, it.col, id, pid)
+end
+
+--- Place again what the terminal reports as unknown: zellij frees an image
+--- once its last placement scrolls off or the screen is cleared, while we
+--- still count it as sent.
+local function on_missing(id, pid)
+  for _, list in pairs(placed) do
+    for _, p in ipairs(list) do
+      if p[1] == id and p[2] == pid then
+        local img = images[p.url]
+        if p.retried or not img then
+          return
+        end
+        p.retried = true
+        if img.id == id and not transmit(img) then
+          return
+        end
+        p[1] = img.id
+        send(placement(p, img.id, pid))
+        return
+      end
+    end
+  end
+end
+
+local listening = false
+local function listen()
+  if listening then
+    return
+  end
+  listening = true
+  vim.api.nvim_create_autocmd('TermResponse', {
+    group = vim.api.nvim_create_augroup('diffy_avatar_replies', { clear = true }),
+    callback = function(ev)
+      local id, pid = (ev.data and ev.data.sequence or ''):match('^\27_Gi=(%d+),p=(%d+);ENOENT')
+      if id then
+        on_missing(tonumber(id), tonumber(pid))
+      end
+    end,
+  })
+end
+
 --- Draw `items` (`{url, row, col}`, 1-based screen cells, one row tall)
 --- for `owner`, replacing whatever `owner` drew before.
 function M.place(owner, items)
@@ -247,14 +292,15 @@ function M.place(owner, items)
     return
   end
   M.clear(owner)
+  listen()
   local out, list = {}, { sig = sig }
   for _, it in ipairs(items) do
     local img = images[it.url]
     if M.ready(it.url) and (img.sent or transmit(img)) then
       local pid = next_pid
       next_pid = next_pid + 1
-      table.insert(list, { img.id, pid })
-      table.insert(out, ('\0277\27[%d;%dH\27_Ga=p,i=%d,p=%d,r=1,C=1,q=2\27\\\0278'):format(it.row, it.col, img.id, pid))
+      table.insert(list, { img.id, pid, url = it.url, row = it.row, col = it.col })
+      table.insert(out, placement(it, img.id, pid))
     end
   end
   if #list > 0 then

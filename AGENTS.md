@@ -239,6 +239,9 @@ with the real config and `--listen`, screenshotted with `grim`:
   `C=1`) work in both, follow nvim redraws, and are moved/deleted by id; zellij also answers the `a=q`
   support query. *Unicode placeholders* (`U=1`) don't work in zellij (zellij-org/zellij#5531), which is
   why snacks.nvim disables images there and why `avatar.lua` places images at screen cells instead.
+  zellij frees a transmitted image once its last placement is gone (scrolled out of a region, the screen
+  cleared), and a later `a=p` of its id gets `ENOENT`; `avatar.lua` places with `q=1` and sends the image
+  again on that reply.
 - The colorscheme (gruvbox-material) leaves `Normal`/`NormalFloat` without a background: a float needs a
   background taken from another group (`CursorLine`, `Pmenu`) to stand out.
 

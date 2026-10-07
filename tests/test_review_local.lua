@@ -819,6 +819,68 @@ T['<leader>dt off deletes the summary avatars from the terminal, on draws them a
   child.cmd('Diffy close')
 end
 
+T['an avatar the terminal dropped is sent again when it is drawn anew'] = function()
+  child.o.columns = 160
+  -- a kitty terminal that frees images, like zellij once their placements scroll off
+  child.lua([[
+    local png = vim.fn.tempname() .. '.png'
+    vim.fn.system({ 'magick', '-size', '4x4', 'xc:red', 'PNG32:' .. png })
+    local url = 'https://example.test/dropped.png'
+    local path = vim.fn.stdpath('cache') .. '/diffy/avatars/' .. vim.fn.sha256(url) .. '.png'
+    vim.fn.mkdir(vim.fs.dirname(path), 'p')
+    vim.uv.fs_copyfile(png, path)
+    require('diffy.review.local').avatar_url = function() return url end
+    vim.api.nvim_list_uis = function() return { { stdout_tty = true } } end
+    _G.stored, _G.live = {}, {}
+    local function reply(seq)
+      vim.schedule(function()
+        vim.api.nvim_exec_autocmds('TermResponse', { data = { sequence = seq } })
+      end)
+    end
+    vim.api.nvim_ui_send = function(data)
+      local q = data:match('^\27_Gi=(%d+),s=1,v=1,a=q')
+      if q then
+        return reply('\27_Gi=' .. q .. ';OK\27\\')
+      end
+      for id in data:gmatch('a=t,f=100,t=d,i=(%d+)') do _G.stored[id] = true end
+      for id, p, quiet in data:gmatch('a=p,i=(%d+),p=(%d+),[^\27]-q=(%d)') do
+        _G.live[p] = id
+        if not _G.stored[id] and quiet ~= '2' then
+          reply(('\27_Gi=%s,p=%s;ENOENT:unknown image id\27\\'):format(id, p))
+        end
+      end
+      for p in data:gmatch('a=d,d=i,i=%d+,p=(%d+)') do _G.live[p] = nil end
+    end
+  ]])
+  -- placements on screen, and whether each one's image is held by the terminal
+  local function drawn()
+    return child.lua_get([[(function()
+      local n, held = 0, true
+      for _, id in pairs(_G.live) do
+        n = n + 1
+        held = held and _G.stored[id] == true
+      end
+      return { n = n, held = held }
+    end)()]])
+  end
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 5, 'with a face')
+  child.type_keys('1G')
+  MiniTest.expect.equality(vim.wait(3000, function() return drawn().n == 1 end, 20), true)
+
+  -- the terminal freed the image: the next placement of it, a row up, is refused
+  child.lua('_G.stored = {}')
+  child.type_keys('<C-e>')
+  local ok = vim.wait(3000, function()
+    local d = drawn()
+    return d.n == 1 and d.held
+  end, 20)
+  MiniTest.expect.equality(ok, true)
+
+  child.cmd('Diffy close')
+end
+
 T['overlapping comment ranges get side-by-side bars that keep their column and their colour'] = function()
   child.o.lines, child.o.columns = 40, 160
   open_default()

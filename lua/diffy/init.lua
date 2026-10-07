@@ -332,6 +332,7 @@ function M.build(s, done)
             require('diffy.navigation').setup(s)
             require('diffy.diffpair').track_edits(s)
             require('diffy.diffpair').keep_bound_cursor_visible(s)
+            require('diffy.diffpair').sync_wrap(s)
             tree_panel.restore_last_file(s)
             s.setup_done = true
           end

@@ -67,4 +67,25 @@ T['coming back to a file with [f keeps the other side aligned with where the cur
   end
 end
 
+T['toggling wrap in one diff window toggles it in the other'] = function()
+  -- the user's toggle: a plain `vim.wo.wrap` flip in the current window
+  child.lua([[vim.keymap.set('n', '<Space>uw', function() vim.wo.wrap = not vim.wo.wrap end)]])
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  local w = ui.wins(child)
+  local function wraps()
+    return { child.lua_get(('vim.wo[%d].wrap'):format(w.left)), child.lua_get(('vim.wo[%d].wrap'):format(w.right)) }
+  end
+  eq(wraps(), { false, false })
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('<Space>uw')
+  eq(wraps(), { true, true })
+  child.api.nvim_set_current_win(w.left)
+  child.type_keys('<Space>uw')
+  eq(wraps(), { false, false })
+  child.cmd('setlocal wrap')
+  eq(wraps(), { true, true })
+end
+
 return T

@@ -404,4 +404,32 @@ function M.keep_bound_cursor_visible(session)
   })
 end
 
+--- Toggling 'wrap' in one diff window applies it to the others: lines
+--- wrapped on one side only would push its rows out of line with the other.
+function M.sync_wrap(session)
+  vim.api.nvim_create_autocmd('OptionSet', {
+    group = session.augroup,
+    pattern = 'wrap',
+    callback = function()
+      local cur = vim.api.nvim_get_current_win()
+      if vim.v.option_command == 'setglobal' or not vim.wo[cur].diff then
+        return
+      end
+      local wins = {}
+      for _, win in pairs(session.wins) do
+        wins[win] = true
+      end
+      if not wins[cur] then
+        return
+      end
+      local wrap = vim.wo[cur].wrap
+      for win in pairs(wins) do
+        if win ~= cur and valid_win(win) and vim.wo[win].diff then
+          vim.wo[win][0].wrap = wrap
+        end
+      end
+    end,
+  })
+end
+
 return M

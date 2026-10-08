@@ -910,6 +910,17 @@ local function open_card(buf, enter, cfg)
   return win
 end
 
+--- One blank cell left of a text float's text. The fold column is only
+--- padding here: drop folds a 'foldexpr' would make (a markdown list),
+--- or their `-`/`|` markers show in it.
+local function pad_text(win)
+  vim.wo[win].foldcolumn = '1'
+  vim.wo[win][0].foldmethod = 'manual'
+  vim.api.nvim_win_call(win, function()
+    vim.cmd('normal! zE')
+  end)
+end
+
 --- "just now", "5 min ago", "3 hours ago", "yesterday", "4 days ago", then
 --- the date.
 local function ago(t)
@@ -1289,7 +1300,7 @@ function M.open_compose(session, anchor_win, first, last, on_save, opts)
   -- before focusing it: entering it mustn't close the thread above
   session.review._reply_win = opts.above and win or nil
   vim.api.nvim_set_current_win(win)
-  vim.wo[win].foldcolumn = '1'
+  pad_text(win)
   refit_on_resize(session, win, function()
     vim.api.nvim_win_set_config(win, place())
   end)
@@ -2492,7 +2503,7 @@ function M.open_submit_body(session, on_save, opts)
     footer = key_hints(hints, width),
     zindex = 200,
   }))
-  vim.wo[win].foldcolumn = '1'
+  pad_text(win)
 
   local recap_buf, recap_win
   local function draw_recap()

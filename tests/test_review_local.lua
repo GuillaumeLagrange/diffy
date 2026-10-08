@@ -543,6 +543,42 @@ T['e and dd in the thread float act on the draft under the cursor'] = function()
   child.cmd('Diffy close')
 end
 
+T['a comment box shows no fold markers when folds come from treesitter'] = function()
+  -- the user's config: every window folds by expr, markdown lists make folds
+  child.o.foldmethod = 'expr'
+  child.o.foldexpr = 'v:lua.vim.treesitter.foldexpr()'
+  child.o.foldlevelstart = 99
+  open_default()
+  local w = ui.wins(child)
+  local function pad_column()
+    child.cmd('redraw')
+    return child.lua_get([[(function()
+      local info = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1]
+      local cells = {}
+      -- winrow/wincol are the float's frame
+      for r = info.winrow + 1, info.winrow + vim.api.nvim_buf_line_count(0) do
+        table.insert(cells, vim.fn.screenstring(r, info.wincol + 1))
+      end
+      return cells
+    end)()]])
+  end
+
+  child.api.nvim_set_current_win(w.right)
+  child.fn.win_execute(w.right, 'call cursor(5, 1)')
+  compose('gc')
+  child.type_keys('1. first<CR>2. second', '<Esc>')
+  MiniTest.expect.equality(pad_column(), { ' ', ' ' })
+  save()
+
+  child.type_keys('<CR>', 'gg')
+  compose('e')
+  MiniTest.expect.equality(child.api.nvim_buf_get_lines(0, 0, -1, false), { '1. first', '2. second' })
+  MiniTest.expect.equality(pad_column(), { ' ', ' ' })
+  child.type_keys('q')
+
+  child.cmd('Diffy close')
+end
+
 T['on an added file the thread and its edit box leave the commented lines visible'] = function()
   child.o.lines = 50
   vim.fn.writefile(Repo.lines(40), repo.dir .. '/new.txt')

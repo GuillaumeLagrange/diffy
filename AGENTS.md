@@ -115,7 +115,9 @@ Conventions the code relies on:
   so a thread shows in every view it tracks to, whichever backend wrote it. `review/ui.lua` only draws what
   `place` returns and caches it on `thread._place`.
 - **One store per branch.** Your comments live in `.git/diffy/<branch>/threads.json`, keyed by
-  `session.branch` (the branch the session opened on). Every change goes through `review/drafts.lua`
+  `session.branch` (the branch the session opened on). `store.path` resolves `.git` to the common dir, so
+  linked worktrees share it (and it migrates their old per-worktree stores); `checkout.json` stays per
+  worktree. Every change goes through `review/drafts.lua`
   (`put`/`remove`/`change`): a fresh read of the file, one change, an atomic write; never write a session's
   whole thread list back. Sessions of one nvim on a branch share one entry and all redraw on a change; other
   nvims reload through the file watch, stopped when the last session on the branch tears down. Session

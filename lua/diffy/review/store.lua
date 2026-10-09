@@ -20,9 +20,69 @@ local function same_stamp(a, b)
   return a and b and a[1] == b[1] and a[2] == b[2] and a[3] == b[3]
 end
 
---- `<gitdir>/diffy/<branch>/<filename>`.
+-- gitdir -> the directory holding the branch stores: the common dir, so a
+-- branch's store follows it from one worktree to another
+local roots = {}
+
+--- Move a linked worktree's branch stores (`<gitdir>/diffy/<branch>/…`) into
+--- the common dir's. Where both have a file, the newer one is kept. Files
+--- directly under `diffy/` (checkout.json) describe the worktree and stay.
+local function migrate(from, to)
+  if vim.fn.isdirectory(from) ~= 1 then
+    return
+  end
+  local files, dirs = {}, {}
+  for name, kind in vim.fs.dir(from, { depth = math.huge }) do
+    if kind == 'directory' then
+      table.insert(dirs, name)
+    elseif name:find('/', 1, true) then
+      table.insert(files, name)
+    end
+  end
+  for _, name in ipairs(files) do
+    local src, dst = from .. '/' .. name, to .. '/' .. name
+    local s, d = vim.uv.fs_stat(src), vim.uv.fs_stat(dst)
+    if s then
+      local newer = not d
+        or s.mtime.sec > d.mtime.sec
+        or (s.mtime.sec == d.mtime.sec and s.mtime.nsec > d.mtime.nsec)
+      if newer then
+        vim.fn.mkdir(vim.fs.dirname(dst), 'p')
+        vim.uv.fs_rename(src, dst)
+      else
+        vim.uv.fs_unlink(src)
+      end
+    end
+  end
+  -- deepest first; a directory still holding something stays
+  table.sort(dirs, function(a, b)
+    return #a > #b
+  end)
+  for _, name in ipairs(dirs) do
+    vim.uv.fs_rmdir(from .. '/' .. name)
+  end
+end
+
+local function root(gitdir)
+  if not roots[gitdir] then
+    local dir = gitdir
+    local f = io.open(gitdir .. '/commondir')
+    if f then
+      local rel = vim.trim(f:read('*a'))
+      f:close()
+      local path = rel:sub(1, 1) == '/' and rel or gitdir .. '/' .. rel
+      dir = vim.uv.fs_realpath(path) or vim.fn.simplify(path)
+      migrate(gitdir .. '/diffy', dir .. '/diffy')
+    end
+    roots[gitdir] = dir
+  end
+  return roots[gitdir]
+end
+
+--- `<common gitdir>/diffy/<branch>/<filename>`: one store per branch, whichever
+--- worktree has it checked out.
 function M.path(gitdir, branch, filename)
-  return ('%s/diffy/%s/%s'):format(gitdir, branch, filename)
+  return ('%s/diffy/%s/%s'):format(root(gitdir), branch, filename)
 end
 
 --- Read `path` as a JSON object. Returns `nil` if the file is missing or

@@ -360,4 +360,58 @@ T['a mark made in another nvim shows in an open session'] = function()
   child.cmd('Diffy close')
 end
 
+--- Move `feat` to a new linked worktree and point the child at it.
+local function move_to_worktree()
+  child.cmd('Diffy close')
+  repo:checkout('main')
+  local wt = repo.dir .. '-wt'
+  sh(repo.dir, { 'git', 'worktree', 'add', '-q', wt, 'feat' })
+  child.fn.chdir(wt)
+  return wt, repo.dir .. '/.git/worktrees/' .. vim.fs.basename(wt)
+end
+
+T['marks follow the branch into another worktree and back'] = function()
+  open_branch()
+  mark_in_tree('a.txt')
+  local wt = move_to_worktree()
+
+  open_branch()
+  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M b.txt', 'M c.txt' })
+  mark_in_tree('b.txt')
+  child.cmd('Diffy close')
+  sh(repo.dir, { 'git', 'worktree', 'remove', '--force', wt })
+
+  repo:checkout('feat')
+  child.fn.chdir(repo.dir)
+  open_branch()
+  MiniTest.expect.equality(tree(), { '▸ Viewed (2)', 'M c.txt' })
+  child.cmd('Diffy close')
+end
+
+T["a worktree's own branch store moves to the common gitdir, the newer file winning"] = function()
+  open_branch()
+  mark_in_tree('a.txt')
+  local wt, gitdir = move_to_worktree()
+  local common = repo.dir .. '/.git/diffy/feat'
+  local own = gitdir .. '/diffy/feat'
+  vim.fn.mkdir(own, 'p')
+  vim.uv.fs_rename(common .. '/viewed.json', own .. '/viewed.json')
+  vim.fn.writefile({ '{"newer":1}' }, common .. '/threads.json')
+  vim.fn.writefile({ '{"older":1}' }, own .. '/threads.json')
+  vim.uv.fs_utime(own .. '/threads.json', 1, 1)
+  vim.fn.writefile({ '{}' }, gitdir .. '/diffy/checkout.json')
+
+  child.restart({ '-u', 'tests/minimal_init.lua' })
+  snapshot = leak.snapshot(child)
+  child.fn.chdir(wt)
+  open_branch()
+  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M b.txt', 'M c.txt' })
+  child.cmd('Diffy close')
+
+  MiniTest.expect.equality(vim.fn.isdirectory(own), 0)
+  MiniTest.expect.equality(vim.fn.filereadable(gitdir .. '/diffy/checkout.json'), 1)
+  MiniTest.expect.equality(vim.fn.readfile(common .. '/threads.json'), { '{"newer":1}' })
+  sh(repo.dir, { 'git', 'worktree', 'remove', '--force', wt })
+end
+
 return T

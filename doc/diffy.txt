@@ -514,7 +514,7 @@ whole-branch view, and the other way round; each view keeps its own marks
 `:Diffy viewed clear` drops every mark of the file shown.
 
 Marks are stored in `.git/diffy/<branch>/viewed.json`, shared live by every
-session on the branch, in any Nvim.
+session on the branch, in any Nvim and any worktree (|diffy-storage|).
 
 ------------------------------------------------------------------------------
                                                                   *diffy-diff*
@@ -848,6 +848,13 @@ read. Sessions on the same branch, in one Nvim or several, share them: a
 comment written, edited or deleted in one shows in the others right away
 (`local.json` and `pr-<number>.json` from older versions are merged into it
 the first time).
+
+Everything kept per branch under `.git/diffy/<branch>/` (comments, viewed
+marks, the last file shown, `review.md`) lives in the repository's main
+`.git`, whichever worktree the branch is checked out in, so it follows the
+branch to another worktree. Stores an older version kept in a linked
+worktree's own git directory move there the first time; where both have a
+file, the newer one is kept.
 
 ------------------------------------------------------------------------------
                                                           *diffy-review-local*

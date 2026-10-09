@@ -710,7 +710,8 @@ in insert mode, an edit in normal mode at the end of the draft); saving
 goes back to the diff, cancelling goes back into the thread. Leaving a
 comment box or the thread for the diff puts the cursor back where it was.
 In the compose float, `<C-g>s` inserts a GitHub suggestion block with the
-commented lines.
+commented lines. A comment box grows with its text, up to half the
+editor's height; past that it scrolls.
 
 `gP` shows the pull request's description and its conversation the same
 way.

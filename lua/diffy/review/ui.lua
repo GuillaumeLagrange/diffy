@@ -1256,6 +1256,8 @@ local key_hints = highlight.key_hints
 -- ---------------------------------------------------------------------
 -- compose float (`gc`)
 
+local COMPOSE_MIN = 8
+
 --- Open a floating markdown compose buffer beside lines `first`..`last` of
 --- `anchor_win` (see `beside`), so the code being commented stays
 --- visible; with `opts.above` (the thread float), right under that float
@@ -1277,16 +1279,25 @@ function M.open_compose(session, anchor_win, first, last, on_save, opts)
   if opts.suggestion then
     table.insert(keys, { '<C-g>s', 'suggest a change', drop = 1 })
   end
+  local win
+  -- the text's rows, at least COMPOSE_MIN, at most half the editor: past that it scrolls
+  local function rows()
+    if not win then
+      return COMPOSE_MIN
+    end
+    local cap = math.max(COMPOSE_MIN, math.floor(vim.o.lines / 2))
+    return math.max(COMPOSE_MIN, math.min(vim.api.nvim_win_text_height(win, {}).all, cap))
+  end
   local function place()
     local cfg
     if opts.above and vim.api.nvim_win_is_valid(opts.above) then
       -- the thread above takes the width the two share
       vim.api.nvim_win_set_config(opts.above, { width = beside(session, anchor_win, first, last, 1, 2, opts.thread).width })
-      cfg = stack_below(session, opts.above, anchor_win, first, last, 8, opts.above_line, opts.thread)
+      cfg = stack_below(session, opts.above, anchor_win, first, last, rows(), opts.above_line, opts.thread)
       -- the thread moved and scrolled: its avatars follow
       schedule_avatars(session)
     else
-      cfg = beside(session, anchor_win, first, last, 8, 2, opts.thread)
+      cfg = beside(session, anchor_win, first, last, rows(), 2, opts.thread)
     end
     cfg.title = card_title(opts.title or 'New comment', cfg.width)
     cfg.footer = key_hints(keys, cfg.width)
@@ -1296,7 +1307,7 @@ function M.open_compose(session, anchor_win, first, last, on_save, opts)
   cfg.style = 'minimal'
   cfg.border = 'rounded'
   cfg.zindex = 200
-  local win = open_card(buf, false, cfg)
+  win = open_card(buf, false, cfg)
   -- before focusing it: entering it mustn't close the thread above
   session.review._reply_win = opts.above and win or nil
   vim.api.nvim_set_current_win(win)
@@ -1304,6 +1315,23 @@ function M.open_compose(session, anchor_win, first, last, on_save, opts)
   refit_on_resize(session, win, function()
     vim.api.nvim_win_set_config(win, place())
   end)
+  -- what `place` asked for when opening
+  local fitted = COMPOSE_MIN
+  local function refit()
+    if rows() ~= fitted then
+      fitted = rows()
+      vim.api.nvim_win_set_config(win, place())
+      -- grown while scrolled: nvim keeps the top line, leaving rows past the end empty
+      vim.api.nvim_win_call(win, function()
+        local top, h = vim.fn.line('w0'), vim.api.nvim_win_get_height(win)
+        while top > 1 and vim.api.nvim_win_text_height(win, { start_row = top - 2 }).all <= h do
+          top = top - 1
+        end
+        vim.fn.winrestview({ topline = top })
+      end)
+    end
+  end
+  vim.api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI' }, { group = session.augroup, buffer = buf, callback = refit })
 
   local closed = false
   local function close(saved)
@@ -1366,6 +1394,8 @@ function M.open_compose(session, anchor_win, first, last, on_save, opts)
   else
     vim.cmd('startinsert')
   end
+  -- measured at its final width and padding: a prefilled draft opens at its size
+  refit()
   run.ready({ session = session.id, event = 'compose' })
 end
 

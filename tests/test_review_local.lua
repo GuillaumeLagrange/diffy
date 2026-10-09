@@ -579,6 +579,48 @@ T['a comment box shows no fold markers when folds come from treesitter'] = funct
   child.cmd('Diffy close')
 end
 
+T['a comment box grows with its text up to half the editor, then scrolls'] = function()
+  child.o.columns, child.o.lines = 160, 50
+  open_default()
+  local w = ui.wins(child)
+  local function box()
+    child.cmd('redraw')
+    local win = child.api.nvim_get_current_win()
+    return { child.api.nvim_win_get_height(win), child.fn.line('w0') }
+  end
+  local function lines(from, to)
+    local out = {}
+    for i = from, to do
+      out[#out + 1] = 'line ' .. i
+    end
+    return table.concat(out, '<CR>')
+  end
+
+  child.api.nvim_set_current_win(w.right)
+  child.fn.win_execute(w.right, 'call cursor(5, 1)')
+  compose('gc')
+  child.type_keys(lines(1, 3))
+  MiniTest.expect.equality(box(), { 8, 1 })
+  child.type_keys('<CR>', lines(4, 15))
+  MiniTest.expect.equality(box(), { 15, 1 })
+  child.type_keys('<CR>', lines(16, 40))
+  MiniTest.expect.equality(box(), { 25, 16 })
+  child.type_keys('<Esc>')
+  save()
+
+  -- an edit opens at the draft's size, scrolled to its end
+  child.fn.win_execute(w.right, 'call cursor(5, 1)')
+  child.type_keys('<CR>', 'G')
+  compose('e')
+  MiniTest.expect.equality(box(), { 25, 16 })
+  child.type_keys('ggdG', 'ione<CR>two', '<Esc>')
+  MiniTest.expect.equality(box(), { 8, 1 })
+  child.type_keys('q')
+  child.type_keys('q')
+
+  child.cmd('Diffy close')
+end
+
 T['on an added file the thread and its edit box leave the commented lines visible'] = function()
   child.o.lines = 50
   vim.fn.writefile(Repo.lines(40), repo.dir .. '/new.txt')

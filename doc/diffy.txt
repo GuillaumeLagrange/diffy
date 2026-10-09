@@ -528,6 +528,17 @@ added or deleted.
 Setting 'wrap' in one diff window sets it in the other, so both sides keep
 their rows lined up.
 
+                                                                 *diffy-folds*
+A closed fold of unchanged lines names the scopes the change below it sits
+in, from treesitter, outermost first: `+--678 lines: type Repository {`, or
+`impl Foo { › fn bar(&self) {`. The outer ones are dropped when the window is
+too narrow. Without a parser, or with no change below, it reads as Nvim's.
+
+Opening a fold (`zo`, `zO`, `za`, `zA`) keeps the change next to it where it
+was on screen: in the window's top half, the change below it, the cursor on
+the fold's last line; in the bottom half, the change above it, the cursor on
+its first line.
+
 Jumping to another file from the right side (go-to-definition, `gf`, `:e`,
 a picker) loads that file's pair if it's part of the diff; otherwise that
 file takes the whole diff area, out of diff mode and with none of diffy's

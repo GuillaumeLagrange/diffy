@@ -321,7 +321,7 @@ end
 function M.release(win, statuscolumn)
   vim.api.nvim_win_call(win, function()
     pcall(vim.cmd, 'diffoff')
-    vim.cmd('setlocal winbar<')
+    vim.cmd('setlocal winbar< foldtext<')
   end)
   M.unbind(win)
   if statuscolumn ~= nil then

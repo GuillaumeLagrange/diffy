@@ -43,6 +43,8 @@ lua/diffy/
   viewed.lua            viewed marks (blob pair per path) in viewed.json: shared per nvim, watched across nvims
   diffpair.lua          the two diff windows: buffers, diff mode, winbars, b:diffy_title, shared keys,
                         edits (redecorate on change, rebuild on write)
+  folds.lua             the diff windows' folds: 'foldtext' naming the change's treesitter scopes, zo/za keeping
+                        the change in place
   navigation.lua        BufWinEnter on the diff windows, reacted to on the next tick: swap the pair when you
                         jump to another file; a left-window jump is moved to the right window
   checkout.lua          X checkout mode (the selected commit stays checked out as you move), checkout.json, restore

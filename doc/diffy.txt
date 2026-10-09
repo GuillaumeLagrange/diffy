@@ -504,7 +504,9 @@ and the blob on the right. The file stays viewed while the view shows that
 same pair: committing, staging, amending or rebasing on a base that didn't
 touch it keep it; an edit to it, a base that changed it, a symlink
 retargeted or a submodule moved bring it back. A file that comes back
-carries `●` until you open it (the file you're looking at never gets one).
+carries `●` until you mark it viewed again (or `:Diffy viewed clear` it),
+whether the change came from elsewhere or from your own edit. A file marked
+in another view carries it too.
 
 Marks are per view: a file marked on one commit isn't hidden in the
 whole-branch view, and the other way round; each view keeps its own marks

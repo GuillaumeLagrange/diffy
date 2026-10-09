@@ -221,7 +221,7 @@ T['the unfolded Viewed group is drawn grayed out, folders included, the other fi
   child.cmd('Diffy close')
 end
 
-T['a viewed file edited by another process comes back with a dot, cleared once opened'] = function()
+T['a viewed file edited by another process keeps its dot, opened or not, until marked again'] = function()
   open_branch()
   mark_in_tree('b.txt')
   vim.fn.writefile({ 'edited elsewhere' }, repo.dir .. '/b.txt')
@@ -229,12 +229,17 @@ T['a viewed file edited by another process comes back with a dot, cleared once o
   MiniTest.expect.equality(tree(), { 'M a.txt', 'M ● b.txt', 'M c.txt' })
 
   ui.open_tree_row(child, 'b.txt', 'o', 'open_row')
-  MiniTest.expect.equality(tree(), { 'M a.txt', 'M b.txt', 'M c.txt' })
+  ui.open_tree_row(child, 'c.txt', 'o', 'open_row')
+  MiniTest.expect.equality(tree(), { 'M a.txt', 'M ● b.txt', 'M c.txt' })
+  reopen_branch()
+  MiniTest.expect.equality(tree(), { 'M a.txt', 'M ● b.txt', 'M c.txt' })
 
+  mark_in_tree('b.txt')
+  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M a.txt', 'M c.txt' })
   child.cmd('Diffy close')
 end
 
-T['editing the shown viewed file brings it back without a dot, undoing makes it viewed again'] = function()
+T['editing the shown viewed file brings it back with a dot, undoing makes it viewed again'] = function()
   open_branch()
   mark_in_tree('b.txt')
   child.api.nvim_win_set_cursor(ui.wins(child).tree, { 1, 0 })
@@ -247,7 +252,7 @@ T['editing the shown viewed file brings it back without a dot, undoing makes it 
   ui.arm_ready(child, 'render')
   child.cmd('write')
   ui.wait_ready(child)
-  MiniTest.expect.equality(tree(), { 'M a.txt', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { 'M a.txt', 'M ● b.txt', 'M c.txt' })
 
   ui.arm_ready(child, 'render')
   child.cmd('undo | write')
@@ -323,7 +328,7 @@ T['a mark made on one commit does not hide the file in the whole branch, and bot
   MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M a.txt' })
 
   reopen_branch()
-  MiniTest.expect.equality(tree(), { 'M a.txt', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { 'M ● a.txt', 'M b.txt', 'M c.txt' })
   mark_in_tree('a.txt')
 
   ui.select_log_row(child, 'C2')

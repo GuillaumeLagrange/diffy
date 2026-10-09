@@ -2,7 +2,7 @@
 -- shows the same (left blob, right blob) pair it was marked with.
 --
 -- `viewed.json` in the branch's store directory maps a path to
--- `{ marks = { {left, right, at}, … }, seen = {left, right} }`. Sessions of
+-- `{ marks = { {left, right, at}, … } }`. Sessions of
 -- one nvim on the same branch share one in-memory copy; every change goes
 -- through `store.update` and other nvims reload on `store.watch`.
 local store = require('diffy.review.store')
@@ -100,21 +100,20 @@ function M.is_viewed(session, entry)
   return false
 end
 
---- `●`: not viewed, the path has marks, and its current pair isn't the one last seen.
+--- `●`: not viewed, but the path has marks (for another pair): it stays until
+--- the file is marked again or its marks are cleared.
 function M.changed(session, entry)
   local st = state(session)
   if not (st and M.markable(entry)) or M.is_viewed(session, entry) then
     return false
   end
-  local has_marks, seen = false, nil
   for _, p in ipairs(candidates(entry)) do
     local rec = st.data[p]
-    if rec then
-      has_marks = has_marks or #(rec.marks or {}) > 0
-      seen = seen or rec.seen
+    if rec and #(rec.marks or {}) > 0 then
+      return true
     end
   end
-  return has_marks and not same_pair(seen, entry)
+  return false
 end
 
 local function apply(session, fn)
@@ -151,7 +150,7 @@ function M.set(session, entries, on)
               rec.marks = vim.tbl_filter(function(m)
                 return not same_pair(m, e)
               end, rec.marks)
-              if #rec.marks == 0 and not rec.seen then
+              if #rec.marks == 0 then
                 data[p] = nil
               end
             end
@@ -162,7 +161,7 @@ function M.set(session, entries, on)
   end)
 end
 
---- Drop every mark and the seen pair of `entry`'s path (and a rename's old path).
+--- Drop every mark of `entry`'s path (and a rename's old path).
 function M.clear(session, entry)
   if not state(session) then
     return
@@ -171,30 +170,6 @@ function M.clear(session, entry)
     for _, p in ipairs(candidates(entry)) do
       data[p] = nil
     end
-  end)
-end
-
---- Record `entry`'s pair as seen (the file is shown). Only paths with marks
---- keep a seen pair: without marks there's no `●` to decide.
-function M.saw(session, entry)
-  local st = state(session)
-  if not (st and M.markable(entry)) then
-    return
-  end
-  local has_marks = false
-  for _, p in ipairs(candidates(entry)) do
-    local rec = st.data[p]
-    if rec and rec.marks and #rec.marks > 0 then
-      has_marks = true
-    end
-  end
-  local rec = st.data[entry.path]
-  if not has_marks or (rec and same_pair(rec.seen, entry)) then
-    return
-  end
-  apply(session, function(data)
-    data[entry.path] = data[entry.path] or {}
-    data[entry.path].seen = { left = entry.left_id, right = entry.right_id }
   end)
 end
 

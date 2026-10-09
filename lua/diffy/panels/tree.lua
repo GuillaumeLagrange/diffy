@@ -716,7 +716,6 @@ function M.open_row(session, row, opts)
   remember_file(session, e.path)
   -- the pair of the file shown, which is not `session.pair` in a section
   session.file_pair = pair
-  viewed.saw(session, e)
   if sync_viewed_folds(session) then
     M.redraw(session)
   else
@@ -1287,7 +1286,7 @@ function M.toggle_viewed_current(session)
   end
 end
 
---- `:Diffy viewed clear`: drop the shown file's marks and seen pair.
+--- `:Diffy viewed clear`: drop the shown file's marks.
 function M.clear_viewed_current(session)
   local row = current_row(session)
   if row then

@@ -88,9 +88,13 @@ end
 
 -- Commit the mode should have checked out for the current selection; nil
 -- means the branch (multi-commit selection, worktree entries, branch head).
+-- The since-viewed row keeps what's checked out: it shows its right side.
 local function target(session)
   local sel = session.sel
   local entry = sel and sel.top == sel.bottom and session.entries[sel.top]
+  if entry and entry.kind == 'since' then
+    return session.checkout.commit
+  end
   if not entry or entry.kind ~= 'commit' or entry.sha == session.checkout.head then
     return nil
   end

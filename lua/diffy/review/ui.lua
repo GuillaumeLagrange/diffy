@@ -944,6 +944,7 @@ local function ago(t)
   local day = ('%s %d'):format(os.date('%b', e), tonumber(os.date('%d', e)))
   return os.date('%Y', e) == os.date('%Y') and day or ('%s, %s'):format(day, os.date('%Y', e))
 end
+M.ago = ago
 
 local function card_ns(session)
   return session_mod.namespace(session, 'review_card')
@@ -1431,8 +1432,13 @@ function M.compose(session, mode)
   if not side then
     return
   end
-  if session.pair and session.pair.top.kind == 'push' then
+  local top = session.pair and session.pair.top
+  if top and top.kind == 'push' then
     vim.notify('diffy: this commit is no longer in the branch: reply to its threads here, write new ones on the branch', vim.log.levels.WARN)
+    return
+  end
+  if top and top.kind == 'since' and side == 'left' then
+    vim.notify('diffy: the left side is the version you last viewed: comment on the right side', vim.log.levels.WARN)
     return
   end
   if not session.current_path or not vim.w[win].diffy_path then
@@ -1466,7 +1472,9 @@ function M.compose(session, mode)
   local function pin(r)
     return r == 'HEAD' and session.head_sha or r
   end
-  local pinned_left, pinned_right = pin(pair.left), pin(pair.right)
+  -- the since-viewed view's left side is no revision: keep the view it was opened from
+  local view = top and top.kind == 'since' and top.from.pair or pair
+  local pinned_left, pinned_right = pin(view.left), pin(view.right)
 
   local suggestion = review.backend.capabilities.suggestions and excerpt or nil
   M.open_compose(session, win, start_line, end_line, function(body)
@@ -2095,7 +2103,7 @@ local function written_off_branch(session, thread)
 end
 
 --- Select the throwaway view of `sha`, a commit rewritten out of the branch
---- (`log.show_push`): the branch as it was then, from its fork point off
+--- (`log.show_throwaway`): the branch as it was then, from its fork point off
 --- the base (`sha`'s own changes without a merge-base), as GitHub anchors
 --- comments. `cb()` once drawn; warns instead when the repo doesn't have
 --- `sha` anymore.
@@ -2124,7 +2132,7 @@ local function select_push(session, sha, cb)
     }
     local function show(base)
       entry.base = base or require('diffy.selection').parent(entry)
-      require('diffy.panels.log').show_push(session, entry, cb)
+      require('diffy.panels.log').show_throwaway(session, entry, cb)
     end
     if not mb then
       show(nil)

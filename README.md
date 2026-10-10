@@ -45,6 +45,7 @@ In a session:
 | `<CR>`, `]f`/`[f` | files, diff | open a file, the next/previous one |
 | `s`/`u`, `-` | files | stage/unstage a file |
 | `m` / `<leader>dm` | files / diff | mark a file viewed |
+| `M` / `<leader>dM` | files / diff | diff a file since you last marked it viewed |
 | `gc` | diff | comment on the line or the visual range |
 | `<CR>`, `]t`/`[t` | diff | enter the thread under the cursor, go to the next/previous one |
 | `<leader>dc` | diff, column | every review thread |

@@ -18,6 +18,10 @@ M.config = {
     tree_toggle_viewed = 'm',
     -- in the diff windows and the file tree: undo the last mark or unmark, one more per press
     undo_viewed = '<leader>du',
+    -- in the diff windows: the file shown since you last marked it viewed, or back from there
+    viewed_diff = '<leader>dM',
+    -- in the file tree: the same for the file at the cursor
+    tree_viewed_diff = 'M',
   },
   -- copied to `+` by `:Diffy review agent`; %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
@@ -209,7 +213,8 @@ function M.dispatch.close()
   end)
 end
 
---- `:Diffy viewed`: toggle the file shown; `:Diffy viewed clear` drops its marks.
+--- `:Diffy viewed`: toggle the file shown; `:Diffy viewed clear` drops its
+--- marks; `:Diffy viewed diff` shows it since it was last marked.
 function M.dispatch.viewed(args)
   local s = current_session()
   if not s then
@@ -218,10 +223,12 @@ function M.dispatch.viewed(args)
   local tree = require('diffy.panels.tree')
   if args[1] == 'clear' then
     tree.clear_viewed_current(s)
+  elseif args[1] == 'diff' then
+    tree.viewed_diff_current(s)
   elseif args[1] == nil then
     tree.toggle_viewed_current(s)
   else
-    vim.notify('diffy: `viewed` expects nothing or `clear`', vim.log.levels.WARN)
+    vim.notify('diffy: `viewed` expects nothing, `clear` or `diff`', vim.log.levels.WARN)
   end
 end
 
@@ -309,7 +316,15 @@ function M.build(s, done)
       end
       github.remeasure(s, function()
         entries = log_panel.with_layer(s, entries)
-        local kept = keep_selection(s.entries, s.sel, entries)
+        -- the since-viewed row outlives a rebuild (`:w` on its right side)
+        local since = s.pair and s.pair.top.kind == 'since' and s.pair.top
+        local kept
+        if since then
+          local at = log_panel.insert_throwaway(entries, since)
+          kept = { top = at, bottom = at }
+        else
+          kept = keep_selection(s.entries, s.sel, entries)
+        end
         s.entries = entries
         s.follow_pathspec = entries.follow_pathspec
         s.sel = kept or log_panel.default_selection(entries, s.range)
@@ -401,12 +416,13 @@ function M.start(spec)
 
   local s = session.open({ range = spec })
   s.on_select = function(sess, done)
-    local dropped = log_panel.drop_push(sess)
+    local dropped = log_panel.drop_throwaway(sess)
     require('diffy.checkout').before_select(sess, function()
       sess.pair = selection.resolve(sess.entries, sess.sel.top, sess.sel.bottom)
       log_panel.render(sess)
-      -- the push row came or went: the log's height changed
-      if dropped or sess.pair.top.kind == 'push' then
+      -- the throwaway row came or went: the log's height changed
+      local kind = sess.pair.top.kind
+      if dropped or kind == 'push' or kind == 'since' then
         require('diffy.layout').fit_column(sess)
       end
       tree_panel.render(sess, function()
@@ -591,7 +607,7 @@ local function candidates(words, arg_lead)
   elseif sub == 'file' and #words == 1 then
     return vim.fn.getcompletion(arg_lead, 'file')
   elseif sub == 'viewed' and #words == 1 then
-    return { 'clear' }
+    return { 'clear', 'diff' }
   elseif sub == 'branch' and #words == 1 then
     local res = vim.system({ 'git', 'for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes' }, { text = true }):wait()
     return res.code == 0 and vim.split(vim.trim(res.stdout), '\n', { trimempty = true }) or {}

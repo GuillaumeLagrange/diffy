@@ -36,10 +36,12 @@ lua/diffy/
   panels/stack.lua      the tree and the log sharing one column window/buffer: row ranges, rule, gap, peek
                         floats over the edges, per-row key dispatch, `]]`/`[[`
   panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), the GitHub layer's
-                        PR row and review markers, the throwaway push row (a rewritten commit's threads), selection keys
+                        PR row and review markers, the throwaway rows (`push`: a rewritten commit's threads; `since`: one
+                        file since it was last viewed), selection keys
   panels/commitmsg.lua  float beside the column while the log cursor rests on a commit (its message) or the PR row
   panels/tree.lua       files view: tree rows (Unstaged/Staged sections for the working tree, Viewed groups), right blob
-                        ids for worktree files, staging and viewed keys, file navigation
+                        ids for worktree files (written, for the since-viewed view), staging and viewed keys, file
+                        navigation
   viewed.lua            viewed marks (blob pair per path) in viewed.json: shared per nvim, watched across nvims
   diffpair.lua          the two diff windows: buffers, diff mode, winbars, b:diffy_title, shared keys,
                         edits (redecorate on change, rebuild on write)

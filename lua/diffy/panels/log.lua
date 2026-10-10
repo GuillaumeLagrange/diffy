@@ -487,41 +487,48 @@ function M.select(session, top, bottom, done)
   session.on_select(session, done)
 end
 
---- Show `entry`, a `push` row (a commit rewritten out of the branch, see
---- selection.lua), at the top of the log under the PR row, replacing any
---- other, and select it; `done()` once drawn. It stays until another
---- selection (`drop_push`) or a rebuild, and is never a range endpoint.
-function M.show_push(session, entry, done)
-  local entries = session.entries
-  local at
+local function throwaway(e)
+  return e.kind == 'push' or e.kind == 'since'
+end
+
+--- Put `entry`, a throwaway row (`push` or `since`, see selection.lua), at
+--- the top of `entries` under the PR row, replacing any other. Its index.
+function M.insert_throwaway(entries, entry)
   for i, e in ipairs(entries) do
-    if e.kind == 'push' then
-      at = i
+    if throwaway(e) then
+      entries[i] = entry
+      return i
     end
   end
-  if at and entries[at].sha == entry.sha then
-    if session.sel and session.sel.top == at and session.sel.bottom == at then
+  local at = 1
+  while entries[at] and entries[at].kind == 'pr' do
+    at = at + 1
+  end
+  table.insert(entries, at, entry)
+  return at
+end
+
+--- Show `entry`, a throwaway row, and select it; `done()` once drawn. It
+--- stays until another selection (`drop_throwaway`); a `push` row also goes
+--- on a rebuild. Never a range endpoint.
+function M.show_throwaway(session, entry, done)
+  local entries, sel = session.entries, session.sel
+  for i, e in ipairs(entries) do
+    if e.kind == entry.kind and e.rev == entry.rev and e.base == entry.base and sel and sel.top == i and sel.bottom == i then
       done()
       return
     end
-  elseif at then
-    entries[at] = entry
-  else
-    at = 1
-    while entries[at] and entries[at].kind == 'pr' do
-      at = at + 1
-    end
-    table.insert(entries, at, entry)
   end
+  local at = M.insert_throwaway(entries, entry)
   M.select(session, at, at, done)
 end
 
---- Remove the push row unless it's what `session.sel` holds, keeping the
---- selection on the same entries. Whether it removed one.
-function M.drop_push(session)
+--- Remove the throwaway row unless it's what `session.sel` holds, keeping
+--- the selection on the same entries. Whether it removed one.
+function M.drop_throwaway(session)
   local entries, sel = session.entries or {}, session.sel
   for i, e in ipairs(entries) do
-    if e.kind == 'push' then
+    if throwaway(e) then
       if sel and sel.top == i and sel.bottom == i then
         return false
       end
@@ -534,6 +541,30 @@ function M.drop_push(session)
     end
   end
   return false
+end
+
+--- From the `since` row, select what it was opened from (the same entries,
+--- else the default selection), on the same file and section; `done()`
+--- once drawn.
+function M.leave_since(session, done)
+  local from = session.pair.top.from
+  local function find(want)
+    for i, e in ipairs(session.entries) do
+      if e.kind == want.kind and e.sha == want.sha then
+        return i
+      end
+    end
+  end
+  local top, bottom = find(from.top), find(from.bottom)
+  if not (top and bottom) then
+    local d = M.default_selection(session.entries, session.range)
+    if not d then
+      return
+    end
+    top, bottom = d.top, d.bottom
+  end
+  session.file_pair = from.file_pair
+  M.select(session, top, bottom, done)
 end
 
 --- `J`/`K` (also `]r`/`[r` from the diff windows): collapse the current

@@ -7,7 +7,10 @@
 --   { kind = 'commit', sha, parents, subject, merge, rev = sha }
 --   { kind = 'pr' } / { kind = 'marker', reviews } (the GitHub layer's rows)
 --   { kind = 'push', sha, base, label, rev = sha } (a commit rewritten out of
---     the branch, shown from `base`, its fork point: see `log.show_push`)
+--     the branch, shown from `base`, its fork point: see `log.show_throwaway`)
+--   { kind = 'since', base, rev, paths, label, from } (one file from the
+--     version last marked viewed, a tree holding only that blob, to `rev`,
+--     the right side of the view `from` it was opened in)
 local M = {}
 
 -- The two sections of a lone working tree selection; file rows carry one of
@@ -38,7 +41,7 @@ function M.resolve(entries, top_idx, bottom_idx)
   assert(top_idx <= bottom_idx, 'selection.resolve: top_idx must be <= bottom_idx')
   local top = entries[top_idx]
   local bottom = entries[bottom_idx]
-  if top.kind == 'push' then
+  if top.kind == 'push' or top.kind == 'since' then
     return { left = top.base, right = top.rev, top = top, bottom = top, top_idx = top_idx, bottom_idx = bottom_idx }
   end
 
@@ -99,13 +102,12 @@ end
 --- @param path string
 --- @param ctx { head_sha: string, checkout_sha: string|nil, is_clean: fun(path: string): boolean }
 function M.right_is_real(sel, path, ctx)
-  if sel.top.kind == 'worktree' then
+  local top = sel.top
+  if top.kind == 'worktree' or (top.kind == 'since' and sel.right == 'WORKTREE') then
     return true
   end
-  if sel.top.kind ~= 'commit' then
-    return false
-  end
-  if sel.top.sha == ctx.head_sha or (ctx.checkout_sha and sel.top.sha == ctx.checkout_sha) then
+  local sha = (top.kind == 'commit' and top.sha) or (top.kind == 'since' and sel.right ~= 'INDEX' and sel.right)
+  if sha and (sha == ctx.head_sha or (ctx.checkout_sha and sha == ctx.checkout_sha)) then
     return ctx.is_clean(path)
   end
   return false

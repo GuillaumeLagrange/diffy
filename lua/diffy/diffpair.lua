@@ -82,6 +82,12 @@ function M.set_nav_keymaps(session, buf)
       require('diffy.panels.tree').undo_viewed(session)
     end, { buffer = buf, desc = 'undo viewed' })
   end
+  local since_key = require('diffy').config.keymaps.viewed_diff
+  if since_key and since_key ~= '' then
+    map(session, 'n', since_key, function()
+      require('diffy.panels.tree').viewed_diff_current(session)
+    end, { buffer = buf, desc = 'diff since last viewed' })
+  end
   for _, key in ipairs({ 'zo', 'zO', 'za', 'zA' }) do
     map(session, 'n', key, function()
       require('diffy.folds').open(key)
@@ -133,13 +139,13 @@ local function open_side(session, name, spec)
 
   vim.w[win].diffy_rev = spec and spec.rev or nil
   vim.w[win].diffy_path = spec and spec.path or nil
-  vim.wo[win].winbar = (spec and spec.path) and (short(spec.rev) .. '  ' .. spec.path) or '(no file)'
+  vim.wo[win].winbar = (spec and spec.path) and ((spec.label or short(spec.rev)) .. '  ' .. spec.path) or '(no file)'
   vim.wo[win][0].foldtext = require('diffy.folds').FOLDTEXT
   -- Statuslines show the buffer name, a `fugitive://…/.git//<sha>/<path>` URI
   -- for blob sides: readable replacement, see `:help diffy-statusline`. Rev first:
   -- a narrow window truncates the left end.
   if spec and spec.path and not is_real then
-    vim.b[buf].diffy_title = short(spec.rev) .. ': ' .. spec.path
+    vim.b[buf].diffy_title = (spec.label or short(spec.rev)) .. ': ' .. spec.path
   end
 end
 

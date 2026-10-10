@@ -262,6 +262,81 @@ T['editing the shown viewed file brings it back with a dot, undoing makes it vie
   child.cmd('Diffy close')
 end
 
+--- The log row of the since-viewed view, or nil.
+local function since_row()
+  for _, l in ipairs(ui.layout(child).log) do
+    if l:find('◷', 1, true) then
+      return vim.trim((l:gsub('^%S*%s', '', 1)))
+    end
+  end
+end
+
+T['M on a file changed since it was viewed shows that change alone, and marking there marks it in the view'] = function()
+  open_branch()
+  ui.capture_warnings(child)
+  mark_in_tree('b.txt')
+  ui.open_tree_row(child, 'a.txt', 'M', 'viewed')
+  MiniTest.expect.equality(ui.warnings(child, 'WARN'), { 'diffy: a.txt was never marked viewed' })
+
+  local viewed_text = vim.fn.readfile(repo.dir .. '/b.txt')
+  local edited = vim.deepcopy(viewed_text)
+  edited[5] = 'b since'
+  vim.fn.writefile(edited, repo.dir .. '/b.txt')
+  refresh()
+  MiniTest.expect.equality(tree(), { 'M a.txt', 'M ● b.txt', 'M c.txt' })
+
+  ui.open_tree_row(child, 'b.txt', 'M', 'select')
+  MiniTest.expect.equality(since_row(), '◷ b.txt as viewed just now')
+  MiniTest.expect.equality(tree(), { 'M ● b.txt' })
+  local l = ui.layout(child)
+  MiniTest.expect.equality({ l.left.rev, l.left.path, l.left.text }, { 'viewed', 'b.txt', viewed_text })
+  MiniTest.expect.equality({ l.right.name, l.right.text }, { repo.dir .. '/b.txt', edited })
+
+  in_diff('\\dm', 'viewed')
+  MiniTest.expect.equality(since_row(), nil)
+  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M a.txt', 'M c.txt' })
+
+  child.cmd('Diffy close')
+end
+
+T['the version marked on the working tree shows since, through a write, and the key goes back'] = function()
+  local first = vim.fn.readfile(repo.dir .. '/b.txt')
+  first[3] = 'first edit'
+  vim.fn.writefile(first, repo.dir .. '/b.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  mark_in_tree('b.txt')
+  capture_info()
+  ui.open_tree_row(child, 'b.txt', 'M', 'viewed')
+  MiniTest.expect.equality(child.lua_get('_G.__infos'), { 'diffy: b.txt is unchanged since you marked it viewed' })
+
+  local second = vim.deepcopy(first)
+  second[7] = 'second edit'
+  vim.fn.writefile(second, repo.dir .. '/b.txt')
+  refresh()
+  ui.open_tree_row(child, 'b.txt', 'M', 'select')
+  MiniTest.expect.equality(ui.layout(child).left.text, first)
+
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  -- the real buffer was loaded before the second edit landed on disk
+  child.cmd('checktime')
+  MiniTest.expect.equality(ui.layout(child).right.text, second)
+  child.api.nvim_buf_set_lines(0, 0, 1, false, { 'third edit' })
+  ui.arm_ready(child, 'render')
+  child.cmd('write')
+  ui.wait_ready(child)
+  MiniTest.expect.equality(since_row() ~= nil, true)
+  MiniTest.expect.equality(tree(), { 'M ● b.txt' })
+  MiniTest.expect.equality(ui.layout(child).left.text, first)
+
+  in_diff('\\dM', 'select')
+  MiniTest.expect.equality(since_row(), nil)
+  MiniTest.expect.equality(tree(), { '▾ Unstaged (1)', '  M ● b.txt', '  Staged (0)' })
+
+  child.cmd('Diffy close')
+end
+
 T['a rename without content change stays viewed'] = function()
   open_branch()
   mark_in_tree('a.txt')

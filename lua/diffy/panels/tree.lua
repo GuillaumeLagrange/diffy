@@ -31,9 +31,10 @@ end
 local function diff_cmd(session, pair, ...)
   local args = { 'diff', '-z', '-M', ... }
   vim.list_extend(args, repo.diff_args(pair.left, pair.right))
-  if session.follow_pathspec then
+  local paths = pair.top and pair.top.paths or session.follow_pathspec
+  if paths then
     table.insert(args, '--')
-    vim.list_extend(args, session.follow_pathspec)
+    vim.list_extend(args, paths)
   end
   return args
 end
@@ -111,7 +112,9 @@ end
 --- `lists`, then `cb()`. A deleted file keeps its zero id: `hash-object
 --- --stdin-paths` fails the whole batch on a missing path. Symlinks hash
 --- their target string (`--stdin-paths` would follow them), submodules
---- take their checked-out commit (`hash-object` refuses them).
+--- take their checked-out commit (`hash-object` refuses them). Blobs are
+--- written (`-w`): a viewed mark's right blob is what the since-viewed
+--- view shows later.
 local function fill_ids(session, lists, gen, cb)
   local files, by_path, links, subs = {}, {}, {}, {}
   local function want(tbl, path, e)
@@ -168,7 +171,7 @@ local function fill_ids(session, lists, gen, cb)
     })
   end
   if #files > 0 then
-    call({ 'hash-object', '--stdin-paths' }, table.concat(files, '\n') .. '\n', function(out)
+    call({ 'hash-object', '-w', '--stdin-paths' }, table.concat(files, '\n') .. '\n', function(out)
       local ids = vim.split(vim.trim(out), '\n', { plain = true })
       for i, path in ipairs(files) do
         assign(by_path[path], ids[i])
@@ -178,7 +181,7 @@ local function fill_ids(session, lists, gen, cb)
   for path, entries in pairs(links) do
     local target = vim.uv.fs_readlink(session.root .. '/' .. path)
     if target then
-      call({ 'hash-object', '--stdin' }, target, function(out)
+      call({ 'hash-object', '-w', '--stdin' }, target, function(out)
         assign(entries, vim.trim(out))
       end)
     end
@@ -703,6 +706,9 @@ function M.open_row(session, row, opts)
   local left_spec, right_spec
   if e.status ~= 'A' and e.status ~= '?' then
     left_spec = { rev = pair.left, path = e.old_path or e.path }
+    if pair.top and pair.top.kind == 'since' then
+      left_spec.label = 'viewed'
+    end
   end
   if e.status ~= 'D' then
     local right_rev = pair.right
@@ -1158,8 +1164,22 @@ end
 --- Mark `rows` (file rows) viewed, or unmark them when `on` is false. When
 --- the file shown gets marked, the next unviewed file opens (else the
 --- previous one); with none left the pair stays and says so. The change is
---- pushed on `session.viewed_undo` for `undo_viewed`.
+--- pushed on `session.viewed_undo` for `undo_viewed`. The since-viewed
+--- view's pair isn't the file's: there, it goes back to the view it was
+--- opened from and marks the file shown in it.
 local function set_viewed(session, rows, on)
+  if session.pair and session.pair.top.kind == 'since' then
+    require('diffy.panels.log').leave_since(session, function()
+      for _, row in ipairs(session.tree_all or {}) do
+        if row.kind == 'file' and is_current(session, row) and not row.viewed then
+          set_viewed(session, { row }, true)
+          return
+        end
+      end
+      run.ready({ session = session.id, event = 'viewed' })
+    end)
+    return
+  end
   local entries = {}
   for _, row in ipairs(rows) do
     if viewed.markable(row.entry) then
@@ -1295,6 +1315,100 @@ function M.clear_viewed_current(session)
   end
 end
 
+local function real_mode(mode)
+  return mode and mode ~= '000000' and mode or nil
+end
+
+--- Open `row`'s file from the version last marked viewed to the one shown
+--- now, as a throwaway `since` row in the log; from that view, go back to
+--- the one it was opened from. The left side is a tree holding only that
+--- blob, at the file's current path.
+local function viewed_diff(session, row)
+  local function say(msg, level)
+    vim.notify('diffy: ' .. msg, level or vim.log.levels.INFO)
+    run.ready({ session = session.id, event = 'viewed' })
+  end
+  if session.pair and session.pair.top.kind == 'since' then
+    require('diffy.panels.log').leave_since(session)
+    return
+  end
+  if not row then
+    return
+  end
+  local e = row.entry
+  local mark = viewed.markable(e) and viewed.last(session, e)
+  if not mark then
+    say(e.path .. ' was never marked viewed', vim.log.levels.WARN)
+    return
+  elseif mark.right == e.right_id then
+    say(e.path .. ' is unchanged since you marked it viewed')
+    return
+  end
+  local pair = row.pair or session.pair
+  local index = vim.fn.tempname()
+  local function git(args, on_exit)
+    run.git(args, {
+      cwd = session.root,
+      session = session,
+      env = { GIT_INDEX_FILE = index },
+      notify_on_error = false,
+      on_exit = on_exit,
+    })
+  end
+  local function gone()
+    os.remove(index)
+    say(('the version of %s you last viewed is no longer in the repository'):format(e.path), vim.log.levels.WARN)
+  end
+  local function write_tree()
+    git({ 'write-tree' }, function(res)
+      os.remove(index)
+      if res.code ~= 0 then
+        gone()
+        return
+      end
+      local sel = session.sel
+      require('diffy.panels.log').show_throwaway(session, {
+        kind = 'since',
+        base = vim.trim(res.stdout),
+        rev = pair.right,
+        paths = { e.path },
+        label = ('◷ %s as viewed %s'):format(e.path:match('[^/]+$'), require('diffy.review.ui').ago(mark.at)),
+        from = {
+          top = session.entries[sel.top],
+          bottom = session.entries[sel.bottom],
+          file_pair = row.pair,
+          -- for the comments written in it (review.md's diff hunk)
+          pair = { left = pair.left, right = pair.right },
+        },
+      }, function() end)
+    end)
+  end
+  -- a mark taken on a deleted file: the file wasn't there
+  if mark.right == ZERO then
+    write_tree()
+    return
+  end
+  local mode = real_mode(e.right_mode) or real_mode(e.left_mode) or '100644'
+  git({ 'update-index', '--add', '--cacheinfo', ('%s,%s,%s'):format(mode, mark.right, e.path) }, function(res)
+    if res.code ~= 0 then
+      gone()
+      return
+    end
+    write_tree()
+  end)
+end
+
+--- `M` in the tree: `viewed_diff` for the file at the cursor.
+function M.viewed_diff_at_cursor(session)
+  viewed_diff(session, row_at_cursor(session))
+end
+
+--- `<leader>dM` / `:Diffy viewed diff`: `viewed_diff` for the file shown.
+function M.viewed_diff_current(session)
+  local in_since = session.pair and session.pair.top.kind == 'since'
+  viewed_diff(session, not in_since and current_row(session) or nil)
+end
+
 --- `gf`: open the real worktree file for the entry at the cursor in the
 --- tab that was active before the diffy tab was opened.
 function M.open_real_file(session)
@@ -1367,6 +1481,12 @@ function M.setup(session)
     map(session, 'n', undo_key, function()
       M.undo_viewed(session)
     end, { buffer = buf, desc = 'undo viewed' })
+  end
+  local since_key = require('diffy').config.keymaps.tree_viewed_diff
+  if since_key and since_key ~= '' then
+    map(session, 'n', since_key, function()
+      M.viewed_diff_at_cursor(session)
+    end, { buffer = buf, desc = 'diff since last viewed' })
   end
   require('diffy.layout').map_panel_keys(session, buf)
   require('diffy.review.ui').map_last(session, buf)

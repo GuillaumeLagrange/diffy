@@ -166,6 +166,10 @@ events the current session offers, |:Diffy-threads| filters, paths for
   Mark the file shown viewed, or unmark it. `clear` drops all its marks.
   See |diffy-viewed|.
 
+:Diffy viewed diff
+  Show the file since you last marked it viewed, or go back from there
+  (|diffy-since-viewed|).
+
                                                               *:Diffy-threads*
 :Diffy threads [file] [author={name}] [state={state}] [review={id}]
   The threads view (|diffy-threads-view|): every review thread, grouped.
@@ -233,6 +237,13 @@ Defaults ~
       -- In the diff windows and the file tree: undo the last mark or
       -- unmark, one more per press
       undo_viewed = '<leader>du',
+
+      -- In the diff windows: the file shown since you last marked it
+      -- viewed, or back from there
+      viewed_diff = '<leader>dM',
+
+      -- In the file tree: the same for the file under the cursor
+      tree_viewed_diff = 'M',
     },
 
     -- Copied to the `+` register by `:Diffy review agent`
@@ -451,6 +462,9 @@ Keys, in the files view ~
                   them all when they all are viewed
                   (`keymaps.tree_toggle_viewed`, |diffy-viewed|).
   `<leader>du`    Undo the last mark or unmark (`keymaps.undo_viewed`).
+  `M`             Show the file since you last marked it viewed, or go
+                  back from there (`keymaps.tree_viewed_diff`,
+                  |diffy-since-viewed|).
 
                                                                *diffy-staging*
 Staging ~
@@ -516,6 +530,31 @@ whole-branch view, and the other way round; each view keeps its own marks
 Marks are stored in `.git/diffy/<branch>/viewed.json`, shared live by every
 session on the branch, in any Nvim and any worktree (|diffy-storage|).
 
+                                                          *diffy-since-viewed*
+Since you last viewed it ~
+
+On a `●` file, `M` in the tree, `<leader>dM` in the diff or
+`:Diffy viewed diff` shows only what changed since you last marked it
+viewed: the right blob of its newest mark on the left (winbar `viewed`),
+the file as the view shows it on the right (the real file when the view
+has it). It's a throwaway row at the top of the log, like a
+|diffy-push-row|, `◷ <name> as viewed <when>`, with that file alone in the
+tree. A file never marked viewed, or unchanged since, gets a message
+instead.
+
+- The same key goes back to the view it was opened from, on that file;
+  selecting anything else leaves too. `R` and `:w` keep it.
+
+- Marking the file viewed there (`m`, `<leader>dm`) goes back and marks it
+  in that view.
+
+- Comments go on the right side only; they belong to the view it was
+  opened from.
+
+- Versions marked on the working tree are written to the object store
+  when listed, so they stay readable until `git gc` prunes them (two
+  weeks unreferenced, by default); after that you get a warning.
+
 ------------------------------------------------------------------------------
                                                                   *diffy-diff*
 The right side is the real file (LSP, editable) when it shows the worktree,
@@ -556,6 +595,8 @@ Keys, in either diff window ~
                   one), or unmark it (`keymaps.toggle_viewed`).
   `<leader>du`    Undo the last mark or unmark, back to the file shown when
                   it was marked (`keymaps.undo_viewed`).
+  `<leader>dM`    Show the file since you last marked it viewed, or go back
+                  from there (`keymaps.viewed_diff`, |diffy-since-viewed|).
   `]r` / `[r`     Next / previous commit.
   `R`             Refresh everything: git state, panels, window sizes; and
                   read the pull request again (|diffy-github|).

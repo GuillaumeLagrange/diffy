@@ -116,6 +116,21 @@ function M.changed(session, entry)
   return false
 end
 
+--- The newest mark of `entry`'s path (or a rename's old path), or nil.
+function M.last(session, entry)
+  local st = state(session)
+  local best
+  for _, p in ipairs(st and candidates(entry) or {}) do
+    for _, m in ipairs(st.data[p] and st.data[p].marks or {}) do
+      -- `at` is to the second: a later mark in the list wins a tie
+      if not best or m.at >= best.at then
+        best = m
+      end
+    end
+  end
+  return best
+end
+
 local function apply(session, fn)
   local file = session.viewed_file
   local st = states[file]

@@ -330,7 +330,15 @@ function M.body(body)
   end
   local function start_fold(fold, title)
     local line = new_line('▾ ')
-    expand(line, tokenize(title, fold.tokens), fold.tokens)
+    -- the title is one line: block HTML in the summary (`<h3>`, `<br>`) is flattened
+    local parts = {}
+    for _, part in ipairs(vim.split(tokenize(title, fold.tokens), '\n', { plain = true })) do
+      part = vim.trim(part):gsub('^#+%s+', '')
+      if part ~= '' then
+        table.insert(parts, part)
+      end
+    end
+    expand(line, table.concat(parts, ' '), fold.tokens)
     line.title = true
     emit(line)
     fold.start = #out - 1

@@ -198,6 +198,19 @@ T['details nest as folds; one without a summary is titled Details, an open one s
   eq(res.folds, { { start = 2, stop = 3, open = true }, { start = 0, stop = 3, open = false } })
 end
 
+T['a summary holding block HTML (a heading, a line break) titles its fold on one line'] = function()
+  local res = body({
+    '<details><summary><h3>Diagram</h3></summary>',
+    '',
+    'flow',
+    '</details>',
+    '<details><summary>a<br>b</summary>',
+    'x',
+    '</details>',
+  })
+  eq(res.lines, { '▾ Diagram', 'flow', '▾ a b', 'x' })
+end
+
 T['table columns are padded to line up, links moving with their cell'] = function()
   local res = body({ '| a | long header |', '|---|:-:|', '| **x** | [link](https://e.com) |' })
   eq(res.lines, { '| a   | long header |', '| --- | :---------: |', '| **x**   | link        |' })

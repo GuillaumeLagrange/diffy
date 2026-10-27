@@ -275,6 +275,9 @@ with the real config and `--listen`, screenshotted with `grim`:
 - A window opened while a diff window is current, floats included (a snacks picker), copies its
   window-local options: `scrollbind`, `cursorbind`, `diff`. A bound picker prompt gets its cursor dragged
   back to column 0 as you type; `session.lua` unbinds every window of the tab diffy doesn't own on `WinNew`.
+  `WinNew` runs in the new window, before its buffer is set. A float is unbound there and then: cursorbind
+  syncs before the next tick, and mini.files' bound windows drag each other's cursor off the path they
+  show, so it closes every directory but the root.
 - cursorbind puts the other diff window's cursor on the counterpart line, past the filler for a line in an
   added/deleted block, so possibly below that window. nvim leaves it there until something validates that
   window's view (`line('w0')` inside `win_execute`, which diffchar.vim does on every `WinScrolled`); then

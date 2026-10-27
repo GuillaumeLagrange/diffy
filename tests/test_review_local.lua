@@ -1772,6 +1772,65 @@ T["a float opened from a diff window isn't bound to the diff"] = function()
   child.cmd('Diffy close')
 end
 
+T['a float opened from a diff window stays unbound once it shows another buffer'] = function()
+  open_default()
+  local w = ui.wins(child)
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('10G')
+  -- what mini.files does when going into a directory: a new buffer in its float
+  child.lua([[
+    local function scratch()
+      local buf = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { 'a', 'b', 'c', 'd', 'e' })
+      return buf
+    end
+    _G.__bufs = { scratch(), scratch() }
+    _G.__float = vim.api.nvim_open_win(_G.__bufs[1], true, { relative = 'editor', row = 1, col = 1, width = 30, height = 5 })
+  ]])
+  child.lua('vim.api.nvim_win_set_buf(_G.__float, _G.__bufs[2])')
+  child.type_keys('3G')
+  MiniTest.expect.equality(child.api.nvim_win_get_cursor(0), { 3, 0 })
+  -- a bound float would drag the diff's cursors to its own line
+  MiniTest.expect.equality(child.api.nvim_win_get_cursor(w.right), { 10, 0 })
+
+  child.lua([[
+    vim.api.nvim_win_close(_G.__float, true)
+    for _, buf in ipairs(_G.__bufs) do
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  ]])
+  child.cmd('Diffy close')
+end
+
+T['mini.files opened from a diff window shows every directory down to the file'] = function()
+  child.o.columns = 200
+  -- the diff shows a/b/g.txt: the only change
+  repo:commit('nested', { ['a/b/g.txt'] = Repo.lines(30) })
+  vim.fn.writefile(Repo.edit(20, 'uncommitted')(vim.fn.readfile(repo.dir .. '/a/b/g.txt')), repo.dir .. '/a/b/g.txt')
+  open_default()
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  child.type_keys('10G')
+  child.lua([[
+    require('mini.files').setup()
+    vim.keymap.set('n', '-', function()
+      MiniFiles.open(vim.api.nvim_buf_get_name(0))
+      MiniFiles.reveal_cwd()
+    end)
+  ]])
+  child.type_keys('-')
+  -- bound together, its windows' cursors would follow the focused one's,
+  -- off the directories leading to the file, closing them
+  local shown = child.lua([[
+    return vim.tbl_map(function(w)
+      return vim.fn.fnamemodify(w.path, ':t')
+    end, MiniFiles.get_explorer_state().windows)
+  ]])
+  MiniTest.expect.equality(shown, { vim.fn.fnamemodify(repo.dir, ':t'), 'a', 'b' })
+
+  child.lua('MiniFiles.close()')
+  child.cmd('Diffy close')
+end
+
 T["comment decorations don't show in a window outside the session showing the same file"] = function()
   open_default()
   local w = ui.wins(child)

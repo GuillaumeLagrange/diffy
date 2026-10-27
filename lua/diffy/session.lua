@@ -451,9 +451,26 @@ function M.open(opts)
   -- A window opened from a diff window (a picker, a plugin float) copies its
   -- scrollbind/cursorbind/diff: bound to the diff, its cursor gets dragged
   -- to the diff's column as you type in it. Only diffy's own windows stay bound.
+  -- Both values: the window's global one comes back with the next buffer it
+  -- shows (mini.files going into a directory).
+  -- A float is unbound right away: its plugin moves its cursor before the next
+  -- tick, and mini.files' bound windows would follow each other's cursor off
+  -- the path they show, closing the directories down to the file.
+  local function unbind_copy(w)
+    for _, opt in ipairs({ 'scrollbind', 'cursorbind', 'diff' }) do
+      if vim.wo[w][opt] or vim.api.nvim_get_option_value(opt, { win = w, scope = 'global' }) then
+        vim.wo[w][opt] = false
+      end
+    end
+  end
   vim.api.nvim_create_autocmd('WinNew', {
     group = session.augroup,
     callback = function()
+      -- WinNew runs in the new window
+      local new = vim.api.nvim_get_current_win()
+      if vim.api.nvim_win_get_tabpage(new) == session.tab and vim.api.nvim_win_get_config(new).relative ~= '' then
+        unbind_copy(new)
+      end
       vim.schedule(function()
         if session.closed or not (session.tab and vim.api.nvim_tabpage_is_valid(session.tab)) then
           return
@@ -464,11 +481,7 @@ function M.open(opts)
         end
         for _, w in ipairs(vim.api.nvim_tabpage_list_wins(session.tab)) do
           if not own[w] then
-            for _, opt in ipairs({ 'scrollbind', 'cursorbind', 'diff' }) do
-              if vim.wo[w][opt] then
-                vim.api.nvim_set_option_value(opt, false, { win = w, scope = 'local' })
-              end
-            end
+            unbind_copy(w)
           end
         end
       end)

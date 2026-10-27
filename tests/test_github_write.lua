@@ -935,11 +935,12 @@ T['submitting to the agent takes your drafts out of the pending review'] = funct
   wait_ready_raw()
   child.type_keys('<C-s>')
   -- a background sync's redraw also fires `review`
+  local md
   wait_for(function()
-    return vim.fn.filereadable(branch_dir() .. '/review.md') == 1
+    local path = branch_dir() .. '/review.md'
+    md = vim.fn.filereadable(path) == 1 and table.concat(vim.fn.readfile(path), '\n') or ''
+    return md:find('for the agent', 1, true) ~= nil
   end, 'review.md written')
-
-  local md = table.concat(vim.fn.readfile(branch_dir() .. '/review.md'), '\n')
   -- your drafts, adopted ones included; not D1, which is published (only quoted, above the E4 reply to it)
   eq({ md:find('for the agent', 1, true) ~= nil, md:find('E1 pending', 1, true) ~= nil, md:find('\nD1 published', 1, true) }, { true, true, nil })
   wait_for(function()
@@ -963,11 +964,14 @@ T['a reply sent to the agent comes with the thread it answers'] = function()
   ui.arm_ready_raw(child, 'compose')
   child.cmd('Diffy review agent')
   wait_ready_raw()
-  ui.arm_ready_raw(child, 'review')
   child.type_keys('<C-s>')
-  wait_ready_raw()
-
-  local md = table.concat(vim.fn.readfile(branch_dir() .. '/review.md'), '\n')
+  -- the reply's background sync also fires `review`, maybe before review.md is written
+  local md
+  wait_for(function()
+    local path = branch_dir() .. '/review.md'
+    md = vim.fn.filereadable(path) == 1 and table.concat(vim.fn.readfile(path), '\n') or ''
+    return md:find('a reply for the agent', 1, true) ~= nil
+  end, 'review.md written')
   local section = md:match('\n## [^\n]* f%.txt:30\n(.-a reply for the agent)')
   eq(section and section:find('> D1 published thread', 1, true) ~= nil, true)
   child.cmd('Diffy close')

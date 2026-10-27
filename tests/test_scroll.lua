@@ -67,6 +67,29 @@ T['coming back to a file with [f keeps the other side aligned with where the cur
   end
 end
 
+T['coming back to a file with [f shows it scrolled as it was left'] = function()
+  local f = vim.fn.readfile(repo.dir .. '/f.txt')
+  repo:commit('g', { ['g.txt'] = Repo.lines(10), ['f.txt'] = Repo.lines(130) })
+  vim.fn.writefile(f, repo.dir .. '/f.txt')
+  local g = Repo.lines(10)
+  g[5] = 'changed'
+  vim.fn.writefile(g, repo.dir .. '/g.txt')
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+  local right = ui.wins(child).right
+  child.api.nvim_set_current_win(right)
+  -- the cursor high in the window inside the 60-line block, its rest in sight below
+  child.type_keys('112G', 'zt', '<C-y><C-y><C-y><C-y>')
+  local function seen()
+    return child.lua_get(('vim.api.nvim_win_call(%d, function() return { vim.fn.line("w0"), vim.fn.line("."), vim.fn.winline() } end)'):format(right))
+  end
+  local before = seen()
+  child.type_keys(']f', '[f')
+  eq(seen(), before)
+  eq(ui.aligned(child), true)
+end
+
 T['toggling wrap in one diff window toggles it in the other'] = function()
   -- the user's toggle: a plain `vim.wo.wrap` flip in the current window
   child.lua([[vim.keymap.set('n', '<Space>uw', function() vim.wo.wrap = not vim.wo.wrap end)]])

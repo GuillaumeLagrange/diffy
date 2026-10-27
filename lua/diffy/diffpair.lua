@@ -254,11 +254,44 @@ local function align_left(session)
   end)
 end
 
+local function view_key(win)
+  local path = vim.w[win].diffy_path
+  return path and (vim.w[win].diffy_rev .. '\0' .. path)
+end
+
+--- Remember where each diff window is scrolled in the file it shows.
+local function save_views(session)
+  session.views = session.views or {}
+  for _, name in ipairs(SIDES) do
+    local win = session.wins[name]
+    local key = valid_win(win) and view_key(win)
+    if key then
+      session.views[key] = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+    end
+  end
+end
+
+--- A file coming back to window `name` with the cursor where it was left (a
+--- real file remembers it per window) gets the scroll it was left at: nvim
+--- centres the cursor before diff mode folds and fills the window, so the
+--- cursor lands on another screen row and what was in sight around it moves out.
+local function restore_view(session, name)
+  local win = session.wins[name]
+  local key = view_key(win)
+  local view = key and session.views[key]
+  if view and vim.api.nvim_win_get_cursor(win)[1] == view.lnum then
+    vim.api.nvim_win_call(win, function()
+      vim.fn.winrestview({ topline = view.topline, topfill = view.topfill, leftcol = view.leftcol })
+    end)
+  end
+end
+
 --- Show `left_spec`/`right_spec` in the session's diff windows and put both
 --- into native diff mode with scrollbind/cursorbind. An added or deleted
 --- file (one spec `nil`) takes the whole diff area, coloured as added or
 --- deleted; both `nil` clears both sides.
 function M.show(session, left_spec, right_spec)
+  save_views(session)
   -- Swap buffers with diff off: a window still in diff mode diffs the new
   -- buffer against the old pair mid-swap, and diff plugins' BufWinEnter
   -- handlers (diffchar.vim) error on the half-updated state. `!` also drops
@@ -285,6 +318,7 @@ function M.show(session, left_spec, right_spec)
     open_side(session, one, one == 'left' and left_spec or right_spec)
     session_mod.unbind(session.wins[one])
     paint_one_sided(session, one, one == 'left' and 'DiffyFileDeleted' or 'DiffyFileAdded')
+    restore_view(session, one)
   else
     M.restore(session)
     open_side(session, 'left', left_spec)
@@ -297,9 +331,8 @@ function M.show(session, left_spec, right_spec)
         vim.cmd('diffthis')
       end)
     end
-    -- The right window can come back to a file at the view it was left at
-    -- (a real file remembers its cursor per window) while the left blob is
-    -- fresh at the top: scrollbind only follows the next scroll.
+    -- The left blob is fresh at the top: scrollbind only follows the next scroll.
+    restore_view(session, 'right')
     align_left(session)
   end
 

@@ -85,7 +85,7 @@ local function concurrently(fns, cb)
 end
 
 --- raw + numstat for `pair` (one git call: rename detection runs once), plus
---- untracked files for the unstaged pair (index -> worktree).
+--- untracked files for any pair ending at the worktree.
 local function build_diff_entries(session, pair, gen, cb)
   local args = diff_cmd(session, pair, '--raw', '--numstat', '--no-abbrev')
   run.git(args, { cwd = session.root, session = session, gen = gen, on_exit = run.parsed(parse.diff_files, function(entries, err)
@@ -93,9 +93,14 @@ local function build_diff_entries(session, pair, gen, cb)
       cb(nil, err)
       return
     end
-    if pair.left == 'INDEX' and pair.right == 'WORKTREE' then
+    -- a since-viewed view shows its one file only
+    if pair.right == 'WORKTREE' and not (pair.top and pair.top.paths) then
+      local follow = session.follow_pathspec and {}
+      for _, p in ipairs(session.follow_pathspec or {}) do
+        follow[p] = true
+      end
       for _, s in ipairs(session.status_entries or {}) do
-        if s.kind == 'untracked' then
+        if s.kind == 'untracked' and (not follow or follow[s.path]) then
           table.insert(entries, { status = '?', path = s.path, left_id = ZERO })
         end
       end

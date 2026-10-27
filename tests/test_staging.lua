@@ -368,6 +368,30 @@ T['the working tree selected with commits shows one merged tree, no sections'] =
   child.cmd('Diffy close')
 end
 
+T['the working tree selected with commits lists untracked files'] = function()
+  repo = Repo.new():commit('Base', { ['f.txt'] = Repo.lines(5) }):commit('C1', { ['c.txt'] = Repo.lines(2) })
+  vim.fn.writefile({ 'new' }, repo.dir .. '/n.txt')
+  child.fn.chdir(repo.dir)
+
+  ui.arm_ready(child, 'render')
+  child.cmd('Diffy')
+  ui.wait_ready(child)
+
+  ui.cursor_to(child, 'log', 1)
+  ui.arm_ready(child, 'select')
+  child.type_keys('Vj<CR>')
+  ui.wait_ready(child)
+
+  local lines = tree()
+  MiniTest.expect.equality(find_line(lines, 'A c.txt') ~= nil, true)
+  press_in_tree(find_line(lines, '? n.txt'), '<CR>', 'open_row')
+  local l = ui.layout(child)
+  MiniTest.expect.equality(l.left, vim.NIL)
+  MiniTest.expect.equality({ l.right.rev, l.right.text }, { 'worktree', { 'new' } })
+
+  child.cmd('Diffy close')
+end
+
 T['`u` on a staged rename pair unstages both paths'] = function()
   repo = Repo.new():commit('Base', { ['h.txt'] = Repo.lines(5) })
   repo:mv('h.txt', 'i.txt')

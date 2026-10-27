@@ -324,10 +324,11 @@ The commits view lists the session's commits, newest first, under a
 The diff always shows one contiguous selection: the left side is the parent
 of the oldest selected entry, the right side the newest one.
 
-- `Working tree` means HEAD to the worktree, index included. Selected
-  alone, the tree splits it into its unstaged and staged parts
-  (|diffy-staging|). With commits, it's one tree from the oldest commit's
-  parent to the worktree. `J`/`K` and `]r`/`[r` treat it like a commit.
+- `Working tree` means HEAD to the worktree, index and untracked files
+  included. Selected alone, the tree splits it into its unstaged and staged
+  parts (|diffy-staging|). With commits, it's one tree from the oldest
+  commit's parent to the worktree. `J`/`K` and `]r`/`[r` treat it like a
+  commit.
 
 - Merge commits are dimmed and skipped.
 

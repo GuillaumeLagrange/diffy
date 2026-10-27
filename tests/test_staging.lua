@@ -293,8 +293,6 @@ T['`-` on a folder moves the files rendered under it, keeping viewed and unviewe
   ui.wait_ready(child)
   press_in_tree(line_in('Unstaged', 'a.txt'), 'm', 'viewed')
   press_in_tree(line_in('Unstaged', 'b.txt'), 'm', 'viewed')
-  child.api.nvim_win_set_cursor(ui.wins(child).tree, { line_in('Unstaged', 'Viewed'), 0 })
-  child.type_keys('o')
   local plain = function()
     return vim.tbl_map(function(l)
       return (l:gsub('%s+%+%d+ %-%d+$', ''))
@@ -330,10 +328,21 @@ T['`-` on a folder moves the files rendered under it, keeping viewed and unviewe
 
   press_in_tree(3, '-')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'd/a.txt\nd/b.txt\nd/c.txt\nd/e.txt')
-  MiniTest.expect.equality(plain(), { '▾ Unstaged (1)', '  M f.txt', '▾ Staged (4)', '  ▸ Viewed (2)', '  ▾ d/', '    M c.txt', '    M e.txt' })
+  MiniTest.expect.equality(plain(), {
+    '▾ Unstaged (1)',
+    '  M f.txt',
+    '▾ Staged (4)',
+    '  ▾ Viewed (2)',
+    '    ▾ d/',
+    '      M a.txt',
+    '      M b.txt',
+    '  ▾ d/',
+    '    M c.txt',
+    '    M e.txt',
+  })
 
-  -- the Staged folder outside the folded Viewed group: its viewed files stay staged
-  press_in_tree(5, '-')
+  -- the Staged folder outside the Viewed group: its viewed files stay staged
+  press_in_tree(8, '-')
   MiniTest.expect.equality(ui.git(repo.dir, { 'diff', '--cached', '--name-only' }), 'd/a.txt\nd/b.txt')
 
   child.cmd('Diffy close')

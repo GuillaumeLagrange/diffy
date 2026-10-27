@@ -497,11 +497,11 @@ right side is the index.
 ------------------------------------------------------------------------------
                                                                 *diffy-viewed*
 Marking a file viewed (`m` in the tree, `<leader>dm` in the diff,
-|:Diffy-viewed|) moves it to a folded `Viewed (n)` group at the top of its
-section (or of the tree, without sections), drawn grayed out
-(`DiffyViewed`), folders and files included. The group unfolds while it
-holds the file shown and folds back once that file leaves it, unless you
-unfolded it yourself.
+|:Diffy-viewed|) moves it to a `Viewed (n)` group at the top of its section
+(or of the tree, without sections), drawn grayed out (`DiffyViewed`),
+folders and files included. The group starts expanded and folds like any
+folder: collapsed, it stays so as you mark files and change the selection,
+and jumping to a file inside it from the diff expands it.
 
 - `]f`/`[f` skip viewed files, and so does the file opened first after a
   refresh.

@@ -629,33 +629,6 @@ local function is_current(session, row)
     and (not row.pair or row.pair == session.file_pair)
 end
 
---- A Viewed group unfolds while it holds the file shown and folds back once
---- that file leaves it, unless the user unfolded it (`'user'`). `false`: the
---- user folded it over the shown file. Returns whether any fold changed.
-local function sync_viewed_folds(session)
-  local all, changed = session.tree_all or {}, false
-  session.viewed_open = session.viewed_open or {}
-  local open = session.viewed_open
-  for i, row in ipairs(all) do
-    if row.kind == 'viewed' then
-      local holds = false
-      for j = i + 1, #all do
-        if all[j].depth <= row.depth then
-          break
-        end
-        holds = holds or is_current(session, all[j])
-      end
-      local state = open[row.key]
-      if holds and state == nil then
-        open[row.key], changed = 'auto', true
-      elseif not holds and (state == 'auto' or state == false) then
-        open[row.key], changed = nil, true
-      end
-    end
-  end
-  return changed
-end
-
 -- `:Diffy branch` sessions reopen the file last shown on their branch. Best effort: any failure
 -- leaves the default pick.
 local function last_file_store(session)
@@ -727,11 +700,7 @@ function M.open_row(session, row, opts)
   remember_file(session, e.path)
   -- the pair of the file shown, which is not `session.pair` in a section
   session.file_pair = pair
-  if sync_viewed_folds(session) then
-    M.redraw(session)
-  else
-    M.mark_current(session)
-  end
+  M.mark_current(session)
   diffpair.show(session, left_spec, right_spec)
 end
 
@@ -760,12 +729,7 @@ local function reveal(session, index)
     end
     if all[i].depth < depth then
       depth = all[i].depth
-      if all[i].kind == 'viewed' then
-        session.viewed_open = session.viewed_open or {}
-        if not session.viewed_open[all[i].key] then
-          session.viewed_open[all[i].key], changed = 'auto', true
-        end
-      elseif collapsed[all[i].key] then
+      if collapsed[all[i].key] then
         collapsed[all[i].key], changed = nil, true
       end
     end
@@ -891,12 +855,7 @@ local function visible_rows(session)
     else
       table.insert(rows, row)
       row.lnum = #rows
-      local folded
-      if row.kind == 'viewed' then
-        folded = not (session.viewed_open or {})[row.key]
-      else
-        folded = row.key and collapsed[row.key]
-      end
+      local folded = row.key and collapsed[row.key]
       row.foldable = row.key and all[i + 1] and all[i + 1].depth > row.depth or nil
       row.collapsed = folded and row.foldable or nil
       row.sum = nil
@@ -956,13 +915,8 @@ end
 
 --- Collapse or expand the header `row`, keeping the cursor on it.
 local function toggle_collapsed(session, row)
-  if row.kind == 'viewed' then
-    session.viewed_open = session.viewed_open or {}
-    session.viewed_open[row.key] = row.collapsed and 'user' or false
-  else
-    session.tree_collapsed = session.tree_collapsed or {}
-    session.tree_collapsed[row.key] = not session.tree_collapsed[row.key] or nil
-  end
+  session.tree_collapsed = session.tree_collapsed or {}
+  session.tree_collapsed[row.key] = not session.tree_collapsed[row.key] or nil
   M.redraw(session)
   set_tree_cursor(session, row.lnum)
 end
@@ -997,7 +951,6 @@ function M.refresh_viewed(session)
     return
   end
   session.tree_all = make_rows(session)
-  sync_viewed_folds(session)
   M.redraw(session)
 end
 

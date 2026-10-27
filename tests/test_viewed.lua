@@ -105,15 +105,11 @@ local function capture_info()
   ]])
 end
 
-T['marking a file moves it into a folded Viewed group at the top of the tree and ]f skips it'] = function()
+T['marking a file moves it into an expanded Viewed group at the top of the tree and ]f skips it'] = function()
   open_branch()
   MiniTest.expect.equality(shown(), 'a.txt')
 
   mark_in_tree('b.txt')
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M a.txt', 'M c.txt' })
-  -- skipped even when its group is unfolded
-  child.api.nvim_win_set_cursor(ui.wins(child).tree, { 1, 0 })
-  child.type_keys('o')
   MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M b.txt', 'M a.txt', 'M c.txt' })
 
   in_diff(']f', 'open_row')
@@ -122,6 +118,25 @@ T['marking a file moves it into a folded Viewed group at the top of the tree and
   MiniTest.expect.equality(shown(), 'c.txt')
   in_diff('[f', 'open_row')
   MiniTest.expect.equality(shown(), 'a.txt')
+
+  child.cmd('Diffy close')
+end
+
+T['a collapsed Viewed group stays collapsed as files are marked, a jump to a file in it expands it'] = function()
+  open_branch()
+  mark_in_tree('b.txt')
+  child.api.nvim_win_set_cursor(ui.wins(child).tree, { 1, 0 })
+  child.type_keys('o')
+  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M a.txt', 'M c.txt' })
+  mark_in_tree('c.txt')
+  MiniTest.expect.equality(tree(), { '▸ Viewed (2)', 'M a.txt' })
+
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  child.cmd('edit ' .. repo.dir .. '/b.txt')
+  vim.wait(2000, function()
+    return shown() == 'b.txt'
+  end)
+  MiniTest.expect.equality(tree(), { '▾ Viewed (2)', '  M b.txt', '  M c.txt', 'M a.txt' })
 
   child.cmd('Diffy close')
 end
@@ -139,13 +154,12 @@ T['marking the shown file opens the next unviewed one, and stays on the last one
   in_diff('\\dm', 'viewed')
   MiniTest.expect.equality(shown(), 'c.txt')
   MiniTest.expect.equality(child.lua_get('_G.__infos'), { 'diffy: no unviewed file left' })
-  -- unfolded while it holds the file shown
   MiniTest.expect.equality(tree(), { '▾ Viewed (3)', '  M a.txt', '  M b.txt', '  M c.txt' })
 
   ui.arm_ready(child, 'viewed')
   child.cmd('Diffy viewed')
   ui.wait_ready(child)
-  MiniTest.expect.equality(tree(), { '▸ Viewed (2)', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (2)', '  M a.txt', '  M b.txt', 'M c.txt' })
 
   child.cmd('Diffy close')
 end
@@ -157,16 +171,16 @@ T['undo reverts marks and unmarks one at a time, back to the file shown when it 
   in_diff('\\dm', 'viewed')
   MiniTest.expect.equality(shown(), 'b.txt')
   mark_in_tree('c.txt')
-  MiniTest.expect.equality(tree(), { '▸ Viewed (2)', 'M b.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (2)', '  M a.txt', '  M c.txt', 'M b.txt' })
   mark_in_tree('Viewed')
   MiniTest.expect.equality(tree(), { 'M a.txt', 'M b.txt', 'M c.txt' })
 
   ui.arm_ready(child, 'viewed')
   child.type_keys('\\du')
   ui.wait_ready(child)
-  MiniTest.expect.equality(tree(), { '▸ Viewed (2)', 'M b.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (2)', '  M a.txt', '  M c.txt', 'M b.txt' })
   in_diff('\\du', 'viewed')
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M a.txt', 'M b.txt', 'M c.txt' })
   MiniTest.expect.equality(shown(), 'b.txt')
   in_diff('\\du', 'viewed')
   MiniTest.expect.equality(tree(), { 'M a.txt', 'M b.txt', 'M c.txt' })
@@ -185,7 +199,7 @@ T['undoing a section mark leaves the files that were viewed before it viewed'] =
   ui.wait_ready(child)
   mark_in_tree('b.txt')
   local before = tree()
-  MiniTest.expect.equality(before, { '▾ Unstaged (2)', '  ▸ Viewed (1)', '  M a.txt', '  Staged (0)' })
+  MiniTest.expect.equality(before, { '▾ Unstaged (2)', '  ▾ Viewed (1)', '    M b.txt', '  M a.txt', '  Staged (0)' })
   mark_in_tree('Unstaged')
   ui.arm_ready(child, 'viewed')
   child.type_keys('\\du')
@@ -199,20 +213,17 @@ T['m on the Viewed header unmarks them all, on a folder marks every file in it']
   repo:commit('Dir', { ['dir/x.txt'] = 'x', ['dir/y.txt'] = 'y' })
   open_branch()
   mark_in_tree('dir/')
-  MiniTest.expect.equality(tree(), { '▸ Viewed (2)', 'M a.txt', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (2)', '  ▾ dir/', '    A x.txt', '    A y.txt', 'M a.txt', 'M b.txt', 'M c.txt' })
   mark_in_tree('Viewed')
   MiniTest.expect.equality(tree(), { 'M a.txt', 'M b.txt', 'M c.txt', '▾ dir/', '  A x.txt', '  A y.txt' })
 
   child.cmd('Diffy close')
 end
 
-T['the unfolded Viewed group is drawn grayed out, folders included, the other files are not'] = function()
+T['the Viewed group is drawn grayed out, folders included, the other files are not'] = function()
   repo:commit('Dir', { ['dir/x.txt'] = 'x', ['dir/y.txt'] = 'y' })
   open_branch()
   mark_in_tree('dir/')
-  child.api.nvim_win_set_cursor(ui.wins(child).tree, { 1, 0 })
-  child.type_keys('o')
-  MiniTest.expect.equality(tree(), { '▾ Viewed (2)', '  ▾ dir/', '    A x.txt', '    A y.txt', 'M a.txt', 'M b.txt', 'M c.txt' })
   local grayed = vim.tbl_map(function(l)
     return (l:gsub('%s+%+%d+ %-%d+$', ''))
   end, ui.rows_drawn_in(child, 'tree', 'DiffyViewed'))
@@ -235,15 +246,13 @@ T['a viewed file edited by another process keeps its dot, opened or not, until m
   MiniTest.expect.equality(tree(), { 'M a.txt', 'M ● b.txt', 'M c.txt' })
 
   mark_in_tree('b.txt')
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M a.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M b.txt', 'M a.txt', 'M c.txt' })
   child.cmd('Diffy close')
 end
 
 T['editing the shown viewed file brings it back with a dot, undoing makes it viewed again'] = function()
   open_branch()
   mark_in_tree('b.txt')
-  child.api.nvim_win_set_cursor(ui.wins(child).tree, { 1, 0 })
-  child.type_keys('o')
   ui.open_tree_row(child, 'b.txt', 'o', 'open_row')
   MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M b.txt', 'M a.txt', 'M c.txt' })
 
@@ -294,7 +303,7 @@ T['M on a file changed since it was viewed shows that change alone, and marking 
 
   in_diff('\\dm', 'viewed')
   MiniTest.expect.equality(since_row(), nil)
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M a.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M b.txt', 'M a.txt', 'M c.txt' })
 
   child.cmd('Diffy close')
 end
@@ -343,7 +352,7 @@ T['a rename without content change stays viewed'] = function()
   child.cmd('Diffy close')
   repo:mv('a.txt', 'z.txt'):commit('Move')
   open_branch()
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  R a.txt → z.txt', 'M b.txt', 'M c.txt' })
 
   child.cmd('Diffy close')
 end
@@ -376,7 +385,7 @@ T['moving a viewed submodule to another commit brings it back'] = function()
   open_branch()
   mark_in_tree('sub')
   MiniTest.expect.equality(ui.warnings(child), {})
-  MiniTest.expect.equality(vim.list_contains(tree(), '▸ Viewed (1)'), true)
+  MiniTest.expect.equality(vim.list_contains(tree(), '▾ Viewed (1)'), true)
 
   sh(sub, { 'git', 'commit', '-q', '--allow-empty', '-m', 's3' })
   refresh()
@@ -391,7 +400,7 @@ T['a file deleted from the worktree can be marked viewed'] = function()
   open_branch()
   mark_in_tree('d.txt')
   MiniTest.expect.equality(ui.warnings(child), {})
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M a.txt', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  D d.txt', 'M a.txt', 'M b.txt', 'M c.txt' })
 
   child.cmd('Diffy close')
 end
@@ -409,7 +418,7 @@ T['a mark made on one commit does not hide the file in the whole branch, and bot
   ui.select_log_row(child, 'C2')
   MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M a.txt' })
   reopen_branch()
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M a.txt', 'M b.txt', 'M c.txt' })
 
   child.cmd('Diffy close')
 end
@@ -427,10 +436,10 @@ T['a mark made in another nvim shows in an open session'] = function()
   child.lua([[
     local s = require('diffy.session').for_tab(vim.api.nvim_get_current_tabpage())
     vim.wait(5000, function()
-      return vim.list_contains(vim.api.nvim_buf_get_lines(s.bufs.tree, 0, -1, false), '▸ Viewed (1)')
+      return vim.list_contains(vim.api.nvim_buf_get_lines(s.bufs.tree, 0, -1, false), '▾ Viewed (1)')
     end)
   ]])
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M a.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M b.txt', 'M a.txt', 'M c.txt' })
 
   child.cmd('Diffy close')
 end
@@ -451,7 +460,7 @@ T['marks follow the branch into another worktree and back'] = function()
   local wt = move_to_worktree()
 
   open_branch()
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M a.txt', 'M b.txt', 'M c.txt' })
   mark_in_tree('b.txt')
   child.cmd('Diffy close')
   sh(repo.dir, { 'git', 'worktree', 'remove', '--force', wt })
@@ -459,7 +468,7 @@ T['marks follow the branch into another worktree and back'] = function()
   repo:checkout('feat')
   child.fn.chdir(repo.dir)
   open_branch()
-  MiniTest.expect.equality(tree(), { '▸ Viewed (2)', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (2)', '  M a.txt', '  M b.txt', 'M c.txt' })
   child.cmd('Diffy close')
 end
 
@@ -480,7 +489,7 @@ T["a worktree's own branch store moves to the common gitdir, the newer file winn
   snapshot = leak.snapshot(child)
   child.fn.chdir(wt)
   open_branch()
-  MiniTest.expect.equality(tree(), { '▸ Viewed (1)', 'M b.txt', 'M c.txt' })
+  MiniTest.expect.equality(tree(), { '▾ Viewed (1)', '  M a.txt', 'M b.txt', 'M c.txt' })
   child.cmd('Diffy close')
 
   MiniTest.expect.equality(vim.fn.isdirectory(own), 0)

@@ -276,6 +276,36 @@ T['a definition in another listed file and back with <C-t> swaps the pair twice'
   child.cmd('Diffy close')
 end
 
+--- `foldclosed(lnum)` in each diff window, `{ left, right }`.
+local function closed_at(lnum)
+  local w = ui.wins(child)
+  return child.lua_get(
+    '{ vim.fn.win_execute(..., "echo foldclosed(" .. select(3, ...) .. ")"), vim.fn.win_execute(select(2, ...), "echo foldclosed(" .. select(3, ...) .. ")") }',
+    { w.left, w.right, lnum }
+  )
+end
+
+T['a definition inside a closed fold of another listed file opens that fold'] = function()
+  open()
+  child.api.nvim_set_current_win(ui.wins(child).right)
+  lsp_jump(repo.dir .. '/b.txt', 20)
+  expect_pair('b.txt')
+  eq(child.api.nvim_win_get_cursor(0)[1], 20)
+  eq(closed_at(20), { '\n-1', '\n-1' })
+  child.cmd('Diffy close')
+end
+
+T['a definition from the left window inside a closed fold of another listed file opens that fold'] = function()
+  open()
+  child.api.nvim_set_current_win(ui.wins(child).left)
+  lsp_jump(repo.dir .. '/b.txt', 20)
+  expect_pair('b.txt')
+  eq(child.api.nvim_get_current_win(), ui.wins(child).right)
+  eq(child.api.nvim_win_get_cursor(0)[1], 20)
+  eq(closed_at(20), { '\n-1', '\n-1' })
+  child.cmd('Diffy close')
+end
+
 T['a definition further down the same file keeps the pair'] = function()
   open()
   child.api.nvim_set_current_win(ui.wins(child).right)

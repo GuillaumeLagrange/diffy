@@ -45,12 +45,24 @@ end
 
 --- React to the right window's buffer becoming `buf`: swap in the matching
 --- pair if its path is in the current file list, otherwise leave diff mode
---- with `buf` alone.
-local function handle(session, buf)
+--- with `buf` alone. The cursor goes to `pos` if given, and the folds
+--- holding it open: the jump's own `zv` ran before the swap's diff folded
+--- the file again.
+local function handle(session, buf, pos)
   local path = relative_path(session, buf)
   if not (path and require('diffy.panels.tree').open_path(session, path)) then
     require('diffy.diffpair').leave(session)
   end
+  local right = session.wins.right
+  if not (right and vim.api.nvim_win_is_valid(right)) then
+    return
+  end
+  if pos then
+    pcall(vim.api.nvim_win_set_cursor, right, pos)
+  end
+  vim.api.nvim_win_call(right, function()
+    vim.cmd('normal! zv')
+  end)
 end
 
 --- The left window navigated to `buf` (`:e`, `<C-o>`, a definition): show it
@@ -68,10 +80,7 @@ local function redirect(session, left, buf)
   vim.cmd("normal! m'")
   vim.fn.settagstack(right, { items = { { tagname = tagname, from = from } } }, 't')
   M.guarded(session, vim.api.nvim_win_set_buf, right, buf)
-  handle(session, buf)
-  if vim.api.nvim_win_is_valid(right) then
-    pcall(vim.api.nvim_win_set_cursor, right, pos)
-  end
+  handle(session, buf, pos)
 end
 
 --- Arm the `BufWinEnter` autocmd on the session augroup, scoped to the diff

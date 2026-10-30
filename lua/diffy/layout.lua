@@ -269,6 +269,41 @@ function M.relayout(session)
   end
 end
 
+--- The column windows' winbars: the guide's tabs over the tree, checkout
+--- mode's marker over the log, both on one bar when they share a window.
+--- A winbar coming or going changes the rows to fill: relayout then.
+function M.winbars(session)
+  local tree, log = session.wins.tree, session.wins.log
+  local wins, parts = {}, {}
+  for _, win in ipairs({ tree or false, log or false }) do
+    if win and valid(win) and vim.api.nvim_win_get_config(win).relative == '' and not parts[win] then
+      table.insert(wins, win)
+      parts[win] = {}
+    end
+  end
+  local tabs = parts[tree] and require('diffy.panels.guide').tabs(session)
+  if tabs then
+    table.insert(parts[tree], tabs)
+  end
+  local co = session.checkout
+  if co and parts[log] then
+    table.insert(parts[log], '⎇ checkout ' .. (co.commit and co.commit:sub(1, 7) or co.branch))
+  end
+  local resized = false
+  for _, win in ipairs(wins) do
+    local bar = table.concat(parts[win], '  ')
+    local old = vim.wo[win].winbar
+    if old ~= bar then
+      vim.wo[win].winbar = bar
+      -- only a winbar coming or going changes the rows to fill, not its text
+      resized = resized or (old == '') ~= (bar == '')
+    end
+  end
+  if resized then
+    M.relayout(session)
+  end
+end
+
 --- Open the column for a new session.
 function M.open_column(session)
   open_column_windows(session)
@@ -319,6 +354,7 @@ local function show_column(session)
     end
   end
   session.panel_hidden = false
+  M.winbars(session)
   M.relayout(session)
   for _, name in ipairs(session.column) do
     local spec = M.spec(name)
@@ -331,13 +367,28 @@ local function show_column(session)
   end
 end
 
---- Hide the column, leaving the cursor where it is; or show it and put the
---- cursor in the file tree (else the column's first view).
-function M.toggle_column(session)
-  if not session.panel_hidden then
-    hide_column(session)
-    return
+local function in_column(session, win)
+  for _, name in ipairs(session.column) do
+    if session.wins[name] == win then
+      return true
+    end
   end
+  return false
+end
+
+--- Hide the column; from inside it, back to the window you came to it from.
+local function hide_and_return(session)
+  local leaving = in_column(session, vim.api.nvim_get_current_win())
+  hide_column(session)
+  local from = session._column_from
+  if leaving and valid(from) and from ~= vim.api.nvim_get_current_win() then
+    vim.api.nvim_set_current_win(from)
+  end
+end
+
+--- Show the column if hidden and go to the file tree (else its first view).
+local function focus_column(session)
+  session._column_from = vim.api.nvim_get_current_win()
   show_column(session)
   local win = session.wins.tree
   if not (vim.tbl_contains(session.column, 'tree') and valid(win)) then
@@ -348,13 +399,31 @@ function M.toggle_column(session)
   end
 end
 
---- The buffer-local column toggle (`config.keymaps.toggle_panel`) on `buf`.
+--- `:Diffy panel`: hide the column, or show it and go to the file tree.
+function M.toggle_column(session)
+  if session.panel_hidden then
+    focus_column(session)
+  else
+    hide_and_return(session)
+  end
+end
+
+--- `keymaps.toggle_panel`: from the column, hide it; elsewhere, go to it.
+function M.panel_key(session)
+  if not session.panel_hidden and in_column(session, vim.api.nvim_get_current_win()) then
+    hide_and_return(session)
+  else
+    focus_column(session)
+  end
+end
+
+--- The buffer-local column key (`config.keymaps.toggle_panel`) on `buf`.
 function M.map_toggle(session, buf)
   local key = require('diffy').config.keymaps.toggle_panel
   if key and key ~= '' then
     session_mod.map(session, 'n', key, function()
-      M.toggle_column(session)
-    end, { buffer = buf, nowait = true, desc = 'toggle panels' })
+      M.panel_key(session)
+    end, { buffer = buf, nowait = true, desc = 'go to the panels, or hide them' })
   end
 end
 

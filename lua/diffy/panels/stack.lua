@@ -213,7 +213,8 @@ local function counts_line(session, h, side)
   for _, name in ipairs(session.stack.names) do
     local n = h[side][name]
     if n and n > 0 then
-      table.insert(parts, plural(n, spec(name).peek.noun))
+      local noun = spec(name).peek.noun
+      table.insert(parts, plural(n, type(noun) == 'function' and noun(session) or noun))
     end
   end
   if #parts == 0 then

@@ -9,8 +9,8 @@ M.config = {
   -- (commits), 'threads' (review threads). Any other view opens in a float.
   column = { 'tree', 'log' },
   keymaps = {
-    -- buffer-local in every diffy window: hide the panel column, or show it
-    -- and go to the file tree
+    -- buffer-local in every diffy window: go to the panel column (showing it
+    -- if hidden), or from the column, hide it
     toggle_panel = '<leader>e',
     -- in the diff windows: mark the file shown viewed, or unmark it
     toggle_viewed = '<leader>dm',
@@ -22,8 +22,15 @@ M.config = {
     viewed_diff = '<leader>dM',
     -- in the file tree: the same for the file at the cursor
     tree_viewed_diff = 'M',
+    -- in the diff windows (a visual selection too) and on a guide row: hand
+    -- the lines, with the guide and the comments on them, or the guide
+    -- section to `send_to_agent`
+    send_to_agent = '<leader>da',
   },
-  -- copied to `+` by `:Diffy review agent`; %s is the absolute path of review.md
+  -- `function(text, ctx)`: gives `text` (markdown) to your agent; `ctx` is the
+  -- same as plain data (:help diffy-agent). nil copies `text` to `+`.
+  send_to_agent = nil,
+  -- sent by `:Diffy review agent`; %s is the absolute path of review.md
   review_prompt = 'Read %s and address each review comment. Reply per comment id with what you changed, and tick its "- [ ] resolved" box in that file once it is handled.',
   -- GitHub avatars in comment headers, on terminals with the kitty graphics
   -- protocol (needs curl and ImageMagick)
@@ -32,6 +39,12 @@ M.config = {
   -- `:Diffy branch`; `false` turns it off. `read_interval`: seconds between
   -- reads while the session's tab is current, 0 for no timer.
   github = { read_interval = 300 },
+  -- the guide tab (:help diffy-guide). `agent`: what writes the guide on `gG`,
+  -- `'omp'` or a command list whose last argument diffy adds (the prompt) and
+  -- whose stdout is the guide's JSON; false reads only a guide.json written
+  -- by someone else. `auto`: the agent writes it on its own the first time
+  -- a session finds the branch's open pull request and no guide.
+  guide = { agent = false, auto = false },
 }
 
 function M.setup(opts)
@@ -241,6 +254,15 @@ function M.dispatch.panel()
   require('diffy.layout').toggle_column(s)
 end
 
+--- `:Diffy guide`: have the agent write the branch's guide (`gG`).
+function M.dispatch.guide()
+  local s = current_session()
+  if not s then
+    return
+  end
+  require('diffy.panels.guide').generate(s)
+end
+
 --- `:Diffy feedback`: describe what you don't like in a modal; `<C-s>` hands it to the
 --- `User DiffyFeedback` handlers (`data.text`), with the session as it was. Diffy doesn't store
 --- it: a handler that wants the session's state calls `debug_state()`.
@@ -333,7 +355,7 @@ function M.build(s, done)
           return
         end
         -- HEAD and the status in parallel, joined
-        local pending, status_entries = head_sha and 1 or 2, nil
+        local pending, status_entries = head_sha and 2 or 3, nil
         local function joined()
           pending = pending - 1
           if pending > 0 then
@@ -352,6 +374,7 @@ function M.build(s, done)
             s.setup_done = true
           end
           local function finish()
+            require('diffy.layout').winbars(s)
             require('diffy.layout').relayout(s)
             log_panel.render(s)
             tree_panel.render(s, function()
@@ -382,6 +405,7 @@ function M.build(s, done)
           status_entries = entries
           joined()
         end, s)
+        require('diffy.panels.guide').load(s, joined)
       end)
     end, s)
   end

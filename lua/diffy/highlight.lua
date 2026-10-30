@@ -55,6 +55,13 @@ local LINKS = {
   DiffyThreadLane4 = 'DiagnosticHint',
   DiffyThreadLane5 = 'DiagnosticOk',
   DiffyThreadLane6 = 'Constant',
+  -- the column's tabs: the one shown, the other
+  DiffyGuideTab = 'Title',
+  DiffyGuideTabInactive = 'Comment',
+  -- a guide item's function context, its note in the diff, a stale guide's warning
+  DiffyGuideScope = 'Comment',
+  DiffyGuideNote = 'DiagnosticInfo',
+  DiffyGuideStale = 'DiagnosticWarn',
 }
 
 -- number of DiffyThreadAuthor<n> groups, picked by login

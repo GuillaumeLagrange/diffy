@@ -1967,13 +1967,10 @@ function M.show_thread(session, thread, opts)
   local toggle = require('diffy').config.keymaps.toggle_panel
   if toggle and toggle ~= '' then
     map(session, 'n', toggle, function()
-      local showing = session.panel_hidden
-      require('diffy.layout').toggle_column(session)
+      require('diffy.layout').panel_key(session)
       -- the cursor went to the column: the float doesn't follow it
-      if showing then
-        M.close_thread(session)
-      end
-    end, { buffer = buf, nowait = true, desc = 'toggle panels' })
+      M.close_thread(session)
+    end, { buffer = buf, nowait = true, desc = 'go to the panels' })
   end
   M.map_last(session, buf)
 

@@ -462,8 +462,8 @@ function M.send_to_agent(session, body, cb)
           end
         end)
 
-        vim.fn.setreg('+', require('diffy').config.review_prompt:format(path))
-        vim.notify(('diffy: review written to %s, prompt copied to +'):format(path))
+        local ctx = { kind = 'review', root = session.root, branch = branch, path = path }
+        require('diffy.agent').send(require('diffy').config.review_prompt:format(path), ctx, ('review written to %s, prompt'):format(path))
         cb(true, {})
       end)
     end)

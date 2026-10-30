@@ -21,8 +21,10 @@ end
 --- With `opts.session`, completion is dropped (no notify, no `on_exit`) once
 --- the session is closed or `opts.gen ~= session.gen`, so callback chains
 --- stop before touching wiped buffers or clobbering a fresher render.
+--- `opts.on_stdout(chunk)` streams stdout on the main loop instead of
+--- collecting it (`res.stdout` is then nil).
 --- @param cmd string[]
---- @param opts { cwd: string, on_exit?: fun(res: vim.SystemCompleted), notify_on_error?: boolean, session?: table, gen?: integer, stdin?: string, env?: table<string, string> }
+--- @param opts { cwd: string, on_exit?: fun(res: vim.SystemCompleted), on_stdout?: fun(chunk: string), notify_on_error?: boolean, session?: table, gen?: integer, stdin?: string, env?: table<string, string> }
 --- @return vim.SystemObj
 function M.run(cmd, opts)
   opts = opts or {}
@@ -33,7 +35,14 @@ function M.run(cmd, opts)
   if #M.recent > RECENT_MAX then
     table.remove(M.recent, 1)
   end
-  return vim.system(cmd, { cwd = opts.cwd, text = true, stdin = opts.stdin, env = opts.env }, function(res)
+  local stdout = opts.on_stdout and function(_, data)
+    if data then
+      vim.schedule(function()
+        opts.on_stdout(data)
+      end)
+    end
+  end or nil
+  return vim.system(cmd, { cwd = opts.cwd, text = true, stdin = opts.stdin, env = opts.env, stdout = stdout }, function(res)
     entry.code = res.code
     entry.ms = math.floor((vim.uv.hrtime() - started) / 1e6)
     entry.stderr = res.code ~= 0 and (res.stderr or ''):sub(1, 2000) or nil

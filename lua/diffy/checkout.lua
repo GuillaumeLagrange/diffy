@@ -67,16 +67,7 @@ local function current_branch(root, cb, session)
 end
 
 local function winbar(session)
-  local win = session.wins and session.wins.log
-  if not (win and vim.api.nvim_win_is_valid(win)) then
-    return
-  end
-  local co = session.checkout
-  local bar = co and ('⎇ checkout ' .. (co.commit and co.commit:sub(1, 7) or co.branch)) or ''
-  if vim.wo[win].winbar ~= bar then
-    vim.wo[win].winbar = bar
-    require('diffy.layout').relayout(session)
-  end
+  require('diffy.layout').winbars(session)
 end
 
 local function redraw(session)

@@ -587,6 +587,9 @@ local function finish_read(session)
     cb()
   end
   run.ready({ session = session.id, event = 'pr' })
+  if l.attached and not l.offline and not session.closed then
+    require('diffy.panels.guide').auto(session)
+  end
 end
 
 --- Redraw the log (PR row, markers) and the threads.
@@ -2110,12 +2113,21 @@ function M.submit_recap(session, cb)
 end
 
 --- Send `plan` (`M.submit_recap`'s) but its `excluded` items as an `event`
---- review with `body`. `cb(ok, warnings)`.
+--- review with `body`. `cb(ok, warnings)`. Once it's on GitHub, fires
+--- `User DiffyReviewSubmitted` (`data = { url, number, event }`).
 function M.submit(session, plan, excluded, event, body, cb)
   local st = sync_state(session)
   st.held = true
   execute(session, plan, excluded, event, body, function(ok, notes)
     st.held = false
+    if ok then
+      local pr = session.review.pr
+      local data = { url = pr.url, number = pr.number, event = event }
+      -- scheduled: a failing handler doesn't stop the read below
+      vim.schedule(function()
+        vim.api.nvim_exec_autocmds('User', { pattern = 'DiffyReviewSubmitted', modeline = false, data = data })
+      end)
+    end
     -- the read brings the published comments, then syncs (excluded drafts
     -- go into a fresh pending review)
     M.read(session, function()

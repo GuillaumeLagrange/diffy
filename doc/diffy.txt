@@ -18,10 +18,16 @@ Features:
 - Mark files viewed. A mark holds as long as the file's change stays the
   same, through commits, amends and rebases. See |diffy-viewed|.
 
+- Read a branch through its guide: the change told as sections, each saying
+  why that part exists and what to look at, the diff folded to the section
+  you're in. An agent writes it (omp, or any command) or anyone else does,
+  in a JSON file. See |diffy-guide|.
+
 - Comment on lines and ranges, then hand the comments to an LLM agent as
   a markdown file (|diffy-review-local|) or submit them as a GitHub pull
   request review (|diffy-github|). Comments follow their lines across
-  commits, rebases and your edits. See |diffy-review|.
+  commits, rebases and your edits. See |diffy-review|. Lines of the diff or
+  a guide section go to your agent in one key (|diffy-agent|).
 
 - Read a pull request's threads, reviews and conversation next to the code;
   reply, resolve, edit. Your pending GitHub review follows your drafts as
@@ -38,11 +44,13 @@ Contents:
 - The panel column ....................................... |diffy-column|
 - Commits ................................................... |diffy-log|
 - Files .................................................... |diffy-tree|
+- The guide ............................................... |diffy-guide|
 - Viewed files ........................................... |diffy-viewed|
 - The diff ................................................. |diffy-diff|
 - Conflicts ........................................... |diffy-conflicts|
 - Review ................................................. |diffy-review|
 - Local review, for an LLM agent ................... |diffy-review-local|
+- Handing context to an agent ............................. |diffy-agent|
 - GitHub review .......................................... |diffy-github|
 - Highlight groups ................................... |diffy-highlights|
 - Events and functions ................................... |diffy-events|
@@ -170,6 +178,11 @@ events the current session offers, |:Diffy-threads| filters, paths for
   Show the file since you last marked it viewed, or go back from there
   (|diffy-since-viewed|).
 
+                                                                *:Diffy-guide*
+:Diffy guide
+  Have the agent (`guide.agent` in |diffy.config|) write the branch's guide,
+  or write it again (|diffy-guide|). In |:Diffy| and |:Diffy-branch|.
+
                                                               *:Diffy-threads*
 :Diffy threads [file] [author={name}] [state={state}] [review={id}]
   The threads view (|diffy-threads-view|): every review thread, grouped.
@@ -223,8 +236,8 @@ Defaults ~
 
     -- Buffer-local keys. Use `''` (empty string) to disable one.
     keymaps = {
-      -- In every diffy window: hide the panel column, or show it and go
-      -- to the file tree
+      -- In every diffy window: go to the panel column (showing it if
+      -- hidden); in the column, hide it
       toggle_panel = '<leader>e',
 
       -- In the diff windows: mark the file shown viewed, or unmark it
@@ -244,9 +257,17 @@ Defaults ~
 
       -- In the file tree: the same for the file under the cursor
       tree_viewed_diff = 'M',
+
+      -- In the diff windows (a visual selection too) and on a guide row:
+      -- hand the lines or the guide section to `send_to_agent`
+      send_to_agent = '<leader>da',
     },
 
-    -- Copied to the `+` register by `:Diffy review agent`
+    -- `function(text, ctx)`: gives `text` to your agent (|diffy-agent|);
+    -- nil copies it to the `+` register
+    send_to_agent = nil,
+
+    -- Sent by `:Diffy review agent`
     review_prompt = 'Read %s and address each review comment. Reply per '
       .. 'comment id with what you changed, and tick its "- [ ] resolved" '
       .. 'box in that file once it is handled.',
@@ -256,6 +277,10 @@ Defaults ~
 
     -- The GitHub layer; `false` turns it off
     github = { read_interval = 300 },
+
+    -- The guide tab; `agent` writes the guide: `'omp'` or a command.
+    -- `auto`: written on its own for a pull request without one
+    guide = { agent = false, auto = false },
   })
 <
 # Column ~
@@ -271,9 +296,15 @@ always in view, between the files and the commits: >lua
 <
 # Review prompt ~
 
-`review_prompt` is what `:Diffy review agent` copies to the `+` register
-for a local review; `%s` is the absolute path of the written `review.md`.
-See |diffy-review-local|.
+`review_prompt` is what `:Diffy review agent` hands to `send_to_agent`, or
+copies to the `+` register without one, for a local review; `%s` is the
+absolute path of the written `review.md`. See |diffy-review-local|.
+
+# Agent ~
+
+`send_to_agent` is how diffy hands text to your agent: the lines under
+`keymaps.send_to_agent`, a guide section, and `:Diffy review agent`'s
+prompt. See |diffy-agent|.
 
 # Avatars ~
 
@@ -286,6 +317,34 @@ badges in comment bodies, when the terminal can. See |diffy-avatars|.
 (|diffy-github|); `false` turns it off. `github.read_interval` is the
 number of seconds between reads while the session's tab is current; 0
 reads only on demand.
+
+# Guide ~
+
+`guide.agent` is what `gG` and |:Diffy-guide| run to write the branch's
+guide (|diffy-guide|). `false` (default): diffy only reads a guide someone
+else wrote. `'omp'` runs `omp -p --mode json --no-session --no-title
+--tools read,grep,glob,bash`. A list is a command: diffy adds the prompt as
+its last argument, runs it at the repository root and reads the guide's
+JSON from its stdout (alone, in a ```json block, or the outermost `{…}` in
+it). With `--mode json` in the list, stdout is read as omp's event stream
+instead: each tool the agent starts is a step shown while it runs, and its
+last message is the answer. >lua
+
+  require('diffy').setup({ guide = { agent = 'omp' } })
+  require('diffy').setup({
+    guide = { agent = { 'omp', '-p', '--mode', 'json', '--model', 'opus' } },
+  })
+<
+
+`guide.auto`: when a session reads the branch's open pull request
+(|diffy-github|) and the branch has no guide yet, the agent writes one, as
+`gG` would, but the files stay shown: the winbar's `Guide ↻ 0:42` tells
+the run, `<Tab>` shows it. Once per branch per Nvim: a run that failed
+isn't started again on the next read. A guide that exists, stale or not,
+is left alone; `gG` writes it again. >lua
+
+  require('diffy').setup({ guide = { agent = 'omp', auto = true } })
+<
 
 ------------------------------------------------------------------------------
                                                                 *diffy-column*
@@ -305,6 +364,10 @@ With `column = { 'tree', 'threads', 'log' }` (or anything else between
 them), each view gets its own window again, and either one left out of
 `column` opens in a float.
 
+With a guide to show (|diffy-guide|), the files' part has two tabs, named in
+the column's winbar: `Guide · Files`. `<Tab>` switches between them; the
+files keep their folders, marks and keys as they were.
+
 Keys, in the column ~
 
   `]]`            From the files, to the newest selected commit.
@@ -313,8 +376,11 @@ Keys, in the column ~
   `<leader>dl`    Back into the thread you were last in (|diffy-review|).
   `gX`            Open the pull request on github.com.
   `R`             Refresh everything (|diffy-diff|).
-  `<leader>e`     Hide the column, or show it and go to the files
+  `<leader>e`     Hide the column, back to the window you came from
                   (`keymaps.toggle_panel`).
+  `<leader>da`    On a guide row: the section to your agent
+                  (|diffy-agent|).
+  `<Tab>`         Switch between the guide and the files (|diffy-guide|).
 
 ------------------------------------------------------------------------------
                                                                    *diffy-log*
@@ -495,6 +561,109 @@ index, so |do|/|dp| or editing it and `:w` stages; for a Staged file the
 right side is the index.
 
 ------------------------------------------------------------------------------
+                                                                 *diffy-guide*
+A guide tells the branch's change (merge-base to HEAD, as in
+|:Diffy-branch|) as sections, the core of the change first: each a title, a
+text saying why that part exists and what deserves attention, and the
+changes it covers, each with an optional one-line note. It's kept in
+`.git/diffy/<branch>/guide.json`, written by the agent (`gG`,
+|:Diffy-guide|, or on its own for a pull request with `guide.auto`; see
+|diffy.config|) or by anyone following |diffy-guide-format|. `R` reads it
+again.
+
+The guide tab shows in |:Diffy| and |:Diffy-branch| when the branch has a
+guide or an agent is configured, and opens first when there's a guide: >
+
+   Guide · Files
+  ▾ 1 Retry failed uploads           0/2
+      upload.lua:41  function M.send  +7 -1
+      config.lua:1                    +1 -0
+  ▾ 2 Tests                          0/1
+      upload_spec.lua:12              +30 -0
+  ▾ Not in the guide                 0/1
+      README.md:8                     +2 -0
+<
+An item is a file, the line its first change starts on, git's function
+context and its `+added -removed`: every range a section gives a file is
+one item. A section's count is how many of its items' files are marked
+viewed, once the whole branch is selected.
+`Not in the guide` lists every change no section covers, so a guide can't
+leave anything out; a range that touches no change is dropped.
+
+Resting the cursor on a section or an item shows the section's text in the
+float beside the column (|diffy-commit-message|), rendered as markdown
+(code spans and bold without their markers, list items wrapped under their
+and for an item its file, line and notes.
+
+Opening an item selects the whole branch (every commit, not the working
+tree; |:Diffy| becomes |:Diffy-branch| first) and focuses its section: in
+the diff, the changes of the other sections and the unchanged lines more
+than 'diffopt' `context` away from the section's are folded, the fold
+naming the section it holds (`+-- 18 lines · 3 Tests`), and each range's
+note is a row above its first change. `zo`/`za` act on both windows; `zR`
+leaves the section and gives diff mode's folds back, and so do `<Tab>` to
+the files and selecting anything else.
+
+A guide written for another HEAD or merge-base says so on its first row
+(`⚠ written for a1b2c3d`, and `Guide (stale)` in the winbar): it's still
+listed, but no longer matched to the diff the session shows. `gG` writes it
+again.
+
+Keys, in the guide ~
+
+  `<CR>`          On an item: open it and move to the diff. On a section:
+                  collapse / expand it.
+  `o`             The same, staying in the column.
+  `]g` / `[g`     Next / previous item, in guide order (also in the diff
+                  windows; a count moves that many).
+  `]h` / `[h`     In the diff windows, with a section focused: its next /
+                  previous change in the file, from the cursor (a count
+                  moves that many). Otherwise, what they're mapped to
+                  without diffy (gitsigns' hunks).
+  `m`             Mark the item's file viewed, or unmark it; on a section,
+                  all its files (`keymaps.tree_toggle_viewed`).
+  `gG`            Have the agent write the guide, or write it again. While
+                  it runs, the winbar says `Guide ↻ 0:42` and the first rows
+                  the time, the agent's steps and what it's doing (`↻
+                  writing the guide · 0:42 · 7 steps`, then its last step);
+                  a message says when it's done.
+  `<leader>da`    The section to your agent; on an item, naming that change
+                  (|diffy-agent|).
+  `<Tab>`         The files.
+
+`]f`/`[f`, `]r`/`[r` and `<leader>du` work as in the files; the staging
+keys don't.
+
+                                                          *diffy-guide-format*
+The guide file ~
+
+One JSON object: >json
+
+  {
+    "base": "<merge-base sha>",
+    "head": "<HEAD sha the guide describes>",
+    "sections": [
+      {
+        "title": "Retry failed uploads",
+        "body": "Why this part exists; what to check.",
+        "hunks": [
+          { "path": "upload.lua", "side": "new", "start": 41, "end": 58,
+            "note": "4xx must not be retried" }
+        ]
+      }
+    ]
+  }
+<
+- `start`/`end`: 1-based lines of the file at `head` (`side` `"new"`, the
+  default), or at `base` for removed code (`"old"`). A range claims every
+  git hunk it touches, so it can take part of a hunk or several. Without
+  `start`/`end`: the whole file.
+- `path`: the file's path at `head` (its old path for a deleted file).
+- `body` is shown as written; `note` is one line.
+
+The agent answers the same object without `base`/`head`; diffy adds them.
+
+------------------------------------------------------------------------------
                                                                 *diffy-viewed*
 Marking a file viewed (`m` in the tree, `<leader>dm` in the diff,
 |:Diffy-viewed|) moves it to a `Viewed (n)` group at the top of its section
@@ -604,13 +773,15 @@ Keys, in either diff window ~
   `]r` / `[r`     Next / previous commit.
   `R`             Refresh everything: git state, panels, window sizes; and
                   read the pull request again (|diffy-github|).
-  `<leader>e`     Hide the panel column, the cursor staying where it is; or
-                  show it and go to the files (`keymaps.toggle_panel`).
+  `<leader>e`     Go to the panel column, showing it if hidden; there, the
+                  same key hides it and comes back (`keymaps.toggle_panel`).
+  `<leader>da`    The line, or the visual selection's lines, to your agent
+                  with the guide and the comments on them (|diffy-agent|).
 
 The review keys are in |diffy-review-keys|.
 
                                                                  *diffy-count*
-The `]`/`[` keys (`]f`, `]r`, `]t`, `]x`, here and in the panels) take a
+The `]`/`[` keys (`]f`, `]r`, `]t`, `]x`, `]h`, here and in the panels) take a
 count: `3]f` moves three files down, `2[r` two commits back, stopping at the
 first/last one.
 
@@ -909,8 +1080,9 @@ Available in |:Diffy| and |:Diffy-branch|.
 
 `:Diffy review agent` opens a box for an overall message (may be left
 empty); `<C-s>` writes `.git/diffy/<branch>/review.md` with that message and
-every comment not yet sent, marks them sent and copies `review_prompt`
-(|diffy.config|) to the `+` register: paste it to your agent.
+every comment not yet sent, marks them sent and hands `review_prompt`
+(|diffy.config|) to `send_to_agent` (|diffy-agent|), or copies it to the
+`+` register: paste it to your agent.
 
 Each comment says where it is now (its lines tracked to the worktree, the
 index for an index comment, with the code around them) and where it was
@@ -928,6 +1100,45 @@ of the threads view). A tick counts once, so a thread you reopen with `x`
 stays open.
 
 `:Diffy review clear` deletes your comments on the branch.
+
+------------------------------------------------------------------------------
+                                                                 *diffy-agent*
+Handing context to an agent ~
+
+`<leader>da` (`keymaps.send_to_agent`) hands your agent what you're looking
+at, as markdown:
+
+- In a diff window, the line under the cursor or a visual selection's
+  lines: the file, the revision, the code; the guide sections whose changes
+  they touch, with the items' notes (when the diff shows the guide's
+  branch, |diffy-guide|); the review comments on them.
+- On a guide section or item: the section's title and text, and its
+  changes, or the one item you're on.
+
+`:Diffy review agent` hands over its prompt the same way
+(|diffy-review-local|).
+
+diffy calls `send_to_agent(text, ctx)` from |diffy.config|, so the transport
+is yours: a terminal, sidekick.nvim, a socket. Without one, `text` goes to
+the `+` register. `ctx` is the same as plain data:
+
+- `kind`: `'lines'`, `'guide'` or `'review'`; `root`, `branch`.
+- `'lines'`: `path`, `rev` (`'WORKTREE'`, `'INDEX'`, `'HEAD'` or a sha),
+  `side` (`'left'`/`'right'`), `first`, `last`, `lines`, `guide` (`{ {
+  index, title, body, notes } }`), `threads` (`{ { resolved, comments = {
+  { author, body } } } }`).
+- `'guide'`: `section` (`{ index, title, body, items = { { path, line,
+  notes } } }`), `item` (one of them, or nil).
+- `'review'`: `path`, the written `review.md`.
+
+For example, with sidekick.nvim: >lua
+
+  require('diffy').setup({
+    send_to_agent = function(text)
+      require('sidekick.cli').send({ msg = text })
+    end,
+  })
+<
 
 ------------------------------------------------------------------------------
                                                                 *diffy-github*
@@ -1087,6 +1298,15 @@ Files and commits ~
 - `DiffySyncState`, `DiffySyncFailed` - the pull request row's `↻` and `⊘`
   / its `⚠`. Default: `Comment`, `DiagnosticWarn`.
 
+Guide ~
+
+- `DiffyGuideTab`, `DiffyGuideTabInactive` - the column's tabs: the one
+  shown / the other. Default: `Title`, `Comment`.
+- `DiffyGuideScope` - an item's function context. Default: `Comment`.
+- `DiffyGuideNote` - an item's note in the diff and the float. Default:
+  `DiagnosticInfo`.
+- `DiffyGuideStale` - a stale guide's warning. Default: `DiagnosticWarn`.
+
 Review ~
 
 - `DiffyThreadSummary` - comment summaries. Default: `Comment`.
@@ -1137,6 +1357,22 @@ example, to record it like an error: >lua
     callback = function(ev)
       local state = require('diffy').debug_state()
       my_reporter.record('diffy feedback: ' .. ev.data.text, state)
+    end,
+  })
+<
+
+                                                        *DiffyReviewSubmitted*
+`User DiffyReviewSubmitted`
+
+Fired once |:Diffy-review| `github` has put your review on GitHub, with
+`data.url` and `data.number` (the pull request) and `data.event` (`COMMENT`,
+`APPROVE` or `REQUEST_CHANGES`). Not fired when the submit fails. For
+example, to refresh something listing your review requests: >lua
+
+  vim.api.nvim_create_autocmd('User', {
+    pattern = 'DiffyReviewSubmitted',
+    callback = function(ev)
+      vim.system({ 'my-review-list', '--refresh' })
     end,
   })
 <

@@ -27,17 +27,35 @@ local function cursor_row(session)
   return require('diffy.panels.stack').cursor(session, 'log')
 end
 
+--- `'g<row>'` while the cursor rests on a section or item of the guide tab.
+local function guide_row(session)
+  local win = session.wins.tree
+  if not (valid(win) and vim.api.nvim_get_current_win() == win and require('diffy.panels.guide').shown(session)) then
+    return nil
+  end
+  local rel = require('diffy.panels.stack').cursor(session, 'tree')
+  local row = rel and (session.guide_rows or {})[rel]
+  return row and row.si and ('g' .. rel) or nil
+end
+
+--- What the float is about: a log row, a guide row, or nil.
+local function target(session)
+  return cursor_row(session) or guide_row(session)
+end
+
 local function commit_at(session, row)
   local e = row and session.entries and session.entries[row]
   return e and e.kind == 'commit' and e or nil
 end
 
---- Word-wrap `text` at `width` cells; long words are cut.
-local function wrap(text, width, out)
+--- Word-wrap `text` at `width` cells; long words are cut. `measure(s)`: the
+--- cells `s` takes (default `strdisplaywidth`).
+local function wrap(text, width, out, measure)
   if text == '' then
     table.insert(out, '')
     return
   end
+  measure = measure or vim.fn.strdisplaywidth
   local line = ''
   for word in text:gmatch('%S+') do
     while vim.fn.strdisplaywidth(word) > width do
@@ -57,7 +75,7 @@ local function wrap(text, width, out)
     end
     if line == '' then
       line = word
-    elseif vim.fn.strdisplaywidth(line) + 1 + vim.fn.strdisplaywidth(word) <= width then
+    elseif measure(line) + 1 + measure(word) <= width then
       line = line .. ' ' .. word
     else
       table.insert(out, line)
@@ -68,6 +86,8 @@ local function wrap(text, width, out)
     table.insert(out, line)
   end
 end
+
+M.wrap = wrap
 
 --- `uv.now()` stamp `t` as `just now` / `3 min ago` / `2 h ago`.
 local function ago(t)
@@ -167,10 +187,17 @@ local function pr_content(session, width)
 end
 
 --- Header and wrapped body for `msg`, plus highlight spans (`{ col, end,
---- group }` on the first line, or `{ line, col, end, group }`).
+--- group }` on the first line, or `{ line, col, end, group }`), and for
+--- markdown, the widest line as shown.
 local function content(session, msg, width)
   if msg.pr then
     return pr_content(session, width)
+  elseif msg.guide then
+    local c = require('diffy.panels.guide').float_content(session, width)
+    if c then
+      return c.lines, c.spans, c.width
+    end
+    return { '' }, {}
   end
   local sha = msg.sha:sub(1, 7)
   local header = sha .. '  ' .. msg.author .. '  ' .. msg.date
@@ -187,9 +214,9 @@ local function content(session, msg, width)
   return lines, spans
 end
 
---- Editor-relative config beside the log window, aligned with its cursor row.
-local function config(session, lines_fn, hints)
-  local log = session.wins.log
+--- Editor-relative config beside `host` (the log window), aligned with its cursor row.
+local function config(session, lines_fn, hints, host)
+  local log = host or session.wins.log
   local pos = vim.api.nvim_win_get_position(log)
   local is_float = vim.api.nvim_win_get_config(log).relative ~= ''
   -- a float's position is its frame's corner
@@ -202,10 +229,12 @@ local function config(session, lines_fn, hints)
     col = nil
   end
   room = math.max(10, math.min(MAX_WIDTH, room))
-  local lines, spans = lines_fn(room)
-  local width = 1
-  for _, l in ipairs(lines) do
-    width = math.max(width, vim.fn.strdisplaywidth(l))
+  local lines, spans, shown = lines_fn(room)
+  local width = shown or 1
+  if not shown then
+    for _, l in ipairs(lines) do
+      width = math.max(width, vim.fn.strdisplaywidth(l))
+    end
   end
   width = math.min(width, room)
   local height = math.max(1, math.min(#lines, vim.o.lines - 2 - vim.o.cmdheight - 2))
@@ -240,8 +269,16 @@ local function draw(session, msg)
   local st = state(session)
   local cfg, lines, spans = config(session, function(w)
     return content(session, msg, w)
-  end, msg.pr and { { 'gX', 'github.com' } } or nil)
+  end, msg.pr and { { 'gX', 'github.com' } } or nil, msg.guide and session.wins.tree or nil)
   local buf = session_mod.overlay(session, 'commitmsg', cfg, lines, require('diffy.highlight').CARD_HL)
+  -- the guide is markdown: code spans and bold shown, their markers hidden
+  if msg.guide then
+    pcall(vim.treesitter.start, buf, 'markdown')
+  else
+    vim.treesitter.stop(buf)
+  end
+  local wo = vim.wo[session.wins.commitmsg][0]
+  wo.conceallevel, wo.concealcursor = msg.guide and 2 or 0, 'nvic'
   local ns = session_mod.namespace(session, 'commitmsg')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for _, sp in ipairs(spans) do
@@ -265,6 +302,12 @@ end
 --- commit or the PR row.
 function M.update(session)
   local st = state(session)
+  local grow = guide_row(session)
+  if grow and st.suppressed ~= grow then
+    st.row = grow
+    draw(session, { guide = true })
+    return
+  end
   local row = cursor_row(session)
   local e = row and session.entries and session.entries[row]
   local pr_row = e and e.kind == 'pr' and session.layer and session.layer.attached
@@ -308,48 +351,55 @@ end
 function M.setup(session)
   local buf = session.bufs.log
   local group = session.augroup
-  vim.api.nvim_create_autocmd({ 'CursorMoved', 'WinEnter' }, {
-    group = group,
-    buffer = buf,
-    callback = function()
-      local st = state(session)
-      local row = cursor_row(session)
-      if row == st.last then
-        return
-      end
-      st.last = row
-      st.suppressed = nil
-      st.seq = st.seq + 1
-      local seq = st.seq
-      vim.defer_fn(function()
-        if not session.closed and st.seq == seq then
-          M.update(session)
+  -- the guide's rows are the tree's, in a window of their own when not stacked
+  local bufs = { buf }
+  if session.bufs.tree and session.bufs.tree ~= buf then
+    table.insert(bufs, session.bufs.tree)
+  end
+  for _, b in ipairs(bufs) do
+    vim.api.nvim_create_autocmd({ 'CursorMoved', 'WinEnter' }, {
+      group = group,
+      buffer = b,
+      callback = function()
+        local st = state(session)
+        local row = target(session)
+        if row == st.last then
+          return
         end
-      end, DEBOUNCE_MS)
-    end,
-  })
-  vim.api.nvim_create_autocmd({ 'WinLeave', 'BufLeave' }, {
-    group = group,
-    buffer = buf,
-    callback = function()
-      local st = state(session)
-      st.seq = st.seq + 1
-      st.last = nil
-      if valid(session.wins.commitmsg) then
-        vim.schedule(function()
-          if not session.closed and cursor_row(session) == nil then
-            M.close(session)
-            run.ready({ session = session.id, event = 'commitmsg' })
+        st.last = row
+        st.suppressed = nil
+        st.seq = st.seq + 1
+        local seq = st.seq
+        vim.defer_fn(function()
+          if not session.closed and st.seq == seq then
+            M.update(session)
           end
-        end)
-      end
-    end,
-  })
+        end, DEBOUNCE_MS)
+      end,
+    })
+    vim.api.nvim_create_autocmd({ 'WinLeave', 'BufLeave' }, {
+      group = group,
+      buffer = b,
+      callback = function()
+        local st = state(session)
+        st.seq = st.seq + 1
+        st.last = nil
+        if valid(session.wins.commitmsg) then
+          vim.schedule(function()
+            if not session.closed and target(session) == nil then
+              M.close(session)
+              run.ready({ session = session.id, event = 'commitmsg' })
+            end
+          end)
+        end
+      end,
+    })
+  end
   vim.api.nvim_create_autocmd({ 'WinResized', 'VimResized' }, {
     group = group,
     callback = function()
       local st = state(session)
-      if valid(session.wins.commitmsg) and st.shown and cursor_row(session) then
+      if valid(session.wins.commitmsg) and st.shown and target(session) then
         draw(session, st.shown)
       end
     end,
@@ -357,7 +407,7 @@ function M.setup(session)
   require('diffy.panels.stack').map(session, 'log', 'n', '<Esc>', function()
     local st = state(session)
     local shown = valid(session.wins.commitmsg)
-    st.suppressed = cursor_row(session)
+    st.suppressed = target(session)
     st.seq = st.seq + 1
     M.close(session)
     return shown

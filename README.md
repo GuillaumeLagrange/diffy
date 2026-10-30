@@ -46,11 +46,14 @@ In a session:
 | `s`/`u`, `-` | files | stage/unstage a file |
 | `m` / `<leader>dm` | files / diff | mark a file viewed |
 | `M` / `<leader>dM` | files / diff | diff a file since you last marked it viewed |
+| `<Tab>`, `]g`/`[g`, `gG` | column, diff | the guide: switch to it, next/previous item, have the agent write it |
 | `gc` | diff | comment on the line or the visual range |
 | `<CR>`, `]t`/`[t` | diff | enter the thread under the cursor, go to the next/previous one |
 | `<leader>dc` | diff, column | every review thread |
 | `R` | diff, column | refresh |
 
 `:Diffy review agent` sends your comments to your agent (a markdown file and a prompt in the `+`
-register); `:Diffy review github` submits them as a review on the branch's open pull request. Closing
+register); `:Diffy review github` submits them as a review on the branch's open pull request. With
+`guide = { agent = 'omp' }`, `gG` has an agent write the branch's guide: the change as sections that
+say why each part exists, the diff folded to the one you're reading (`:help diffy-guide`). Closing
 the tab ends the session.

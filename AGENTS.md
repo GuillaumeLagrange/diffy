@@ -38,11 +38,19 @@ lua/diffy/
   panels/log.lua        commits view: entries per view kind (the `Working tree` entry, commits), the GitHub layer's
                         PR row and review markers, the throwaway rows (`push`: a rewritten commit's threads; `since`: one
                         file since it was last viewed), selection keys
-  panels/commitmsg.lua  float beside the column while the log cursor rests on a commit (its message) or the PR row
+  panels/commitmsg.lua  float beside the column while the cursor rests on a commit (its message), the PR row or a
+                        guide row (the section's text)
   panels/tree.lua       files view: tree rows (Unstaged/Staged sections for the working tree, Viewed groups), right blob
                         ids for worktree files (written, for the since-viewed view), staging and viewed keys, file
-                        navigation
+                        navigation; hands its rows and keys to the guide while the guide tab is shown
+  panels/guide.lua      the guide tab (`session.column_tab`): rows drawn through the tree's (`stack.set_lines(…,
+                        'tree', …)`), the winbar tabs, opening an item (whole-branch selection), the focused section's
+                        manual folds, notes and `]h`/`[h` in the diff, `gG`
+  guide.lua             guide.json: parse, match to `git diff -U0 base head` (`resolve`, `Not in the guide`), focus
+                        fold ranges (`regions`, pure), the agent run (`generate`)
   viewed.lua            viewed marks (blob pair per path) in viewed.json: shared per nvim, watched across nvims
+  agent.lua             `<leader>da` and `:Diffy review agent`'s hand-off: markdown text + plain `ctx` to
+                        `config.send_to_agent`, else `+`
   diffpair.lua          the two diff windows: buffers, diff mode, winbars, b:diffy_title, shared keys,
                         edits (redecorate on change, rebuild on write)
   folds.lua             the diff windows' folds: 'foldtext' naming the change's treesitter scopes, zo/za keeping
@@ -76,8 +84,9 @@ Conventions the code relies on:
   Every buffer diffy creates goes through `session.register_buffer` (`bufhidden=wipe`; fugitive blobs
   `delete`, so jumplist/tag stack entries pointing at them survive); every buffer-local
   map through `session.map` (desc prefixed `diffy: `, removed on teardown or when a real file leaves a diffy
-  window; sessions showing the same buffer share one map that runs the current tab's session's handler,
-  deleted with the last one); every namespace through `session.namespace`. Window options are only set
+  window, giving back the buffer-local map it shadowed; sessions showing the same buffer share one map that
+  runs the current tab's session's handler, deleted with the last one); every namespace through
+  `session.namespace`. Window options are only set
   inside the session tab.
   A non-focusable float laid over other windows (peeks, the tree's hover, the commit message) goes through
   `session.overlay`, which unbinds it from the diff. `teardown` is idempotent and runs from every close path.
@@ -99,8 +108,8 @@ Conventions the code relies on:
   Events: `render`, `select`, `open_row`, `review`, `thread`, `threads`, `compose`, `conflict`,
   `checkout`, `restore`, `pr` (a GitHub layer read finished, attached or not; `:Diffy pr` warning), `sync`
   (a background sync into the pending review finished, or had nothing to do), `recap` (the list under
-  `:Diffy review github`'s message is filled), `close`, `commitmsg`, `feedback`, `viewed`. Tests wait on
-  these; never sleep.
+  `:Diffy review github`'s message is filled), `close`, `commitmsg`, `feedback`, `viewed`, `guide` (the guide
+  tab switched, or the agent started or finished writing). Tests wait on these; never sleep.
 - **The GitHub layer.** `:Diffy` and `:Diffy branch` render without GitHub; `github.start` then reads
   (`session.layer`). Attaching swaps `session.review.backend` to `review/github.lua` and adds the
   published threads and `review.pr`; detaching swaps back to `review/local.lua`. The log's layer rows
@@ -113,7 +122,8 @@ Conventions the code relies on:
   shows a thread), and for authoring `save(session, thread, comment?)`, `clear(session, cb)`, and on GitHub
   the staging calls `toggle_resolve`/`stage_edit`/`drop_edit`/`toggle_delete`. Sending isn't a backend
   call: `:Diffy review agent` is `review/local.lua`'s `send_to_agent` whichever backend is on, `:Diffy
-  review github` is `review/github.lua`'s `submit_recap` then `submit`. Both place through `review/track.lua`,
+  review github` is `review/github.lua`'s `submit_recap` then `submit` (which fires `User
+  DiffyReviewSubmitted` once it's on GitHub). Both place through `review/track.lua`,
   so a thread shows in every view it tracks to, whichever backend wrote it. `review/ui.lua` only draws what
   `place` returns and caches it on `thread._place`.
 - **One store per branch.** Your comments live in `.git/diffy/<branch>/threads.json`, keyed by

@@ -50,6 +50,12 @@ end
 function M.foldtext()
   local default = vim.fn.foldtext()
   local fe = vim.v.foldend
+  -- a guide fold holding another section's changes says which (panels/guide.lua)
+  for _, f in ipairs(vim.w.diffy_guide_folds or {}) do
+    if f[1] == vim.v.foldstart and f[3] then
+      return ('+-%s%3d lines · %s'):format(vim.v.folddashes, fe - f[1] + 1, f[3])
+    end
+  end
   if not vim.wo.diff or fe >= vim.fn.line('$') then
     return default
   end
@@ -84,6 +90,9 @@ function M.open(key)
   local fs, fe = vim.fn.foldclosed(lnum), vim.fn.foldclosedend(lnum)
   local row = vim.fn.winline()
   vim.cmd('normal! ' .. count .. key)
+  if vim.w.diffy_guide_folds then
+    require('diffy.panels.guide').sync_fold(vim.api.nvim_get_current_win(), lnum)
+  end
   if fs == -1 or not vim.wo.diff or vim.fn.foldclosed(lnum) ~= -1 then
     return
   end

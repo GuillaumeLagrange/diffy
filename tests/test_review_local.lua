@@ -1303,22 +1303,16 @@ T['<CR> in the threads view goes to the thread\'s line and hovers that thread, n
   child.cmd('Diffy close')
 end
 
-T['<leader>e in the thread float hides the column, or shows it and goes to the file tree'] = function()
+T['<leader>e in the thread float goes to the file tree, closing the float'] = function()
   open_default()
   local w = ui.wins(child)
   write_comment(w.right, 5, 'a thread')
   child.api.nvim_set_current_win(w.right)
   child.type_keys('1G', '5G', '<CR>')
-  local float = ui.thread_float(child)
-  MiniTest.expect.equality(float.focused, true)
-
-  child.type_keys('\\e')
-  MiniTest.expect.equality(ui.layout(child).tree, vim.NIL)
   MiniTest.expect.equality(ui.thread_float(child).focused, true)
 
   child.type_keys('\\e')
-  MiniTest.expect.equality(ui.layout(child).tree ~= vim.NIL, true)
-  MiniTest.expect.equality(child.api.nvim_get_current_win(), ui.wins(child).tree)
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), w.tree)
   MiniTest.expect.equality(ui.thread_float(child), vim.NIL)
 
   child.cmd('Diffy close')
@@ -1515,6 +1509,56 @@ T[':Diffy completes subcommands, then what the session review and threads take']
   MiniTest.expect.equality(complete('Diffy review '), { 'agent', 'clear' })
   MiniTest.expect.equality(complete('Diffy review github '), {})
   MiniTest.expect.equality(complete('Diffy threads state=o'), { 'state=open', 'state=outdated' })
+  child.cmd('Diffy close')
+end
+
+--- Have `send_to_agent` record what it gets in `_G.sent`.
+local function record_agent()
+  child.lua([[
+    _G.sent = {}
+    require('diffy').setup({ send_to_agent = function(text, ctx) table.insert(_G.sent, { text = text, ctx = ctx }) end })
+  ]])
+end
+
+T['<leader>da on selected diff lines hands the agent the code and the comments on it'] = function()
+  record_agent()
+  open_default()
+  local w = ui.wins(child)
+  write_comment(w.right, 3, 'why uncommitted?\nsecond line')
+  child.api.nvim_set_current_win(w.right)
+  child.type_keys('2G', 'V', '4G', '\\da')
+  local sent = child.lua_get('_G.sent')
+  MiniTest.expect.equality(#sent, 1)
+  local ctx = sent[1].ctx
+  MiniTest.expect.equality({ ctx.kind, ctx.path, ctx.rev, ctx.side, ctx.first, ctx.last }, { 'lines', 'f.txt', 'WORKTREE', 'right', 2, 4 })
+  MiniTest.expect.equality(ctx.lines, { '2', 'uncommitted', '4' })
+  MiniTest.expect.equality(ctx.threads[1].comments[1].body, 'why uncommitted?\nsecond line')
+  MiniTest.expect.equality(sent[1].text, table.concat({
+    '`f.txt` in the working tree, lines 2-4:',
+    '```text',
+    '2',
+    'uncommitted',
+    '4',
+    '```',
+    '',
+    'Review comments on these lines:',
+    '- ' .. ctx.threads[1].comments[1].author .. ': why uncommitted?',
+    '  second line',
+  }, '\n'))
+  MiniTest.expect.equality(child.fn.mode(), 'n')
+
+  child.cmd('Diffy close')
+end
+
+T['with send_to_agent, :Diffy review agent hands it the prompt naming review.md'] = function()
+  record_agent()
+  open_default()
+  write_comment(ui.wins(child).right, 3, 'a comment')
+  send_review('')
+  local sent = child.lua_get('_G.sent')
+  MiniTest.expect.equality(#sent, 1)
+  MiniTest.expect.equality({ sent[1].ctx.kind, sent[1].ctx.path }, { 'review', review_file('review.md') })
+  MiniTest.expect.equality(sent[1].text:find(review_file('review.md'), 1, true) ~= nil, true)
   child.cmd('Diffy close')
 end
 

@@ -112,6 +112,12 @@ local function release(session, km)
   if not next(entry.handlers) then
     shared[km.buf][km.mode][km.lhsraw] = nil
     pcall(vim.keymap.del, km.mode, km.lhs, { buffer = km.buf })
+    -- give back the buffer-local map diffy shadowed (gitsigns' `]h` on a real file)
+    if entry.shadowed and vim.api.nvim_buf_is_valid(km.buf) then
+      vim.api.nvim_buf_call(km.buf, function()
+        vim.fn.mapset(entry.shadowed)
+      end)
+    end
   end
 end
 

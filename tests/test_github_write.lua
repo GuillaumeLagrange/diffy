@@ -1016,6 +1016,40 @@ T['the list under the GitHub submit message shows what goes out; a draft left ou
   child.cmd('Diffy close')
 end
 
+T['a GitHub submit fires User DiffyReviewSubmitted with the PR and verdict; a failed one does not'] = function()
+  fake_only()
+  setup_empty()
+  open_pr()
+  child.lua([[
+    _G.__submitted = {}
+    vim.api.nvim_create_autocmd('User', {
+      pattern = 'DiffyReviewSubmitted',
+      callback = function(ev)
+        table.insert(_G.__submitted, ev.data)
+      end,
+    })
+  ]])
+
+  child.lua([[_G.__fake_state.fail = { addPullRequestReview = 'boom' }]])
+  ui.capture_warnings(child)
+  submit_to_github('refused')
+  child.type_keys('<C-s>')
+  wait_for(function()
+    return table.concat(ui.warnings(child, 'WARN'), '\n'):find('submit failed', 1, true) ~= nil
+  end, 'the failed submit')
+  eq(child.lua_get('_G.__submitted'), {})
+
+  child.lua([[_G.__fake_state.fail = nil]])
+  submit_to_github('hooked')
+  child.type_keys('<C-s>')
+  wait_for(function()
+    return #child.lua_get('_G.__submitted') > 0
+  end, 'the event')
+  local data = child.lua_get('_G.__submitted')[1]
+  eq({ data.number, data.event, data.url ~= nil }, { pr_number(), 'COMMENT', true })
+  child.cmd('Diffy close')
+end
+
 T['a GitHub submit sends the review, then staged edits and deletions, then resolves; a failing one stays staged and the next sync retries it'] = function()
   fake_only()
   setup_pending()

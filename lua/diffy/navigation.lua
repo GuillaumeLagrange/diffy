@@ -117,13 +117,13 @@ function M.setup(session)
   })
   -- A picker jump re-sets 'foldmethod' after the pair is swapped in (snacks'
   -- "fix folds" hack schedules `foldmethod=expr`): with diff mode's
-  -- foldlevel=0 that folds the whole file.
+  -- foldlevel=0 that folds the whole file. The guide's manual folds stay.
   vim.api.nvim_create_autocmd('OptionSet', {
     group = session.augroup,
     pattern = 'foldmethod',
     callback = function()
       local win = vim.api.nvim_get_current_win()
-      if (win == session.wins.left or win == session.wins.right) and vim.wo[win].diff and vim.wo[win].foldmethod ~= 'diff' then
+      if (win == session.wins.left or win == session.wins.right) and vim.wo[win].diff and vim.wo[win].foldmethod ~= 'diff' and not vim.w[win].diffy_guide_folds then
         vim.wo[win].foldmethod = 'diff'
       end
     end,

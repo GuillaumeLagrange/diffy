@@ -704,8 +704,11 @@ function M.open_row(session, row, opts)
   diffpair.show(session, left_spec, right_spec)
 end
 
+-- the guide tab draws its own rows over the tree's
 local function set_tree_cursor(session, lnum)
-  stack.set_cursor(session, 'tree', lnum)
+  if not require('diffy.panels.guide').shown(session) then
+    stack.set_cursor(session, 'tree', lnum)
+  end
 end
 
 --- Whether `path` is one of the files of the current selection.
@@ -780,6 +783,11 @@ function M.mark_current(session)
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then
     return
   end
+  local guide = require('diffy.panels.guide')
+  if guide.shown(session) then
+    guide.mark_current(session)
+    return
+  end
   local ns = require('diffy.session').namespace(session, 'tree_current')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for i, row in ipairs(session.tree_rows or {}) do
@@ -805,7 +813,7 @@ local function hover(session)
   local session_mod = require('diffy.session')
   local win = session.wins.tree
   local row, lnum
-  if win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_get_current_win() == win then
+  if win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_get_current_win() == win and not require('diffy.panels.guide').shown(session) then
     lnum = stack.cursor(session, 'tree')
     row = lnum and (session.tree_rows or {})[lnum]
   end
@@ -881,7 +889,18 @@ end
 
 --- Re-render the current rows fitted to the tree window's width (no git).
 function M.redraw(session)
-  visible_rows(session)
+  if session.tree_all then
+    visible_rows(session)
+  end
+  local guide = require('diffy.panels.guide')
+  if guide.shown(session) then
+    guide.redraw(session)
+    return
+  end
+  guide.clear(session)
+  if not session.tree_all then
+    return
+  end
   local buf = session.bufs.tree
   local width = tree_width(session)
   session.tree_width = width
@@ -1125,7 +1144,7 @@ end
 --- pushed on `session.viewed_undo` for `undo_viewed`. The since-viewed
 --- view's pair isn't the file's: there, it goes back to the view it was
 --- opened from and marks the file shown in it.
-local function set_viewed(session, rows, on)
+local function set_viewed(session, rows, on, opts)
   if session.pair and session.pair.top.kind == 'since' then
     require('diffy.panels.log').leave_since(session, function()
       for _, row in ipairs(session.tree_all or {}) do
@@ -1167,7 +1186,7 @@ local function set_viewed(session, rows, on)
     table.insert(session.viewed_undo, { entries = changed, on = on, shown = shown_marked and before[cur].entry })
   end
   viewed.set(session, entries, on)
-  if shown_marked then
+  if shown_marked and not (opts and opts.stay) then
     local index = {}
     for i, row in ipairs(session.tree_all) do
       if row.kind == 'file' then
@@ -1244,6 +1263,21 @@ function M.toggle_viewed_at_cursor(session)
     all = all and r.viewed
   end
   set_viewed(session, rows, not all)
+end
+
+--- The guide's `m`: mark the files at `paths` (a set) viewed, or unmark them
+--- all when they all are; the file shown stays.
+function M.toggle_viewed_paths(session, paths)
+  local rows, all = {}, true
+  for _, row in ipairs(session.tree_all or {}) do
+    if row.kind == 'file' and paths[row.entry.path] then
+      table.insert(rows, row)
+      all = all and row.viewed
+    end
+  end
+  if #rows > 0 then
+    set_viewed(session, rows, not all, { stay = true })
+  end
 end
 
 local function current_row(session)
@@ -1388,8 +1422,15 @@ function M.open_real_file(session)
 end
 
 function M.setup(session)
+  local guide = require('diffy.panels.guide')
+  -- while the guide is shown, its rows take the keys (`guide.key`)
   local function map(s, modes, lhs, rhs, opts)
-    stack.map(s, 'tree', modes, lhs, rhs, opts)
+    stack.map(s, 'tree', modes, lhs, function()
+      if guide.shown(s) then
+        return guide.key(s, lhs, rhs)
+      end
+      return rhs()
+    end, opts)
   end
   local buf = session.bufs.tree
   map(session, 'n', '<CR>', function()
@@ -1486,6 +1527,7 @@ function M.setup(session)
       end
     end,
   })
+  guide.setup(session, buf)
 end
 
 M.view = {
@@ -1498,14 +1540,29 @@ M.view = {
   end,
   -- in the shared column window (panels/stack.lua)
   peek = {
-    noun = 'file',
+    noun = function(session)
+      return require('diffy.panels.guide').shown(session) and 'change' or 'file'
+    end,
     counts = function(session, rel)
+      if require('diffy.panels.guide').shown(session) then
+        local row = (session.guide_rows or {})[rel]
+        return row ~= nil and row.kind == 'item'
+      end
       local row = (session.tree_rows or {})[rel]
       return row ~= nil and row.kind == 'file'
     end,
   },
-  --- `[[`: the file shown, else the first file
+  --- `[[`: the file shown, else the first file (in the guide: the item shown, else the first row)
   anchor = function(session)
+    if require('diffy.panels.guide').shown(session) then
+      local cur = session.guide_current
+      for i, row in ipairs(session.guide_rows or {}) do
+        if cur and row.kind == 'item' and row.si == cur.si and row.ii == cur.ii then
+          return i
+        end
+      end
+      return 1
+    end
     local first
     for i, row in ipairs(session.tree_rows or {}) do
       if is_current(session, row) then

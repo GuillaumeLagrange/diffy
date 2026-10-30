@@ -93,7 +93,29 @@ function M.set_nav_keymaps(session, buf)
       require('diffy.folds').open(key)
     end, { buffer = buf, desc = 'open fold around the change' })
   end
+  map(session, 'n', 'zR', function()
+    -- the guide's folds are manual and per window: leave them for diff mode's
+    if vim.w.diffy_guide_folds then
+      require('diffy.panels.guide').unfocus(session)
+    else
+      vim.cmd('normal! ' .. vim.v.count1 .. 'zR')
+    end
+  end, { buffer = buf, desc = 'open every fold' })
+  map(session, 'n', ']g', function()
+    require('diffy.panels.guide').move(session, vim.v.count1)
+  end, { buffer = buf, desc = 'next guide item' })
+  map(session, 'n', '[g', function()
+    require('diffy.panels.guide').move(session, -vim.v.count1)
+  end, { buffer = buf, desc = 'previous guide item' })
+  -- outside a focused section, `]h`/`[h` stay what they were (gitsigns' hunks)
+  map(session, 'n', ']h', function()
+    return require('diffy.panels.guide').move_hunk(session, vim.v.count1)
+  end, { buffer = buf, fallback = true, desc = 'next change of the guide section' })
+  map(session, 'n', '[h', function()
+    return require('diffy.panels.guide').move_hunk(session, -vim.v.count1)
+  end, { buffer = buf, fallback = true, desc = 'previous change of the guide section' })
   require('diffy.layout').map_panel_keys(session, buf)
+  require('diffy.agent').map_diff(session, buf)
   require('diffy.review.ui').setup_diff_keymaps(session, buf)
 end
 
@@ -336,6 +358,7 @@ function M.show(session, left_spec, right_spec)
     align_left(session)
   end
 
+  require('diffy.panels.guide').decorate(session)
   require('diffy.review.ui').decorate(session)
 end
 

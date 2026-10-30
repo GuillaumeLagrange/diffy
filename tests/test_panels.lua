@@ -42,9 +42,9 @@ T['the panel toggle hides the column (diff spans the width, ]f still works) and 
   local w = ui.wins(child)
   local before_hide = ui.layout(child)
 
-  -- hide with the buffer-local key from a diff window
+  -- from a diff window: the first press goes to the column, the second hides it
   child.api.nvim_set_current_win(w.left)
-  child.type_keys('\\e')
+  child.type_keys('\\e', '\\e')
   local hidden = ui.layout(child)
   MiniTest.expect.equality({ hidden.tree, hidden.log }, { vim.NIL, vim.NIL })
   MiniTest.expect.equality(#tab_wins(), 2)
@@ -76,8 +76,9 @@ T['the panel toggle hides the column (diff spans the width, ]f still works) and 
   ui.wait_ready(child)
   MiniTest.expect.equality(ui.layout(child).right.path, 'a.txt')
 
-  -- hidden again, then closed: post_case's leak check covers the teardown
-  child.type_keys('\\e')
+  -- hidden again, from the diff <CR> went to, then closed: post_case's leak
+  -- check covers the teardown
+  child.cmd('Diffy panel')
   MiniTest.expect.equality(ui.layout(child).tree, vim.NIL)
   child.cmd('Diffy close')
 end
@@ -118,7 +119,7 @@ T['a count on ]f/[f moves that many files, stopping at the first/last'] = functi
   child.cmd('Diffy close')
 end
 
-T['<leader>e hides the column leaving the cursor in the diff, and shows it again with the cursor in the file tree'] = function()
+T['<leader>e in the diff goes to the file tree; there it hides the column, back to the diff window you came from'] = function()
   repo = Repo.new():commit('Base', { ['a.txt'] = Repo.lines(5, 'a') })
   vim.fn.writefile({ 'a1', 'changed' }, repo.dir .. '/a.txt')
   child.fn.chdir(repo.dir)
@@ -128,6 +129,9 @@ T['<leader>e hides the column leaving the cursor in the diff, and shows it again
   local w = ui.wins(child)
 
   child.api.nvim_set_current_win(w.right)
+  child.type_keys('\\e')
+  MiniTest.expect.equality(child.api.nvim_get_current_win(), w.tree)
+
   child.type_keys('\\e')
   MiniTest.expect.equality(ui.layout(child).tree, vim.NIL)
   MiniTest.expect.equality(child.api.nvim_get_current_win(), w.right)
